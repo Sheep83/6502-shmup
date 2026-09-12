@@ -1,0 +1,78 @@
+{
+  // Every task shells out to the Makefile on purpose. The previous version of
+  // this file carried its own hand-written KickAssembler and x64sc command
+  // lines, inherited from another project: it built `shooter.prg` from this
+  // repo's sources and launched VICE with no `-default`, so the user's saved
+  // vicerc applied and a joystick keyset swallowed the SPACE key that selects
+  // fixtures. One definition of the toolchain, in the Makefile, cannot drift.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "C64: Build (shmup.prg)",
+      "type": "shell",
+      "command": "make build",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "C64: Build disk image (shmup.d64)",
+      "type": "shell",
+      "command": "make d64",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "C64: Run in VICE",
+      "type": "shell",
+      "command": "make run",
+      "options": { "cwd": "${workspaceFolder}" },
+      // VICE is held in the FOREGROUND (see the Makefile). This task therefore
+      // stays "running" for as long as the emulator is open, which is the point:
+      // when make returned immediately, VS Code killed the task's process tree
+      // and the emulator with it, and the task looked like it did nothing.
+      // Its own dedicated panel, so a build task cannot reuse and close it.
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "always",
+        "focus": false,
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "C64: Run in VICE from disk",
+      "type": "shell",
+      "command": "make run-d64",
+      "options": { "cwd": "${workspaceFolder}" },
+      // VICE is held in the FOREGROUND (see the Makefile). This task therefore
+      // stays "running" for as long as the emulator is open, which is the point:
+      // when make returned immediately, VS Code killed the task's process tree
+      // and the emulator with it, and the task looked like it did nothing.
+      // Its own dedicated panel, so a build task cannot reuse and close it.
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "always",
+        "focus": false,
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "C64: P0 automated suite",
+      "type": "shell",
+      "command": "make test",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "C64: Clean",
+      "type": "shell",
+      "command": "make clean",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}

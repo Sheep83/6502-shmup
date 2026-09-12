@@ -1,0 +1,6 @@
+build/
+*.prg
+*.vs
+*.sym
+.DS_Store
+__pycache__/
