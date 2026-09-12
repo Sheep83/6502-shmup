@@ -31,6 +31,29 @@
 .const MUX_SLOTS      = 6
 .const MUX_LAST_SLOT  = MUX_FIRST_SLOT + MUX_SLOTS - 1     // 7
 
+// --- what the player's two reserved slots require of everybody else ---------
+// HW0/HW1 are programmed once per frame by exHud and then left alone, so the
+// MODE registers the other phases write must leave the player's bits in the
+// state it needs. They already do -- every one of the values below has bits 0
+// and 1 clear -- but that is currently true by accident of what the HUD wanted,
+// and a future HUD that X-expanded its lives counter differently, or put its
+// sprites in front of the playfield, would silently take the player with it.
+//
+// So it is asserted rather than relied upon. What the player needs:
+//   $d017 = 0 in bits 0/1   no Y expand      (both phases write $00 outright)
+//   $d01c = 0 in bits 0/1   hires            (both phases write $00 outright)
+//   $d01d = 0 in bits 0/1   no X expand      HUD_D01D, and $00 at the handoff
+//   $d01b = 0 in bits 0/1   in front of the  HUD_D01B, and $00 at the handoff
+//                           playfield
+// and that nobody else claims the slots at all:
+//   $d015, $d010            HUD_ENABLE / HUD_D010 must not name them
+//   the mux                 MUX_FIRST_SLOT must start above them
+.if ((HUD_D01B & PLAYER_SLOT_MASK) != 0) { .error "the HUD's $d01b would push the player behind the playfield" }
+.if ((HUD_D01D & PLAYER_SLOT_MASK) != 0) { .error "the HUD's $d01d would X-expand the player" }
+.if ((HUD_ENABLE & PLAYER_SLOT_MASK) != 0) { .error "the HUD's $d015 names a player slot" }
+.if ((HUD_D010 & PLAYER_SLOT_MASK) != 0) { .error "the HUD's $d010 names a player slot" }
+.if (MUX_FIRST_SLOT < 2) { .error "the gameplay mux has been given a slot reserved for the player" }
+
 // --- the reuse rule ---------------------------------------------------------
 // A VIC sprite with Y = n occupies rasters n .. n+20 (21 lines). The physical
 // slot is therefore free from raster n+21.
@@ -91,6 +114,16 @@
 // decision the model can reproduce exactly.
 .const MIN_SPRITE_Y    = 55
 .const MAX_SPRITE_Y    = 226
+
+// The player is outside the mux and could in principle be given a wider range:
+// its DMA is fetched in cycles 57..62 of the PREVIOUS line rather than 0..9 of
+// its own, so the bottom split's margin is a different calculation, and
+// MIN_REUSE_GAP does not apply to it at all. src/player.asm deliberately does
+// NOT take that room, because this slice has no measurement that would justify
+// it. Asserted here, where both pairs are visible, so the day somebody widens
+// one they are told to widen or re-derive the other.
+.if (PLAYER_MIN_Y != MIN_SPRITE_Y) { .error "the player's Y floor no longer matches the mux admission floor" }
+.if (PLAYER_MAX_Y != MAX_SPRITE_Y) { .error "the player's Y ceiling no longer matches the mux admission ceiling" }
 
 // --- capacities -------------------------------------------------------------
 // MAX_LOGICAL is deliberately LARGER than MAX_SCHED. P2 left the builder
@@ -192,6 +225,30 @@ batchD010:   .fill 2 * MAX_BATCH, 0     // COMPLETE $D010 value after this batch
 schedBatches:  .byte 0, 0               // number of batches in the buffer
 schedEnable:   .byte 0, 0               // complete $D015 value for the frame
 schedEntries:  .byte 0, 0               // accepted entry count
+
+// --- the PLAYER block, [buffer] ---------------------------------------------
+// HW0 and HW1 are reserved for the player (contract §2) and are NOT in the mux,
+// so they have no schedule entry, no slot and no batch. They still have to be
+// PUBLISHED, though, or the main thread would be programming VIC registers
+// behind the executor's back -- which is the one thing this architecture exists
+// to prevent. So the player rides in the schedule it is not part of: the
+// builder copies src/player.asm's presentation block in here, publishSchedule
+// hands it over with the same byte, exFrame adopts it at raster 250 with
+// everything else, and exHud programs the two slots from the ADOPTED copy.
+//
+// The two enable/MSB bytes name ONLY bits 0 and 1. They are composed into the
+// complete $d015 and $d010 values the renderer writes; see bs_enable / bs_d010
+// below, and exHud.
+schedPlyX0:     .byte 0, 0              // HW0 X low byte
+schedPlyY0:     .byte 0, 0
+schedPlyPtr0:   .byte 0, 0
+schedPlyCol0:   .byte 0, 0
+schedPlyX1:     .byte 0, 0              // HW1 X low byte
+schedPlyY1:     .byte 0, 0
+schedPlyPtr1:   .byte 0, 0
+schedPlyCol1:   .byte 0, 0
+schedPlyEnable: .byte 0, 0              // $d015 bits 0/1 only
+schedPlyD010:   .byte 0, 0              // $d010 bits 0/1 only
 
 // --- publication state ------------------------------------------------------
 schedCurrent:  .byte 0                  // buffer the EXECUTOR reads
@@ -441,16 +498,57 @@ buildSchedule:
 !baseDone:
     sta bs_base
 
+    // ---- the player block, copied into the buffer being built -----------
+    // Ten bytes, straight across, from the main thread's presentation record.
+    // It happens HERE, after the pending publication has been withdrawn above,
+    // for exactly the reason that withdrawal exists: schedNext is the buffer
+    // the frame IRQ promotes, and only this routine may write it.
+    ldx schedNext
+    lda plyPresX0
+    sta schedPlyX0,x
+    lda plyPresY0
+    sta schedPlyY0,x
+    lda plyPresPtr0
+    sta schedPlyPtr0,x
+    lda plyPresCol0
+    sta schedPlyCol0,x
+    lda plyPresX1
+    sta schedPlyX1,x
+    lda plyPresY1
+    sta schedPlyY1,x
+    lda plyPresPtr1
+    sta schedPlyPtr1,x
+    lda plyPresCol1
+    sta schedPlyCol1,x
+    lda plyPresEnable
+    sta schedPlyEnable,x
+    lda plyPresD010
+    sta schedPlyD010,x
+
     lda #0
     sta bs_pos                          // position in the SORTED list
     sta bs_acc                          // accepted count
-    sta bs_enable                       // P4: both accumulated DURING the
-    sta bs_d010                         // acceptance pass, not in passes of
-                                        // their own -- see bs_accept
     sta bs_slotcycle                    // round-robin cursor: MUST reset per build,
                                         // or a rebuild inherits the previous frame's
                                         // slot phase and the schedule stops matching
                                         // the documented "accepted mod 6" rule.
+
+    // THE PLAYER'S BITS ARE THE SEED, NOT A LATER MERGE.
+    //
+    // bs_enable and bs_d010 accumulate the complete $d015 and $d010 for this
+    // frame during the acceptance pass, and every batch's $d010 is a snapshot
+    // of the running value (bs_d010cum). Starting both from the player's two
+    // bits therefore puts HW0/HW1 into EVERY complete value the executor ever
+    // writes -- schedEnable, and every batchD010 -- without the executor
+    // knowing the player exists, and without a single read-modify-write.
+    //
+    // The acceptance pass only ever touches bits 2..7 (bitMask is indexed by a
+    // slot, and slots are MUX_FIRST_SLOT..MUX_LAST_SLOT), so the two seeded bits
+    // survive it by construction.
+    lda plyPresEnable
+    sta bs_enable
+    lda plyPresD010
+    sta bs_d010
 
 // ---- acceptance pass -------------------------------------------------------
 // P4: the scan walks SORTED POSITIONS and dereferences each to a logical ID.
@@ -925,9 +1023,10 @@ exSetD018:
     lda framePtrHi,x
     sta exPtrStore + 2                  // THE pointer-table destination, decided
     sta huPtrStore + 2                  // ONCE per frame from the frame record
-                                        // and patched into the two instructions
-                                        // that write a pointer -- the batch
-                                        // executor's and the HUD's. Two stores,
+    sta plPtr0Store + 2                 // and patched into every instruction
+    sta plPtr1Store + 2                 // that writes a pointer -- the batch
+                                        // executor's, the HUD's and the
+                                        // player's two. Four stores,
                                         // one source, one decision: neither
                                         // phase can choose a page, and they
                                         // cannot disagree about which one was
@@ -1043,8 +1142,46 @@ huPtrStore:
     dex
     bpl !slot-
 
-    lda #HUD_D010                       // complete value, one store, no RMW
-    sta $d010
+    // ---- HW0 and HW1: the player, from the ADOPTED block ------------------
+    //
+    // WHY HERE AND NOT AT THE HANDOFF. Raster 4 is the quietest line in the
+    // frame -- far below the badline range, and $d015 is still zero so there is
+    // no sprite DMA anywhere -- and it has fourteen lines in hand before the
+    // HUD's own first fetch at line 17. The handoff at raster 40 has TWO: it
+    // exits as late as raster 51 against TOP_ARM_LINE 53, and that margin is
+    // the tightest in the engine. Sixty-eight cycles of player programming
+    // belongs in the phase that has a line to spare, not the one that does not.
+    //
+    // It is also programmed ONCE per frame and then left alone: no batch, no
+    // phase and no main-thread routine touches $d000-$d003, $d027/$d028 or the
+    // two pointer table entries again before the next raster 4. The player's
+    // presentation is therefore immutable for the whole displayed frame in the
+    // strongest sense -- not merely unmodified, but unreachable.
+    ldx schedCurrent
+    lda schedPlyX0,x
+    sta $d000
+    lda schedPlyY0,x
+    sta $d001
+    lda schedPlyCol0,x
+    sta $d027
+    lda schedPlyPtr0,x
+plPtr0Store:
+    sta PTR_A + 0                       // high byte patched by exFrame, from the
+                                        // same frame record that chose $d018
+    lda schedPlyX1,x
+    sta $d002
+    lda schedPlyY1,x
+    sta $d003
+    lda schedPlyCol1,x
+    sta $d028
+    lda schedPlyPtr1,x
+plPtr1Store:
+    sta PTR_A + 1                       // PTR_A+1 and PTR_B+1 share the low byte
+                                        // $f9, exactly as PTR_A/PTR_B share $f8
+
+    lda schedPlyD010,x                  // complete value, one store, no RMW:
+    ora #HUD_D010                       // the HUD's bit 7 and the player's bits
+    sta $d010                           // 0/1, composed in a register
     lda #$00
     sta $d017                           // NEVER non-zero: see above
     sta $d01c                           // hires, so $d025/$d026 are unreachable
@@ -1056,7 +1193,8 @@ huPtrStore:
     // Enabled LAST, once every slot it names is fully programmed. The HUD's
     // sprites are not fetched until line 18 either way, but the ordering is the
     // same rule the handoff follows and is worth keeping identical in both.
-    lda #HUD_ENABLE
+    lda schedPlyEnable,x
+    ora #HUD_ENABLE
     sta $d015
 
     lda $d012                           // where the HUD finished: the margin to
@@ -1127,7 +1265,22 @@ exHandoff:
     ldx schedCurrent
     lda schedBatches,x
     bne exBatch                         // the normal case: run batch 0
-    sta $d015                           // A is 0: nothing to enable
+    lda schedEnable,x                   // NO GAMEPLAY SPRITES. Not "nothing to
+    sta $d015                           // enable": schedEnable still carries the
+                                        // player's two bits, and writing zero
+                                        // here would switch the player off for
+                                        // every frame the mux pool is empty --
+                                        // which, until enemies arrive, is every
+                                        // frame there is.
+
+    lda $d012                           // AND THE HANDOFF IS COMPLETE HERE.
+    cmp handoffExitMax                  // Without this the production path --
+    bcc !notMax+                        // which takes this exit on every frame
+    sta handoffExitMax                  // until enemies exist -- would leave
+!notMax:                                // handoffExitMax reading zero, and the
+                                        // margin to the top split unmeasured in
+                                        // the only configuration the game
+                                        // actually runs in.
     ldx #PH_TOP
     stx exPhase
     lda #TOP_ARM_LINE
@@ -1585,9 +1738,12 @@ batchSizeHist: .fill 2 * (MUX_SLOTS + 1), 0
 // them into the blank charset at $3800. The VIC really does fetch from both, so
 // code spilling into either would be DISPLAYED -- as sprites in the first case
 // and as characters in the second.
-.if (* > HUD_SPRITES) {
-    .error "the raster executor has grown into the HUD sprite bitmaps"
-}
+//
+// THE GUARD IS AT THE END OF THE SEGMENT, NOT HERE. It used to sit at this
+// point, which is before frameDiagnostics and installRenderer -- roughly 200
+// bytes of the segment it was guarding. The measured end of the executor is
+// only about 500 bytes below $3200, so that is not a rounding error. See the
+// bottom of this file.
 
 // ===========================================================================
 // frameDiagnostics — frame IRQ only, and deliberately not on the critical path
@@ -1723,3 +1879,12 @@ installRenderer:
     sta $d015                           // sprites off until the first frame IRQ
     cli
     rts
+
+// ---------------------------------------------------------------------------
+// SEGMENT GROWTH GUARD -- see the note above frameDiagnostics. This is the real
+// end of the raster executor, and therefore the only place the check means
+// anything.
+// ---------------------------------------------------------------------------
+.if (* > HUD_SPRITES) {
+    .error "the raster executor has grown into the HUD sprite bitmaps"
+}

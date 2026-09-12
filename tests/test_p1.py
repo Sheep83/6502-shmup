@@ -47,6 +47,12 @@ PTR_A,    PTR_B    = SCREEN_A + 0x3f8, SCREEN_B + 0x3f8
 D018_A,   D018_B   = 0x14, 0xa4
 D011_BASE          = 0x10
 SCREEN_ROWS        = 25
+# Slice A' reversed the scroll direction to the original game's forward play.
+# The stage row at matrix row 0 steps BACK through the map as world progress
+# counts UP; see src/scroll.asm and reports/migration-slice-a-prime-scroll-
+# direction.md. These two numbers are the contract, restated here independently.
+STAGE_ROWS         = 420
+STAGE_START_ROW    = STAGE_ROWS - SCREEN_ROWS
 # THE THIRD PLACE THE HUD ROW SET IS STATED, and the reason this keeps breaking.
 #   1. hudRowList in src/main.asm      -- which rows the HUD draws
 #   2. renderRow in src/scroll.asm     -- which rows regeneration must NOT fill
@@ -225,8 +231,10 @@ def main():
         ba      = d["transBA"]
         batches = d["batchCounter"]
         fine    = [a - b for a, b in zip(fine16(m, sym), fine0)]
-        world   = rd(m, sym["worldRowLo"], 2)
-        worldRow = world[0] | (world[1] << 8)
+        prog    = rd(m, sym["worldProgressLo"], 2)
+        progress = prog[0] | (prog[1] << 8)
+        stage   = rd(m, sym["stageTopRowLo"], 2)
+        stageTop = stage[0] | (stage[1] << 8)
         pageMis = rd(m, sym["statPageMismatch"])[0]
         ptrMis  = rd(m, sym["statPtrMismatch"])[0]
         late    = rd(m, sym["statLate"])[0]
@@ -243,7 +251,8 @@ def main():
         print(f"        frames displayed page A  {pageA}")
         print(f"        frames displayed page B  {pageB}")
         print(f"        fine-phase counts 0..7   {fine}")
-        print(f"        world row reached        {worldRow}")
+        print(f"        world progress           {progress} coarse rows")
+        print(f"        stage row at matrix row 0 {stageTop}")
         print(f"        reuse events per build   {reuse}")
         print(f"        page mismatches          {pageMis}")
         print(f"        pointer mismatches       {ptrMis}")
@@ -260,9 +269,17 @@ def main():
               max(fine) - min(fine) <= 2, f"spread {max(fine) - min(fine)}")
         check("one coarse step per eight frames, none missed or duplicated",
               abs(frames - 8 * coarse) <= 16, f"{frames} frames vs {coarse} coarse steps")
-        check("world row advanced exactly once per coarse step",
-              worldRow == now["coarseCount"],
-              f"worldRow {worldRow} vs coarse steps {now['coarseCount']}")
+        # DIRECTION-SPECIFIC, AND DELIBERATELY UPDATED. This used to read
+        # `worldRow == coarseCount`, which was true only while the world row
+        # counted UP from zero. Slice A' split that one variable in two: world
+        # progress still counts coarse steps from zero, and the stage row now
+        # walks BACK through the map. Both halves are checked.
+        check("world progress advanced exactly once per coarse step",
+              progress == now["coarseCount"],
+              f"progress {progress} vs coarse steps {now['coarseCount']}")
+        check("the stage row is exactly that far back through the map",
+              stageTop == (STAGE_START_ROW - progress) % STAGE_ROWS,
+              f"stageTop {stageTop}, progress {progress}")
         # coarseCount is incremented by the MAIN THREAD in scrollTick; flipCount
         # by the frame IRQ one frame later, when the record is adopted. Sampling
         # both across a window can therefore straddle one such pair. The
@@ -303,8 +320,8 @@ def main():
         bp = set_bp(m, sym["frameDiagnostics"]); m.cmd("x"); m.cmd(f"delete {bp}")
         cur = rd(m, sym["curPage"])[0]
         disp = rd(m, sym["dispPage"])[0]
-        w = rd(m, sym["worldRowLo"], 2)
-        wrow = w[0] | (w[1] << 8)
+        w = rd(m, sym["stageTopRowLo"], 2)
+        stageTop = w[0] | (w[1] << 8)
         d018 = rd(m, 0xd018)[0]
         base = SCREEN_A if cur == 0 else SCREEN_B
         # VM bits only. The low bits of $d018 are the CHARACTER BASE, and the
@@ -322,26 +339,27 @@ def main():
         for r in range(SCREEN_ROWS):
             if r in HUD_ROWS or r in GUARD_ROWS:
                 continue
-            wl = (wrow + r) & 0xff
+            wl = (stageTop + r) % STAGE_ROWS & 0xff
             want = (HEXDIGIT[wl >> 4], HEXDIGIT[wl & 0x0f], 0x20, 0x20)
             got = tuple(page[r * 40: r * 40 + 4])
             if got != want:
                 bad.append((r, wl, got, want))
-        check("every displayed row prints its own world row number",
+        check("every displayed row prints its own stage row number",
               not bad, f"{bad[:4]}")
         # The on-screen page letter is gone: it changed on all 23 visible rows
         # at every flip, which is a whole column blinking 6.25 times a second in
         # the middle of a picture a human is asked to judge for smoothness (the
         # A/B forensic measured it as 88 of the 96 lines that differ across a
-        # flip). pageWorldLo replaces it off-screen, and says MORE: not "these
-        # rows came from one pass" but exactly which world row the displayed
+        # flip). pageTopRow replaces it off-screen, and says MORE: not "these
+        # rows came from one pass" but exactly which stage row the displayed
         # page starts at, which the row-by-row check above then verifies.
         letters = {page[r * 40 + 3] for r in range(SCREEN_ROWS)}
         check("column 3 carries no page letter into the visible terrain",
               letters == {0x20}, f"column 3 bytes seen {sorted(letters)}")
-        check("pageWorldLo names the world row the displayed page really starts at",
-              rd(m, sym["pageWorldLo"] + cur)[0] == (wrow & 0xff),
-              f"pageWorldLo[{cur}] {rd(m, sym['pageWorldLo'] + cur)[0]}, worldRow {wrow & 0xff}")
+        check("pageTopRow names the stage row the displayed page really starts at",
+              (rd(m, sym["pageTopRowLo"] + cur)[0]
+               | (rd(m, sym["pageTopRowHi"] + cur)[0] << 8)) == stageTop,
+              f"pageTopRow[{cur}] vs stageTopRow {stageTop}")
 
         # ---- 4. pointer contents on the displayed page --------------------
         print("\n=== 4. displayed-page sprite pointers match CURRENT schedule ===")

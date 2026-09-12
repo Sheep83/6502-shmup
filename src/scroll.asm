@@ -18,18 +18,71 @@
 // The executor never asks the scroller anything. Everything it needs for the
 // whole displayed frame was latched at the frame boundary.
 //
-// GEOMETRY
-// Page P displays world rows [worldRow .. worldRow+24]. The fine scroll counts
-// DOWN 7..0, moving the playfield up one pixel per frame. On the 0 -> 7 wrap
-// the content must jump up one whole row, so worldRow advances and we flip to
-// the other page, which has been prepared with world rows [worldRow+1 .. +25].
-// Coarse step and page flip are therefore the SAME event, once every 8 frames.
+// GEOMETRY AND DIRECTION
+//
+// THE PLAYFIELD SCROLLS DOWNWARD. The player flies UP through the stage, the
+// terrain moves DOWN past them, and new terrain enters at the TOP. That is the
+// original game's forward-play direction (c64Shooter's SCROLL_FINE counts up
+// and its SCROLL_ROW counts down; see reports/migration-slice-a-prime-scroll-
+// direction.md §1), and every piece of authored content -- wave trigger rows,
+// turret rows, the editor's top-to-bottom row order -- is written against it.
+//
+// Page P displays stage rows [stageTopRow .. stageTopRow+24], one row per
+// matrix row, top to bottom. The fine scroll counts UP 0..7, moving the
+// playfield down one pixel per frame: matrix row r occupies rasters
+// 48 + YSCROLL + 8r .. +7, so a larger YSCROLL is further down the screen.
+//
+// On the 7 -> 0 wrap the content must jump DOWN one whole row to stay
+// continuous, so stageTopRow steps BACK by one and we flip to the other page,
+// which has been prepared with stage rows [stageTopRow-1 .. +23]. Coarse step
+// and page flip are therefore the SAME event, once every 8 frames.
+//
+//     fine   0 1 2 3 4 5 6 7 | 0 1 2 ...      content moves down 1px per step
+//     top    T T T T T T T T | T-1 ...        one row back per wrap
+//
+// ---------------------------------------------------------------------------
+// TWO COUNTERS, AND WHY
+// ---------------------------------------------------------------------------
+// stageTopRow   WHICH ROW OF THE MAP is at matrix row 0. It DECREASES, because
+//               the map is authored top-to-bottom and play starts at its
+//               bottom. Scroller-owned; the row renderer is its only consumer.
+//
+// worldProgress HOW FAR THROUGH THE STAGE we are, in coarse rows. It INCREASES
+//               from zero, always. This is the one game systems read.
+//
+// They are two names for one event, maintained side by side at the coarse step,
+// and the invariant between them is exact:
+//
+//     stageTopRow == (STAGE_START_ROW - worldProgress) mod STAGE_ROWS
+//
+// Keeping both costs ten instructions once every eight frames and means no
+// future subsystem has to encode "forward means subtract" -- which is the
+// mistake that would otherwise be copied into waves, turrets, triggers and
+// stage completion one at a time. tests/test_slice_a_prime.py checks the
+// invariant on the running machine rather than trusting it.
 //
 // WHY THE BACK PAGE IS REGENERATED, NOT COPIED
 // Every row is written from its own world row number, so a stale row, a
 // duplicated row or a one-row jump cannot survive: the row prints its own
 // identity. A copy-and-shift would reproduce whatever was already wrong.
 // ===========================================================================
+
+// ---------------------------------------------------------------------------
+// THE STAGE. Placeholder values until a level package owns them (Slice H).
+//
+// 420 rows is level1's real height -- 105 metatile rows of 4 -- chosen over a
+// convenient power of two so the 16-bit row arithmetic and the modulo wrap are
+// genuinely exercised rather than degenerating into a byte.
+//
+// START AT THE BOTTOM OF THE MAP. The editor stores rows top-to-bottom in
+// visual order and the authored BOTTOM is the beginning of play, so the first
+// page shows the last 25 rows, [STAGE_ROWS-25 .. STAGE_ROWS-1], with no wrap in
+// it. stageTopRow then walks down to 0 over the whole stage.
+.const STAGE_ROWS      = 420
+.const STAGE_START_ROW = STAGE_ROWS - SCREEN_ROWS
+
+.if (STAGE_ROWS < SCREEN_ROWS + 1) { .error "a stage must be taller than one screen" }
+.if (STAGE_START_ROW < 0)          { .error "STAGE_START_ROW is negative" }
 
 .const ROWS_PER_TICK = 5                // 25 rows over the 8 frames between
                                         // coarse steps, with margin. Spread on
@@ -66,26 +119,46 @@
                                         // qualified scroller is not worth
                                         // changing on evidence that dissolved.
 
-* = $1a00 "scroller"
+// ===========================================================================
+// Scroll state. MAIN THREAD ONLY, and OUTSIDE VIC BANK 0 with everything else
+// the main thread owns.
+// ===========================================================================
+// It used to live at the head of the $1a00 code segment, which made it the one
+// module state still competing for bank-0 space -- the schedule, the logical
+// sprites, the sorter, the motion tables, the HUD and the player all keep
+// theirs at $c000 and above. Moving it is what bought the room this slice's
+// sixteen-bit row arithmetic needed, and it should have been here anyway: the
+// VIC never reads a byte of it.
+* = $c540 "scroll state"
+
 
 // --- scroll state. MAIN THREAD ONLY. The executor never reads any of this. --
-scrollFine:   .byte 0                   // current YSCROLL, counts 7..0
-worldRowLo:   .byte 0                   // world row shown at screen row 0
-worldRowHi:   .byte 0
+scrollFine:      .byte 0                // current YSCROLL, counts UP 0..7
+stageTopRowLo:   .byte 0                // the STAGE row at matrix row 0; steps
+stageTopRowHi:   .byte 0                // BACK one per coarse step
+worldProgressLo: .byte 0                // coarse rows travelled since the stage
+worldProgressHi: .byte 0                // start; only ever INCREASES
+stageLoopsLo:    .byte 0                // times the map has wrapped end-to-end
+stageLoopsHi:    .byte 0                // (see "end of stage" below)
 dispPage:     .byte 0                   // 0 = A, 1 = B. The page to display NEXT.
 regenPage:    .byte 0                   // page currently being rebuilt
 regenPageHi:  .byte 0                   // its high byte ($04 or $28)
 regenRow:     .byte 0                   // next screen row to rebuild (25 = idle)
-regenWorldLo: .byte 0                   // world row of regen screen row 0
-rrWorld:      .byte 0                   // scratch: world row of the row in hand
+regenTopRowLo: .byte 0                  // stage row of the BACK page's row 0
+regenTopRowHi: .byte 0
+rrStageLo:    .byte 0                   // scratch: stage row of the row in hand
+rrStageHi:    .byte 0
+rbLo:         .byte 0                   // rowBack's argument and result
+rbHi:         .byte 0
 hudPageHi:    .byte 0                   // high byte of the page the HUD writes to
 
-// The world row each PAGE's matrix row 0 was regenerated with, indexed by page.
+// The stage row each PAGE's matrix row 0 was regenerated with, indexed by page.
 // This is the off-screen successor to the on-screen page letter: from it a test
-// can predict the world row of every row of whichever page is displayed, and
+// can predict the stage row of every row of whichever page is displayed, and
 // check all 25 rather than checking that one character agrees with itself.
-// Written wherever regenWorldLo is, so the two cannot drift.
-pageWorldLo:  .byte 0, 0
+// Written wherever regenTopRow is, so the two cannot drift.
+pageTopRowLo: .byte 0, 0
+pageTopRowHi: .byte 0, 0
 
 // --- diagnostics read by tests ---------------------------------------------
 coarseCount:  .byte 0, 0                // coarse row steps (16-bit, lo/hi)
@@ -119,33 +192,67 @@ publishSkip:  .byte 0                   // publication found the previous one
 pinFine:      .byte 0                   // 0 = natural scrolling, 1 = held
 pinFineValue: .byte 0                   // the YSCROLL to hold, 0..7
 
+scrollStateEnd:
+.if (scrollStateEnd > $c600) { .error "the scroll state has grown into the P3 fixture data at $c600" }
+
+// ===========================================================================
+// Code. MAIN THREAD ONLY -- the executor never calls one routine in this file
+// -- and therefore OUTSIDE VIC BANK 0, beside src/player.asm.
+// ===========================================================================
+// It lived at $1a00 in a 512-byte hole. Sixteen-bit stage-row arithmetic and
+// the modulo wrap pushed it to 586, and the choice was to shave 74 bytes off
+// arithmetic that has to be right, or to stop paying bank-0 rent for code the
+// VIC cannot see.
+//
+// Bank 0 is 16 KB and every byte is contended: two screen pages, the sprite
+// bitmaps, the HUD's pool, the player's, the blank charset, and a real
+// character set plus a terrain tileset when the stage data arrives. Moving this
+// module out does not merely make room for the arithmetic, it HANDS BACK the
+// whole $1a00-$1bff hole to the subsystem that will actually need VIC-visible
+// space. The state moved out for the same reason a few lines above.
+* = $4200 "scroller"
+
 // ===========================================================================
 // scrollInit — both pages built, page A displayed, frame 0 published.
 // ===========================================================================
 scrollInit:
-    lda #7
-    sta scrollFine
     lda #0
-    sta worldRowLo
-    sta worldRowHi
-    sta dispPage                        // page A displays world rows 0..24
+    sta scrollFine                      // counts UP from here
+    sta worldProgressLo                 // nothing travelled yet
+    sta worldProgressHi
+    lda #<STAGE_START_ROW               // the BOTTOM of the authored map
+    sta stageTopRowLo
+    lda #>STAGE_START_ROW
+    sta stageTopRowHi
+    lda #0
+    sta dispPage                        // page A shows [START .. START+24]
 
-    lda #0
     sta regenPage
     lda #>SCREEN_A
     sta regenPageHi
-    lda #0
-    sta regenWorldLo
-    sta pageWorldLo                     // page A: world rows 0..24
+    lda stageTopRowLo
+    sta regenTopRowLo
+    sta pageTopRowLo
+    lda stageTopRowHi
+    sta regenTopRowHi
+    sta pageTopRowHi
     jsr regenAll
 
     lda #1
-    sta regenPage                       // page B holds world rows 1..25, ready
-    lda #>SCREEN_B                      // for the first coarse step
-    sta regenPageHi
-    lda #1
-    sta regenWorldLo
-    sta pageWorldLo + 1
+    sta regenPage                       // page B holds [START-1 .. START+23]:
+    lda #>SCREEN_B                      // the rows the FIRST coarse step will
+    sta regenPageHi                     // reveal, one further back in the map
+    lda stageTopRowLo
+    sta rbLo
+    lda stageTopRowHi
+    sta rbHi
+    jsr rowBack
+    lda rbLo
+    sta regenTopRowLo
+    sta pageTopRowLo + 1
+    lda rbHi
+    sta regenTopRowHi
+    sta pageTopRowHi + 1
     jsr regenAll
 
     lda #SCREEN_ROWS
@@ -165,6 +272,57 @@ regenAll:
     rts
 
 // ===========================================================================
+// rowBack — step a stage row BACK by one, wrapping 0 -> STAGE_ROWS-1.
+// ===========================================================================
+// In: rbLo/rbHi. Out: the same pair, one row earlier in the map.
+//
+// The wrap is written as "fold 0 up to STAGE_ROWS, then subtract" rather than
+// "subtract, then fix up a borrow", because the second form has to recognise
+// $ffff as a special case and the first cannot go wrong: the value is only ever
+// zero or positive on entry, and the fold happens before any arithmetic.
+//
+// A STAGE THAT WRAPS IS THE DEMONSTRATION STAGE'S BEHAVIOUR, NOT THE GAME'S.
+//
+// END OF STAGE, and what is deliberately NOT decided yet.
+//
+// At stage row 0 the window steps back to STAGE_ROWS-1 and the stage plays
+// again from its authored bottom. For 25 coarse steps either side of that the
+// displayed window straddles the join, so the map's top rows sit above its
+// bottom rows and there is a content seam. The original game did exactly this
+// and called it looping back to the start (c64Shooter's prepareBackgroundCoarse
+// wraps SCROLL_ROW and re-arms the authored wave triggers and turret stream at
+// the same moment), so the behaviour is inherited rather than invented.
+//
+// It is a DEMONSTRATION STAGE'S behaviour. A finite stage ends by comparing
+// worldProgress -- which never wraps -- against the stage length, and that is a
+// game-state decision, not a scroller one: something has to decide what a
+// finished stage DOES. stageLoops is here so the wrap is observable rather than
+// invisible while that decision is still open, and so a test can assert the
+// wrap happened exactly when the row arithmetic says it should.
+//
+// What must NOT happen is an unsigned underflow quietly becoming the contract.
+// It cannot here: the fold below is explicit, the value is reduced on every
+// path, and tests/test_slice_a_prime.py checks the modulo relationship between
+// the two counters on every frame of a trace.
+rowBack:
+    lda rbLo
+    ora rbHi
+    bne !noWrap+
+    lda #<STAGE_ROWS
+    sta rbLo
+    lda #>STAGE_ROWS
+    sta rbHi
+!noWrap:
+    lda rbLo
+    sec
+    sbc #1
+    sta rbLo
+    lda rbHi
+    sbc #0
+    sta rbHi
+    rts
+
+// ===========================================================================
 // scrollTick — one call per displayed frame. Advances the scroll and publishes
 // the frame record the NEXT frame IRQ will adopt.
 // ===========================================================================
@@ -176,12 +334,24 @@ scrollTick:
     sta scrollFine
     jmp scrollPublish
 !natural:
-    dec scrollFine
-    bpl scrollPublish
+    inc scrollFine                      // content moves DOWN one pixel
+    lda scrollFine
+    cmp #8
+    bcs !coarse+                        // INVERTED, and the common path takes
+    jmp scrollPublish                   // the absolute jmp: the coarse block
+!coarse:                                // below outgrew a relative branch when
+                                        // it gained sixteen-bit row arithmetic,
+                                        // and the renderer's rule applies here
+                                        // too -- a far target goes through a
+                                        // jmp rather than being rearranged
+                                        // until it happens to fit.
 
-// ---- coarse step: advance the world, flip the page ------------------------
-    lda #7
-    sta scrollFine
+// ---- coarse step: step BACK through the stage, flip the page --------------
+    lda #0
+    sta scrollFine                      // 7 -> 0 moves the content up seven
+                                        // pixels; the row step below moves it
+                                        // down eight. Net: one pixel down, the
+                                        // same as every other frame.
 
     lda regenRow                        // the page we are about to display was
     cmp #SCREEN_ROWS                    // not finished. Never expected; counted
@@ -191,9 +361,34 @@ scrollTick:
     beq !ready+
     inc scrollLate
 !ready:
-    inc worldRowLo
+    // THE STAGE ROW STEPS BACK; THE PROGRESS COUNTER STEPS FORWARD.
+    // Two names for one event -- see the note at the top of this file.
+    //
+    // Count the wrap BEFORE it happens, while "the row is zero" is still a
+    // fact rather than something to be inferred from a value that has already
+    // moved. rowBack is called twice per coarse step -- once for the displayed
+    // row and once for the row the back page is built with -- so counting
+    // inside rowBack would count every loop twice, one coarse step apart.
+    lda stageTopRowLo
+    ora stageTopRowHi
+    bne !noLoop+
+    inc stageLoopsLo
+    bne !noLoop+
+    inc stageLoopsHi
+!noLoop:
+    lda stageTopRowLo
+    sta rbLo
+    lda stageTopRowHi
+    sta rbHi
+    jsr rowBack
+    lda rbLo
+    sta stageTopRowLo
+    lda rbHi
+    sta stageTopRowHi
+
+    inc worldProgressLo
     bne !nohi+
-    inc worldRowHi
+    inc worldProgressHi
 !nohi:
     lda dispPage
     eor #1
@@ -210,24 +405,30 @@ scrollTick:
 !ps:
     sta regenPageHi
 
-    // The page just flipped TO already holds world rows worldRowLo..+24: it was
-    // regenerated with exactly that value during the last cycle. Stamp it now,
-    // while that is a statement about content rather than intent.
+    // The page just flipped TO already holds stage rows stageTopRow..+24: it
+    // was regenerated with exactly that value during the last cycle. Stamp it
+    // now, while that is a statement about content rather than intent.
     //
-    // NOT the back page, which was the first attempt. pageWorldLo[back] would
+    // NOT the back page, which was the first attempt. pageTopRow[back] would
     // then be the row the page is ABOUT to be regenerated with, and for the one
     // frame between the software flip and the IRQ adopting it at raster 250 the
     // still-displayed page carried a stamp two coarse steps ahead of its own
-    // content. The invariant that matters is the narrow one: pageWorldLo[p] is
+    // content. The invariant that matters is the narrow one: pageTopRow[p] is
     // correct whenever p is the page being displayed.
     ldx dispPage
-    lda worldRowLo
-    sta pageWorldLo,x
+    lda stageTopRowLo
+    sta pageTopRowLo,x
+    lda stageTopRowHi
+    sta pageTopRowHi,x
 
-    lda worldRowLo                      // the back page gets the row after the
-    clc                                 // one now on screen
-    adc #1
-    sta regenWorldLo
+    // The back page gets the row BEFORE the one now on screen: it is the row
+    // the NEXT coarse step will reveal at the top. rbLo/rbHi still hold the
+    // stage row just adopted, so one more step back is all it takes.
+    jsr rowBack
+    lda rbLo
+    sta regenTopRowLo
+    lda rbHi
+    sta regenTopRowHi
     lda #0
     sta regenRow                        // start rebuilding it next frame
 
@@ -243,7 +444,20 @@ scrollPublish:
     bne !counted+
     inc finePhase + 1,x
 !counted:
-    // fall through
+scrollPublishFallsInto:
+    // FALL THROUGH INTO publishFrame. There is no jsr and no jmp here, and the
+    // assertion after publishFrame's body is what makes that safe to rely on.
+    //
+    // This slice broke it. rowBack was written into the gap between these two
+    // routines, so scrollPublish fell into rowBack instead, publishFrame was
+    // never called again after scrollInit, and the frame record froze at the
+    // boot value. Everything downstream still looked alive -- the fine scroll
+    // counter cycled, finePhase filled evenly, coarse steps counted, stage rows
+    // advanced, the back page regenerated -- because all of that is main-thread
+    // bookkeeping. The only thing that stopped was the one byte that carries it
+    // to the screen, and the screen simply held still.
+    //
+    // An invisible adjacency was doing real work. Now it is stated.
 
 // ===========================================================================
 // publishFrame — write the NEXT frame record and hand it over with one byte.
@@ -286,6 +500,10 @@ publishFrame:
     lda #1
     sta framePending                    // the handover. One byte, atomic.
     rts
+
+.if (publishFrame != scrollPublishFallsInto) {
+    .error "scrollPublish no longer falls through into publishFrame"
+}
 
 // ===========================================================================
 // regenTick — rebuild a few rows of the back page, once per frame.
@@ -338,9 +556,9 @@ renderRow:
     jmp renderBackgroundRow
 
 // ---------------------------------------------------------------------------
-// renderBackgroundRow — the diagnostic pattern for one world row.
+// renderBackgroundRow — the diagnostic pattern for one stage row.
 //
-//   cols 0-1   world row number, low byte, in hex   <- row identity
+//   cols 0-1   stage row number, low byte, in hex   <- row identity
 //   cols 2-4   space
 //
 // COLUMN 3 USED TO BE THE PAGE LETTER, 'A' or 'B', and it is gone from the
@@ -350,12 +568,12 @@ renderRow:
 // The A/B forensic measured it as 88 of the 96 lines that differ across a
 // flip: the largest single visual event on screen, and pure scaffolding.
 //
-// The observability is not lost, it is moved off the display: pageWorldLo
-// records the world row each page's row 0 was regenerated with, which is a
+// The observability is not lost, it is moved off the display: pageTopRow
+// records the stage row each page's row 0 was regenerated with, which is a
 // STRONGER statement than the letter ever was. The letter said only "these
-// rows came from the same pass"; pageWorldLo lets a test predict the exact
-// world row of every row of the displayed page and check all 25.
-//   cols 5-39  solid bar every 4th world row, blank otherwise
+// rows came from the same pass"; pageTopRow lets a test predict the exact
+// stage row of every row of the displayed page and check all 25.
+//   cols 5-39  solid bar every 4th stage row, blank otherwise
 //   col  6+(W and 31)   a '*' marker, so each row is distinguishable even
 //                       inside a run of blank rows
 //
@@ -364,11 +582,36 @@ renderRow:
 // carry the SAME page letter, and the marker must walk a clean diagonal.
 // ---------------------------------------------------------------------------
 renderBackgroundRow:
-    txa                                 // X still = regenRow
+    // rrStage = (regenTopRow + regenRow) mod STAGE_ROWS, sixteen bits.
+    //
+    // regenTopRow is already reduced to 0..STAGE_ROWS-1 and regenRow is 0..24,
+    // so the sum is below STAGE_ROWS + 25 and ONE conditional subtract reduces
+    // it. A general modulo here would be repeated subtraction on a path that
+    // runs five times a frame.
+    lda regenTopRowLo
     clc
-    adc regenWorldLo
-    sta rrWorld
+    adc regenRow
+    sta rrStageLo
+    lda regenTopRowHi
+    adc #0
+    sta rrStageHi
+    cmp #>STAGE_ROWS
+    bcc !reduced+
+    bne !wrap+
+    lda rrStageLo
+    cmp #<STAGE_ROWS
+    bcc !reduced+
+!wrap:
+    lda rrStageLo
+    sec
+    sbc #<STAGE_ROWS
+    sta rrStageLo
+    lda rrStageHi
+    sbc #>STAGE_ROWS
+    sta rrStageHi
+!reduced:
 
+    lda rrStageLo
     and #3
     bne !blank+
     lda #$a0                            // reverse space: a solid bar
@@ -383,7 +626,7 @@ renderBackgroundRow:
     cpy #4
     bne !f-
 
-    lda rrWorld                         // the walking marker
+    lda rrStageLo                       // the walking marker
     and #31
     clc
     adc #6
@@ -391,7 +634,7 @@ renderBackgroundRow:
     lda #42                             // '*'
     sta (scrPtr),y
 
-    lda rrWorld                         // row identity in hex
+    lda rrStageLo                       // row identity in hex, low byte
     lsr
     lsr
     lsr
@@ -400,7 +643,7 @@ renderBackgroundRow:
     lda hexDigit,x
     ldy #0
     sta (scrPtr),y
-    lda rrWorld
+    lda rrStageLo
     and #$0f
     tax
     lda hexDigit,x
@@ -410,7 +653,7 @@ renderBackgroundRow:
     lda #$20
     ldy #2
     sta (scrPtr),y
-    ldy #3                              // was the page letter; see pageWorldLo
+    ldy #3                              // was the page letter; see pageTopRow
     sta (scrPtr),y
     ldy #4
     sta (scrPtr),y
@@ -439,12 +682,12 @@ renderBackgroundRow:
 // KickAssembler places explicit `* =` segments exactly where told and does not
 // complain when one grows into the next -- it simply overwrites, silently, and
 // the failure looks like corrupted code rather than a build error. The P5
-// forensic measured only FIVE bytes of headroom between the scroller and the
-// motion segment at $1c00, which is well inside the range a single added
-// routine consumes. Stated and enforced rather than left to luck.
+// forensic measured only FIVE bytes of headroom when this module sat at $1a00;
+// this slice went through that headroom and the guard is what said so, which is
+// the whole reason it is written down rather than left to luck.
 // ---------------------------------------------------------------------------
-.if (* > $1c00) {
-    .error "the scroller segment has grown into 'motion' at $1c00"
+.if (* > $4600) {
+    .error "the scroller has outgrown its $4200 segment"
 }
 
 // ---------------------------------------------------------------------------

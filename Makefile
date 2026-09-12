@@ -20,20 +20,37 @@ D64   := $(ROOT)/build/shmup.d64
 #
 #   -default    ignore ~/.config/vice/vicerc entirely
 #   +saveres    ...and never write our settings back over the user's own
-#   -joydev1 0  detach BOTH joystick devices. Control port 1 is CIA1 $DC01 and
-#   -joydev2 0  control port 2 is CIA1 $DC00 -- the exact two registers the
-#               fixture-select scan uses. A keyset or numpad binding consumes
-#               the host key and drives those lines before the keyboard matrix
-#               ever sees it, so the scan reads nothing and nothing happens.
-#   +keyset     belt and braces: no keyset joystick at all.
+#   -joydev1 0  Control port 1 stays detached. It is CIA1 $DC01, which is the
+#               keyboard ROW drive; a device on it can pull matrix lines and
+#               make the keyboard read keys nobody pressed.
+#   -joydev2    THE PLAYER'S STICK. Control port 2 is CIA1 $DC00 and
+#               src/player.asm's readInput is the only thing that reads it.
+#               Override it per run rather than editing this file:
+#
+#                   make run JOY2=1     numpad          (the default)
+#                   make run JOY2=2     keyset A        (needs a saved vicerc,
+#                                                        which -default ignores)
+#                   make run JOY2=4     the first real joystick or gamepad
+#
+#               A MacBook keyboard has no numpad, so a laptop without a
+#               controller wants JOY2=4 with something plugged in. If the ship
+#               does not move, this is the first thing to change -- the C64 side
+#               cannot tell the difference between "no stick" and "no device".
+#   +keyset     no keyset joystick unless one is explicitly selected above, so
+#               nothing silently eats a host key.
+#
+# The automated suites build their OWN command line in tests/test_p0.py and
+# detach both ports there. A test must never depend on a host device.
 #
 # Normal speed, no monitor, no warp: the only configuration in which what you
 # see is what the machine really does.
-VICE_OPTS := -default +saveres -pal -joydev1 0 -joydev2 0 +keyset
+JOY2      ?= 1
+VICE_OPTS := -default +saveres -pal -joydev1 0 -joydev2 $(JOY2) +keyset
 
 
 .PHONY: p3-fixtures p4-fixtures
 .PHONY: all build d64 test test-fast test-engine-full
+.PHONY: test-slice-a test-slice-a-prime test-slice-b
 .PHONY: test-p0 test-p1 test-p2 test-p3 test-p4 test-p5 run run-d64 clean
 
 all: build
@@ -107,8 +124,41 @@ test-p5: build
 # it is not part of ordinary game development; run it when the renderer, the
 # scroller or the aperture has been touched.
 # ---------------------------------------------------------------------------
+# `make test` is THREE probes, and deliberately so.
+#
+#   test_engine.py        the engine the game is built on
+#   test_slice_a.py       the game's own path: production boot, the published
+#                         player block, and the full-byte $d015/$d010
+#                         composition that lets the player and the mux share
+#                         two registers
+#   test_slice_a_prime.py the world contract: scroll direction, the coarse
+#                         cadence, and that every row of both pages carries the
+#                         stage row it should
+#   test_slice_b.py       the weapon: fire cadence, heat, overheat, the shot
+#                         event, and the HUD heat feed
+#
+# The last three are what break while a game is being built on an engine that
+# is already qualified, so they belong in the target that gets run constantly
+# rather than in a slower gate.
+#
+# IT IS NO LONGER ABOUT A MINUTE. Each slice adds a probe and the target is
+# growing with the game; run a single `make test-slice-X` while working on one
+# system, and this before believing anything. When it becomes slow enough that
+# it stops being run, that is the moment to split it -- not before.
 test: build
 	python3 tests/test_engine.py
+	python3 tests/test_slice_a.py
+	python3 tests/test_slice_a_prime.py
+	python3 tests/test_slice_b.py
+
+test-slice-a: build
+	python3 tests/test_slice_a.py
+
+test-slice-a-prime: build
+	python3 tests/test_slice_a_prime.py
+
+test-slice-b: build
+	python3 tests/test_slice_b.py
 
 test-fast: build
 	python3 tests/test_engine.py

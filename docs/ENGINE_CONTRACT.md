@@ -172,6 +172,56 @@ destination, page) with the same atomic-publication discipline as the schedule;
 the frame IRQ adopts it at raster 250 and the executor never asks the scroller
 anything.
 
+## 8a. The world contract
+
+The rule game systems reason about the stage with. Everything here is
+**read-only** to game code; only `src/scroll.asm` writes any of it.
+
+**The playfield scrolls DOWNWARD.** The player flies *up* through the stage, the
+terrain moves *down* past them, and new terrain enters at the **top**. This is
+the original game's forward-play direction and every piece of authored content
+is written against it.
+
+```
+matrix row r  shows stage row  stageTopRow + r        r = 0..24
+fine scroll   counts UP 0..7   content moves down one pixel per step
+coarse step   on the 7 -> 0 wrap: stageTopRow steps BACK one, the page flips
+```
+
+| value | width | meaning |
+|---|---|---|
+| `scrollFine` | 1 | current YSCROLL, 0..7, counting up |
+| `stageTopRowLo/Hi` | 2 | the stage map row at **matrix row 0**. Decreases. |
+| `worldProgressLo/Hi` | 2 | coarse rows travelled since the stage start. **Only ever increases.** This is the one to ask "how far through the level are we". |
+| `stageLoopsLo/Hi` | 2 | times the map has wrapped end to end |
+| `STAGE_ROWS` | — | the stage's height in character rows (420 for the demonstration stage; level-owned once a level package exists) |
+| `STAGE_START_ROW` | — | `STAGE_ROWS - 25`: the first page shows the authored **bottom** of the map |
+
+The two counters are two names for one event and the relationship between them
+is exact on every frame:
+
+```
+stageTopRow == (STAGE_START_ROW - worldProgress) mod STAGE_ROWS
+```
+
+**Use `worldProgress` for progression questions** — has a trigger row been
+reached, how far through the stage are we, is the stage finished. Use
+`stageTopRow` only to index the map. No game system should encode "forward means
+subtract": that is the scroller's business and the reason the two names exist.
+
+**Screen Y of a stage row** is `stageTopRow`-relative and needs `scrollFine`:
+row `stageTopRow + n` occupies matrix row `n`, whose top pixel is at raster
+`48 + scrollFine + 8n`. The exact constant a game system should use is **to be
+measured, not derived** — the visible aperture starts at raster 55 and matrix
+rows 0 and 24 are partly clipped.
+
+**End of stage.** The demonstration stage **wraps**: at row 0 the window steps
+back to `STAGE_ROWS-1` and the map plays again from its bottom, with a content
+seam while the window straddles the join. A finite stage will end by comparing
+`worldProgress` against the stage length, which is a game-state decision and is
+deliberately not made here. `worldProgress` never wraps; nothing should ever
+infer progression from an unsigned underflow of `stageTopRow`.
+
 ## 9. Direct VIC access — who owns what
 
 | register | owner | who may write it |

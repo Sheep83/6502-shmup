@@ -156,13 +156,22 @@ hudUpdWrapped:  .byte 0                     // updates during which the raster
 hudUpdRuns:     .byte 0, 0                  // updates actually performed, 16-bit
 hudUpdDeferred: .byte 0, 0                  // updates refused by the window
 
+// --- the heat gauge's three colours ----------------------------------------
+// The gauge is the only HUD component whose colour carries meaning: gameplay
+// flashes it while the weapon is locked out, which is the one piece of feedback
+// that says "this is WHY you cannot shoot" rather than "the bar is full".
+// Game code reaches it through hudSetHeatColour and never touches the table.
+.const HUD_HEAT_COL_NORMAL = $07                    // yellow, at rest
+.const HUD_HEAT_COL_ALARM  = $02                    // red    } alternated while
+.const HUD_HEAT_COL_BLANK  = $00                    // black  } locked out
+
 // --- per-slot VIC placement, read by exHud ---------------------------------
 hudSlot:   .byte 2, 3, 4, 5, 6, 7
 hudSlot2:  .byte 4, 6, 8, 10, 12, 14
 hudXLo:    .byte 32, 96, 120, 176, 200, <280
 hudYPos:   .fill HUD_SPRITE_COUNT, HUD_Y
 //         lives   heat L  heat R  score L score R upgrade
-hudCol:    .byte $01,      $07,    $07,    $0d,    $0d,    $0a
+hudCol:    .byte $01, HUD_HEAT_COL_NORMAL, HUD_HEAT_COL_NORMAL, $0d, $0d, $0a
 
 // --- heat: logical value to filled pixels, with no division ----------------
 // heat 0..300 -> index 0..75 by two shifts -> pixels 0..48 by one lookup.
@@ -416,6 +425,22 @@ hudRenderUpgrade:
     rts
 
 // ---------------------------------------------------------------------------
+// hudSetHeatColour — A = the colour both halves of the gauge should be.
+//
+// Two single-byte stores into the table exHud reads, which is the same
+// mechanism, and the same atomicity argument, as hudRenderLives writing one
+// byte of hudPtrLive: a byte store cannot be observed half-written by the
+// interrupt that reads it. No sei, no bitmap, no VIC register.
+//
+// It exists so that gameplay has somewhere to say "the gauge should look
+// alarmed" without reaching into a table it does not own.
+// ---------------------------------------------------------------------------
+hudSetHeatColour:
+    sta hudCol + 1                      // HW3, heat left
+    sta hudCol + 2                      // HW4, heat right
+    rts
+
+// ---------------------------------------------------------------------------
 // hudHeatPixels — logical heat to filled pixels. No division, no loop.
 // Saturating at both ends by construction: the index is clamped to the table.
 // Returns A = 0..48.
@@ -587,20 +612,18 @@ hudScoreBump:
 // ---------------------------------------------------------------------------
 // hudDemoTick — MAIN THREAD, once per displayed frame.
 //
-// A deterministic exercise for the four components until gameplay feeds them.
+// A deterministic exercise for the three components gameplay does not feed yet.
 // The cadences are deliberately DIFFERENT and mostly slow: if two components
 // changed together every frame, a tear or a slot-ownership mistake could hide
 // inside the motion. As it is, the score ticks visibly, the bar sweeps, and
 // lives and upgrade change rarely enough to read.
 //
-//   heat      +/- 2 every frame, ramping 0 -> 300 -> 0        (~3s each way)
 //   score     +10 every 8 frames                              (~1.6 per second)
 //   lives     one fewer every 128 frames, 5 -> 0 -> 5         (~2.5s)
 //   upgrade   next state every 192 frames, 0 -> 3 -> 0        (~3.8s)
 //
-// Only heat is evaluated every frame, and even heat marks itself dirty only
-// when the PIXEL count changes -- 300 logical units map onto 48 pixels, so the
-// bitmap needs redrawing roughly every third frame rather than every frame.
+// HEAT IS NOT HERE ANY MORE. It is real gameplay state as of Slice B; score,
+// lives and upgrade are still waiting for the systems that own them.
 // ---------------------------------------------------------------------------
 hudDemoTick:
     inc hudDemoFrame
@@ -608,55 +631,12 @@ hudDemoTick:
     inc hudDemoFrame + 1
 !noHi:
 
-    // ---- heat: ramp up, then down ----------------------------------------
-    lda hudDemoHeatDir
-    bne !down+
-    lda hudHeatLo                       // up by 2
-    clc
-    adc #2
-    sta hudHeatLo
-    bcc !noCarry+
-    inc hudHeatHi
-!noCarry:
-    lda hudHeatHi                       // reached HUD_HEAT_MAX?
-    cmp #>HUD_HEAT_MAX
-    bcc !heatDone+
-    lda hudHeatLo
-    cmp #<HUD_HEAT_MAX
-    bcc !heatDone+
-    lda #<HUD_HEAT_MAX                  // saturate exactly at the top
-    sta hudHeatLo
-    lda #>HUD_HEAT_MAX
-    sta hudHeatHi
-    lda #1
-    sta hudDemoHeatDir
-    jmp !heatDone+
-!down:
-    lda hudHeatLo                       // down by 2
-    sec
-    sbc #2
-    sta hudHeatLo
-    bcs !noBorrow+
-    dec hudHeatHi
-!noBorrow:
-    lda hudHeatHi
-    bne !heatDone+
-    lda hudHeatLo
-    cmp #3
-    bcs !heatDone+
-    lda #0                              // saturate exactly at zero
-    sta hudHeatLo
-    sta hudHeatHi
-    sta hudDemoHeatDir
-!heatDone:
-    // Dirty only when the DRAWN pixel count would change.
-    jsr hudHeatPixels
-    cmp hudHeatPix
-    beq !sameBar+
-    lda hudDirty
-    ora #HUD_DIRTY_HEAT
-    sta hudDirty
-!sameBar:
+    // HEAT IS NO LONGER A DEMONSTRATION. src/weapon.asm feeds hudHeatLo/Hi
+    // from the player's real weapon and marks the component dirty when the
+    // drawn pixel count would change -- see weaponHudFeed, which kept this
+    // block's dirty rule exactly. The ramp that used to live here is gone
+    // rather than disabled: two writers of one logical value is how a HUD
+    // starts disagreeing with the game it is describing.
 
     // ---- score: +10 every 8 frames ---------------------------------------
     lda hudDemoFrame
@@ -703,7 +683,6 @@ hudDemoTick:
     rts
 
 hudDemoFrame:   .byte 0, 0
-hudDemoHeatDir: .byte 0                 // 0 = rising, 1 = falling
 hudDemoUpgTick: .byte 0
 
 .if (* > $1800) { .error "the HUD code has grown into the fixture tables at $1800" }

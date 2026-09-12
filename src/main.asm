@@ -34,10 +34,17 @@
 //   $2c00-$2fff   raster executor code (moved from $1500; it outgrew the hole
 //                 below the fixture tables when the aperture phases were added)
 //   $3000-$31ff   free (headroom for the raster executor above)
-//   $3200-$337f   HUD sprite bitmaps (6 x 64), pointers $c8-$cd
-//   $3380-$37ff   free
+//   $3200-$357f   HUD sprite bitmaps (14 x 64), pointers $c8-$d5
+//   $3580-$35ff   player bitmaps (2 x 64), pointers $d6-$d7
+//   $3600-$37ff   free
 //   $3800-$3fff   BLANK character set, all zeros; also supplies the VIC idle
 //                 byte at $3fff. Cleared by clearCharset, never by luck.
+//   $4000-...     MAIN-THREAD CODE, outside bank 0 by design: src/player.asm
+//                 at $4000 and src/scroll.asm at $4200. Neither is ever fetched
+//                 by the VIC, so neither competes for the 16 KB above -- which
+//                 is about to be wanted for a character set and a terrain
+//                 tileset. Weapons, enemies and waves belong here too.
+//                 $1a00-$1bff is free again because the scroller left it.
 //   $c000-...     schedule + frame records, OUTSIDE bank 0 by design
 .const SCREEN_A       = $0400
 .const SCREEN_B       = $2800
@@ -125,6 +132,25 @@
 // ---------------------------------------------------------------------------
 .const HUD_VISIBLE    = false
 
+// ---------------------------------------------------------------------------
+// FIXTURE_KEYS — the qualification fixtures' keyboard selection.
+//
+// FALSE in a production build, and that is the whole of what "the fixtures are
+// no longer the startup path" means mechanically. The fixtures themselves are
+// NOT deleted: fixtures.asm, the P3/P4/P5 tables and `rebuild` are all still
+// assembled and still reachable, because `make test` selects them the way it
+// always has -- by poking `fixtureIndex` and calling `rebuild` through the
+// monitor, which needs no keyboard at all.
+//
+// What the guard removes from the production path is the SCAN, and the scan is
+// the part that matters: readNextFixture and its three siblings WRITE $dc00 to
+// drive a keyboard column, and $dc00 is the register the joystick is read from.
+// Leaving them in the loop would have the input system and the fixture selector
+// taking turns owning the same port.
+//
+// Set it true for a debug build and SPACE/M/S/R work exactly as they did.
+.const FIXTURE_KEYS   = false
+
 // HUD rows. With RSEL=0 rows 1..23 are always fully visible whatever the fine
 // scroll is; rows 0 and 24 are the slack and may be clipped.
 .const HUD_ROW_STATS  = 1
@@ -171,6 +197,14 @@ BasicUpstart2(entry)
 #import "hud.asm"                       // AFTER sprites.asm, which defines
                                         // spriteByte(); BEFORE renderer.asm,
                                         // whose exHud phase uses its constants
+#import "player.asm"                    // AFTER hud.asm, whose bitmap pool it
+                                        // sits on top of; BEFORE renderer.asm,
+                                        // whose exHud phase programs HW0/HW1
+                                        // and whose ownership assertions are
+                                        // written against PLAYER_SLOT_MASK
+#import "weapon.asm"                    // AFTER player.asm, whose cannon offsets
+                                        // and muzzle timer it uses, and after
+                                        // hud.asm, whose logical heat it feeds
 #import "renderer.asm"
 #import "motion.asm"
 #import "sorter.asm"
@@ -212,7 +246,9 @@ entry:
                                         // makes startup deterministic whatever
                                         // the host leaves in the matrix.
 
-    jsr rebuild                         // build + publish fixture 0
+    jsr gameInit                        // production state: no gameplay sprites,
+                                        // the player at its start position, and
+                                        // the first schedule published
     jsr hudInit                         // draw every HUD bitmap once
     jsr scrollInit                      // build both pages, publish frame 0
     jsr installRenderer                 // renderer owns the IRQ chain from here
@@ -233,13 +269,227 @@ entry:
 // ---------------------------------------------------------------------------
 mainLoop:
     // HUD bitmap preparation lives in the SPIN, not in the once-per-frame block
-    // above. That block runs immediately after the frame transaction and
+    // below. That block runs immediately after the frame transaction and
     // reaches this point at around raster 10, which is inside the window where
     // the VIC fetches HUD sprite data; the spin covers the rest of the frame.
     // hudUpdate refuses to run outside its safe raster band and simply tries
     // again on the next pass, which is a fraction of a millisecond later.
     jsr hudUpdate
 
+.if (FIXTURE_KEYS) {
+    jsr fixtureKeyPoll                  // debug builds only; see FIXTURE_KEYS
+}
+
+    lda frameCounter
+    cmp lastFrameSeen
+    beq mainLoop                        // same displayed frame: nothing to do
+
+    // DID THE MAIN THREAD MISS A FRAME? The counter advances by one per
+    // displayed frame, so a step of two or more means a whole frame went by
+    // without the game preparing one. The picture does not break -- CURRENT is
+    // still adopted and still complete -- but the game ran at half rate for a
+    // frame, and that is the number a performance ladder needs. Saturating: any
+    // non-zero value is a finding, and the exact count past 255 is not.
+    // The low byte alone is enough for a delta of one against two or more.
+    pha
+    sec
+    sbc lastFrameSeen
+    cmp #2
+    bcc !onTime+
+    ldx gameOverrun
+    cpx #$ff
+    beq !onTime+
+    inc gameOverrun
+!onTime:
+    pla
+    sta lastFrameSeen
+    jsr gameFrame
+    jmp mainLoop
+
+// ---------------------------------------------------------------------------
+// gameFrame — ONE displayed frame of game, in the order the engine requires.
+//
+// This is the production loop, and it is deliberately shaped so the systems
+// still to come have exactly one obvious place each:
+//
+//     input        <- here
+//     player       <- here
+//     weapons         Slice B
+//     enemies         Slice C
+//     collision       Slice D
+//     waves           Slice E/G
+//     HUD feed        Slice B (hudDemoTick is the placeholder it replaces)
+//     ----------------------------------------------------------------
+//     emit         logical state -> the renderer's inputs
+//     sort / build / publish      the engine, untouched
+//     regen / scroll              the engine, untouched
+//
+// The three engine calls at the bottom are in the order docs/ENGINE_CONTRACT.md
+// §1 fixes and the order src/main.asm's frame-ownership note explains: hudTick
+// writes the page that is on screen RIGHT NOW, regenTick rebuilds the page
+// nothing is displaying, and scrollTick is the only thing that may change which
+// page that is. Nothing above them touches a page at all.
+// ---------------------------------------------------------------------------
+gameFrame:
+.if (HUD_VISIBLE) {
+    jsr hudTick                         // the displayed page, before scrollTick
+}                                       // can change which page that is
+
+    jsr readInput                       // $dc00 -> joyState
+    jsr playerTick                      // joyState -> plyX / plyXHi / plyY
+    jsr weaponTick                      // cadence, heat, overheat, shot event
+    jsr weaponHudFeed                   // real heat -> the HUD's logical heat
+
+    // AFTER weaponTick, and that ordering is the muzzle flash. weaponTick sets
+    // plyMuzzle when a volley resolves and playerEmit turns it into a pointer
+    // and a colour, so a shot fired this frame is published this frame rather
+    // than one frame late.
+    jsr playerEmit                      // -> plyPres, and plyDirty if it changed
+
+    jsr hudDemoTick                     // score, lives and upgrade only: their
+                                        // systems do not exist yet. Heat left
+                                        // this routine in Slice B and is fed
+                                        // above from the real weapon.
+
+    // A qualification fixture, if one has been selected through the monitor,
+    // still moves and still rebuilds every frame exactly as it did. Nothing
+    // selects one in a production boot, so fixtureMoves is zero and this costs
+    // a load and a branch.
+    lda fixtureMoves
+    beq !noMotion+
+    jsr motionTick
+!noMotion:
+
+    // ---- rebuild and publish, but only when something changed ------------
+    //
+    // A frame in which neither the player nor a fixture moved has an identical
+    // schedule to the one already adopted, so building it again would be a few
+    // thousand cycles spent reproducing the bytes CURRENT already holds. The
+    // executor keeps reading that immutable copy, and exHud keeps programming
+    // HW0/HW1 from it, so the picture is unchanged -- including across a page
+    // flip, because the pointer destination is patched per frame by exFrame and
+    // not baked into the schedule.
+    //
+    // This is also what keeps the STATIC regression fixtures costing what they
+    // have always cost: MAXCAP is thirty logical sprites and rebuilding it
+    // every frame is a measurable load that P4 specifically measured skips
+    // against. With no joystick attached the player never moves, so a fixture
+    // run is byte-for-byte the frame it always was.
+    lda plyDirty
+    ora fixtureMoves
+    beq !noPublish+
+    lda #0
+    sta plyDirty
+    jsr sortTick                        // order by Y BEFORE admission
+    jsr buildSchedule                   // complete NEXT, player block included
+    jsr publishSchedule                 // one byte
+!noPublish:
+
+    jsr regenTick
+    jsr scrollTick
+    // fall through to the span measurement
+
+// ---------------------------------------------------------------------------
+// gameSpan — how far into the frame the main thread finished, in raster lines
+// measured from the frame transaction at raster 250.
+//
+// This is the headroom number the performance ladder is built on, and it is
+// stated as an elapsed span rather than a raw raster because the game frame
+// STRADDLES the frame boundary: it starts just after raster 250 and finishes
+// somewhere in the low rasters of the next displayed frame, so a bare $d012
+// reading counts backwards.
+//
+//     raster 250..255  ->  elapsed 0..5      (RST8 clear, $d012 >= 250)
+//     raster 256..311  ->  elapsed 6..61     (RST8 set)
+//     raster 0..193    ->  elapsed 62..255   (RST8 clear)
+//     raster 194..249  ->  elapsed > 255     saturate, and COUNT it
+//
+// $d012 IS THE LOW BYTE OF A NINE-BIT COUNTER and bit 7 of a $d011 READ is the
+// ninth. Reading the low byte alone would call raster 260 "4" and score a frame
+// that finished comfortably as one that finished before it started; hudUpdate's
+// own wrap check was written twice for exactly that reason.
+// ---------------------------------------------------------------------------
+gameSpan:
+    lda $d011
+    and #$80
+    bne !high+
+    lda $d012
+    cmp #250
+    bcs !justAfter+                     // 250..255: barely started
+    cmp #194
+    bcs !over+                          // 194..249: past a whole frame's worth
+    clc
+    adc #62
+    jmp !store+
+!justAfter:
+    sec
+    sbc #250
+    jmp !store+
+!high:
+    lda $d012
+    clc
+    adc #6
+!store:
+    cmp gameSpanMax
+    bcc !done+
+    sta gameSpanMax
+!done:
+    rts
+!over:
+    lda #$ff
+    sta gameSpanMax                     // saturating, like every fault counter
+    lda gameSpanOver                    // here: the value is a floor, not a
+    cmp #$ff                            // measurement, and the count says so
+    beq !done-
+    inc gameSpanOver
+    rts
+
+// ---------------------------------------------------------------------------
+// gameInit — the production starting state, before the renderer owns the IRQ.
+//
+// NO GAMEPLAY SPRITES. logCount is zero, so the sorter has nothing to order,
+// the builder accepts nothing, schedBatches is zero and the handoff takes its
+// no-batches path. The player is not in that pool and never will be, so it
+// displays perfectly well through a frame in which the mux does nothing at all
+// -- which, until enemies arrive, is every frame.
+// ---------------------------------------------------------------------------
+gameInit:
+    jsr clearMotion                     // no trajectories, no ring, and
+                                        // fixtureMoves = 0: a production boot
+                                        // must not inherit a fixture's motion
+                                        // state from the .fill that set it up
+    lda #0
+    sta logCount
+    jsr sortReset                       // sortedIDs must be a permutation of
+                                        // 0..logCount-1, which for zero is the
+                                        // empty one
+    jsr playerInit
+    jsr weaponInit
+    jsr playerEmit
+    jsr sortTick
+    jsr buildSchedule
+    jsr publishSchedule
+    lda #0
+    sta plyDirty                        // the build above IS the first
+    sta gameSpanMax                     // publication; nothing is outstanding
+    sta gameSpanOver
+    sta gameOverrun
+    rts
+
+// ---------------------------------------------------------------------------
+// fixtureKeyPoll — DEBUG BUILDS ONLY. The qualification fixtures on the
+// keyboard, exactly as they were before this became a game.
+//
+// The CALL SITE in mainLoop is guarded by FIXTURE_KEYS, so in a production build
+// this is unreachable: these routines WRITE $dc00 to select a keyboard column,
+// and $dc00 is where readInput samples the joystick.
+//
+// The routine itself is still assembled. Guarding the definition as well would
+// mean the debug and production builds had different layouts, and the whole
+// value of keeping the fixtures is that selecting one measures the SAME binary
+// a human is playing.
+// ---------------------------------------------------------------------------
+fixtureKeyPoll:
     jsr readNextFixture
     beq !noKey+
 
@@ -277,39 +527,7 @@ mainLoop:
     sta fixtureIndex
     jsr rebuild
 !noJump5:
-
-    lda frameCounter
-    cmp lastFrameSeen
-    beq mainLoop                        // same displayed frame: nothing to do
-    sta lastFrameSeen
-
-.if (HUD_VISIBLE) {
-    jsr hudTick
-}
-
-    jsr hudDemoTick                     // advance the HUD's logical values and
-                                        // mark what changed. Cheap, and it only
-                                        // SETS flags -- the drawing happens in
-                                        // the spin below, inside a window where
-                                        // the VIC cannot be reading the bitmaps.
-
-    // P3. A moving fixture must have its logical positions advanced and a
-    // COMPLETE new schedule built and published every frame. The order is the
-    // architecture and is not negotiable: move, then build from the moved
-    // values, then publish one byte. Nothing mutates a schedule that has been
-    // published, and the executor is never told that anything moved.
-    //
-    // A static fixture skips both, exactly as in P0/P1/P2, which is why the
-    // static regression fixtures cost precisely what they always did.
-    lda fixtureMoves
-    beq !static+
-    jsr motionTick
-    jsr republish                       // NOT rebuild: see below
-!static:
-
-    jsr regenTick
-    jsr scrollTick
-    jmp mainLoop
+    rts
 
 // ---------------------------------------------------------------------------
 // rebuild — load the selected fixture, build the NEXT schedule, publish it.
@@ -622,9 +840,10 @@ drawStatsRow:
     jsr putHexY
     rts
 
-// "SCR f  ROW wwww  PG A  CRS cccc" — the scroller stated on screen, so a
-// human can read fine phase, world row, displayed page and coarse-step count
-// without a monitor.
+// "SCR f  ROW rrrr  PG A  CRS cccc" — the scroller stated on screen, so a
+// human can read fine phase, STAGE row, displayed page and coarse-step count
+// without a monitor. The stage row counts DOWN as play advances; worldProgress
+// is the counter that counts up, and CRS tracks it exactly.
 drawScrollRow:
     ldy #0
 !template:
@@ -640,10 +859,10 @@ drawScrollRow:
     ldy #4
     sta (scrPtr),y
 
-    lda worldRowHi
+    lda stageTopRowHi
     ldy #11
     jsr putHexY
-    lda worldRowLo
+    lda stageTopRowLo
     ldy #13
     jsr putHexY
 
@@ -990,3 +1209,14 @@ prevJump:      .byte 1                  // start HELD, like prevNext: a press
                                         // matrix cannot select a fixture
 keyDown:       .byte 0
 lastFrameSeen: .byte 0
+
+// --- production frame diagnostics -------------------------------------------
+// Read by tests/test_slice_a.py; never read by the engine. Min/max and
+// saturating counts, in the style the rest of the engine already uses, because
+// a wrapping counter can read zero after a long run and look clean.
+gameSpanMax:   .byte 0                  // worst main-thread span, raster lines
+                                        // after the frame transaction
+gameSpanOver:  .byte 0                  // frames whose span exceeded 255 lines:
+                                        // the span above is then a floor
+gameOverrun:   .byte 0                  // displayed frames the main thread did
+                                        // not prepare a frame for. MUST read 0.

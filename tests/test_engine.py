@@ -61,14 +61,19 @@ def source_invariants():
                    for n, t in src.items()}
         outside = {n: c for n, c in outside.items() if c and n not in ("renderer.asm", "main.asm")}
         check(f"only the renderer writes ${reg}", not outside, f"{outside}")
-    ptr = {n: len(re.findall(r"^\s*sta\s+PTR_[AB],[xy]", t, re.M)) for n, t in src.items()}
-    check("exactly two instructions write a sprite pointer table, both in the renderer",
-          sum(ptr.values()) == 2 and ptr.get("renderer.asm") == 2, f"{ptr}")
-    patched = len(re.findall(r"sta\s+(?:ex|hu)PtrStore\s*\+\s*2", src["renderer.asm"]))
-    check("both pointer destinations are patched from one place (exFrame)",
-          patched == 2, f"{patched} patch sites")
-    check("hud.asm writes no VIC register at all",
-          not re.search(r"^\s*sta\s+\$d0", src["hud.asm"], re.M | re.I))
+    # FOUR pointer-writing instructions now, not two: the batch executor's, the
+    # HUD's, and the player's two. The pattern matches an unindexed `sta PTR_A+1`
+    # as well as an indexed one, so a new writer cannot hide by dropping the ,x.
+    ptr = {n: len(re.findall(r"^\s*sta\s+PTR_[AB]\b", t, re.M)) for n, t in src.items()}
+    check("exactly four instructions write a sprite pointer table, all in the renderer",
+          sum(ptr.values()) == 4 and ptr.get("renderer.asm") == 4, f"{ptr}")
+    patched = len(re.findall(r"sta\s+(?:exPtr|huPtr|plPtr0|plPtr1)Store\s*\+\s*2",
+                             src["renderer.asm"]))
+    check("all four pointer destinations are patched from one place (exFrame)",
+          patched == 4, f"{patched} patch sites")
+    for owner in ("hud.asm", "player.asm"):
+        check(f"{owner} writes no VIC register at all",
+              not re.search(r"^\s*sta\s+\$d0", src[owner], re.M | re.I))
 
 
 def static_memory(mon):
@@ -132,16 +137,28 @@ if __name__ == "__main__":
         print("\n=== 3. raster phase schedule and coherence, per fixture ===")
         print("  fixture      frames   HUD      exit  handoff   exit  top       "
               "bottom      late  FEL  wrap  admitted Y")
-        for name, sel, fx in (("boot/fix0", None, None),
+        # The first row is the PRODUCTION boot state: no fixture, no gameplay
+        # sprites, the player alone on HW0/HW1. It is deliberately first,
+        # because "the engine still holds every invariant with an empty mux" is
+        # the state the game actually runs in.
+        for name, sel, fx in (("boot/game", None, None),
                               ("MAXCAP",     select_p3, 22),
                               ("RING-SLOW",  select_p5, 31),
                               ("RING-FAST",  select_p5, 32),
                               ("RING-SHIFT", select_p5, 33)):
+            picked = True
             if sel:
+                picked = False
                 for _ in range(8):
                     if sel(mon, sym, fx):
+                        picked = True
                         break
                 free_run(mon, sym["frameCounter"], 1)
+            # A fixture that did not actually load measures NOTHING, and every
+            # check below then passes on an empty schedule. The selection
+            # helpers already verify themselves and return None when they fail;
+            # this is the caller finally paying attention to that.
+            check(f"  {name}: the fixture actually loaded", picked)
             r = fixture_run(mon, name)
             yr = admitted_y(mon)
             ytxt = f"{yr[0]}..{yr[1]}" if yr else "none"
@@ -153,10 +170,35 @@ if __name__ == "__main__":
                   and r["hudExit"] < HUD_Y + 1
                   and r["hoEnter"] == [HANDOFF_LINE, HANDOFF_LINE]
                   and r["hoExit"] < TOP_ARM_LINE
-                  and tuple(r["top"]) == TOP_SPLIT
+                  # THE SPLIT LANDED ON ITS OWN TARGET, WHICHEVER TARGET THAT
+                  # WAS. exTop aims at 54 when the adopted YSCROLL is 7 and at
+                  # 55 otherwise, and edgeLate counts any split that missed --
+                  # so those two conditions ARE the invariant.
+                  #
+                  # This used to demand `top == (54, 55)` exactly, which also
+                  # requires a YSCROLL=7 frame to have been DISPLAYED during the
+                  # window. That is a statement about the fixture's frame-record
+                  # health, not about the aperture: a fixture whose main thread
+                  # is over budget drops frame records (ENGINE_CONTRACT.md §10),
+                  # the displayed phases become a subsample of the eight, and
+                  # which subsample survives is a matter of what the skipping
+                  # pattern happens to be. It moved when the scroll direction
+                  # reversed the order of the phases, and RING-FAST -- which
+                  # skips publications with a period of two -- stopped showing
+                  # phase 7 at all while still splitting perfectly on every
+                  # frame it did display. Asserted where it is guaranteed
+                  # instead: see the production check below.
+                  and TOP_SPLIT[0] <= r["top"][0]
+                  and r["top"][1] <= TOP_SPLIT[1]
                   and r["bot"] == [BOT_SPLIT, BOT_SPLIT]
                   and r["edgeLate"] == 0)
             check(f"  {name}: every raster phase landed on its own line", ok)
+            if sel is None:
+                # The production configuration keeps up with the frame: nothing
+                # is dropped, so every one of the eight phases IS displayed and
+                # both split lines MUST be observed.
+                check("  production: both aperture split lines were exercised",
+                      tuple(r["top"]) == TOP_SPLIT, f"{r['top']}")
             check(f"  {name}: page/pointer coherence and scroller clean",
                   r["pgMis"] == 0 and r["ptrMis"] == 0 and r["scrLate"] == 0,
                   f"pg {r['pgMis']} ptr {r['ptrMis']} scrollLate {r['scrLate']}")
