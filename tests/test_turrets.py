@@ -260,10 +260,27 @@ def ownership():
 
     # The sprite and logical-object namespaces, by symbol. A turret that
     # allocated an object or named a hardware slot would show up here.
+    #
+    # A TURRET IS STILL NOT AN OBJECT, and that is what this list is for: it
+    # must not claim a pool slot, a logical sprite, a hardware slot or a batch.
     for token in ("objectAlloc", "objectActivate", "objectFree", "logActive",
-                  "logCount", "logY", "logX", "logPtr", "logCol", "sortedIDs",
+                  "logY", "logX", "logPtr", "logCol", "sortedIDs",
                   "schedule", "batch", "HW_", "MUX_", "SPRITE", "spritePtr"):
         check(f"turrets.asm never mentions {token}", token not in src)
+
+    # logCount LEFT THE LIST WHEN THE TURRETS STARTED SHOOTING, and the
+    # distinction is worth stating rather than quietly dropping. Reading how
+    # many logical objects are alive is not claiming one: turretFireTick
+    # consults it to decide whether the world is already too busy to add a
+    # projectile -- TURRET_FIRE_MAX_POP, the old game's own encounter-budget
+    # policy. It is a gameplay input, and the surrounding checks still pin the
+    # thing that matters, which is that no turret ever ALLOCATES anything.
+    reads_pop = re.findall(r"lda\s+logCount", src)
+    check("turrets.asm reads logCount and never writes it",
+          len(reads_pop) >= 1
+          and not re.findall(r"st[axy]\s+logCount|inc\s+logCount"
+                             r"|dec\s+logCount", src),
+          f"{len(reads_pop)} reads")
 
     # And the composition point is the hidden page, not the visible screen.
     scroll = (ROOT / "src" / "scroll.asm").read_text()

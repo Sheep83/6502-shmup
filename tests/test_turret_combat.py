@@ -285,8 +285,14 @@ def ownership():
     check("turrets.asm still writes NO VIC register", not writes, str(writes))
     check("...and still does not name one",
           not re.findall(r"\$(d0[0-9a-f]{2})", src, re.I))
+    # logCount is NOT in this list any more. A turret still claims no pool
+    # slot, no logical sprite and no batch -- every allocation symbol below
+    # stays forbidden -- but the firing slice reads the live object count to
+    # decide whether the world is already too busy to add a projectile, which
+    # is a gameplay input rather than a resource claim.
+    # tests/test_turrets.py carries the full form of that distinction.
     for token in ("objectAlloc", "objectActivate", "objectFree", "logActive",
-                  "logCount", "logY,", "logPtr", "sortedIDs", "schedBatches",
+                  "logY,", "logPtr", "sortedIDs", "schedBatches",
                   "MUX_", "spritePtr", "$d015", "$d01e"):
         check(f"turrets.asm never mentions {token}", token not in src)
     # It DOES write colour RAM now, and only through one routine.

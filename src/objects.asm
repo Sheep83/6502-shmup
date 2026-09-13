@@ -69,6 +69,11 @@
 // Object types. TYPE_NONE is 0 so a zeroed slot is typeless by construction.
 .const TYPE_NONE     = 0
 .const TYPE_ENEMY    = 1
+// A HOSTILE PROJECTILE. It is an ordinary pool object with an ordinary logical
+// presentation, and the type is what keeps it out of things meant for enemies:
+// src/collision.asm's traceRay filters on TYPE_ENEMY, so the player's weapon
+// cannot shoot bullets down, exactly as the old game's could not.
+.const TYPE_EBULLET  = 2
 
 // ===========================================================================
 // State. MAIN THREAD ONLY.
@@ -290,8 +295,13 @@ objectUpdateAll:
     beq !next+
     lda objType,x
     cmp #TYPE_ENEMY
-    bne !next+
+    bne !notEnemy+
     jsr enemyTick                       // may free slot X; X is preserved
+    jmp !next+
+!notEnemy:
+    cmp #TYPE_EBULLET                   // the only other thing in the pool, and
+    bne !next+                          // an inactive slot never gets this far
+    jsr ebulletTick                     // may free slot X; X is preserved
 !next:
     inx
     cpx #MAX_OBJECTS

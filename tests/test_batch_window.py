@@ -256,10 +256,20 @@ def machine(fast=False):
         mon = v.mon; free_run(mon, sym["frameCounter"], 1); mon.cmd("delete")
         poke(mon, sym["joyHold"], 1); poke(mon, sym["joyState"], 0x1f)
         sb = rd(mon, sym["enemySpawnTick"])[0]
+        # AND TURRET FIRE IS SWITCHED OFF, for the same reason the enemy
+        # spawner is: this file poses an EXACT population at chosen Y values
+        # and freezes it (objVY = 0) so that the machine's schedule and the
+        # model's are comparable. A hostile projectile is an ordinary pool
+        # object and it is NOT frozen -- it descends three pixels a frame, so
+        # the model's expected entry count changes underneath the settle loop
+        # below and the loop can never converge. It was seen as "CURRENT holds
+        # 14 entries, model says 16".
+        poke(mon, sym["turretFireTick"], 0x60)      # RTS
         for name, ys in LAYOUTS:
             mon.cmd("delete"); free_run(mon, sym["frameCounter"], 0.3); mon.cmd("delete")
             poke(mon, sym["enemySpawnTick"], 0x60)
             for i in range(16): call_x(mon, sym["objectFree"], i)
+            poke(mon, sym["ebCount"], 0)        # freed behind ebullet.asm's back
             poke(mon, sym["plyX"], 160); poke(mon, sym["plyXHi"], 0); poke(mon, sym["plyY"], 235)
             ok_pop = True
             for k, y in enumerate(ys):

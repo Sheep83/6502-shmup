@@ -76,17 +76,45 @@ D64   := $(ROOT)/build/shmup.d64
 #
 # Normal speed, no monitor, no warp: the only configuration in which what you
 # see is what the machine really does.
-JOY2      ?= 1
-# Keysets on only when one is actually selected.
-KEYSET    := $(if $(filter 2 3,$(JOY2)),-keyset,+keyset)
-VICE_OPTS := +saveres -pal -joydev1 0 -joydev2 $(JOY2) $(KEYSET)
+# ---------------------------------------------------------------------------
+# MANUAL AND AUTOMATED VICE ARE TWO DIFFERENT CONFIGURATION CONTEXTS, and the
+# options below are the MANUAL one. The automated suites build their own
+# command line in tests/test_p0.py and must keep `-default +saveres` with both
+# control ports detached: they need a known machine and must never write the
+# user's settings back.
+#
+# A manual session is the opposite. It is the player's own machine and it must
+# come up the way they left it:
+#
+#   save settings on exit   ENABLED, so a change made from the menus persists.
+#                           `-saveres` is "save on exit"; `+saveres` is "do not".
+#                           This target used to pass `+saveres`, which protected
+#                           the config from the AUTOMATED runs -- a concern that
+#                           belongs to those runs and not to this one.
+#   joystick port 2         KEYSET A, which is what the user's own vicerc
+#                           selects and what their bindings are written for.
+#   keysets                 ON, unconditionally: port 2 is a keyset.
+#   port 1                  LEFT ALONE. It used to be detached so the fixture
+#                           selector's $dc00/$dc01 keyboard scan could see the
+#                           SPACE key -- and that scan was compiled out when the
+#                           fixtures left the startup path (FIXTURE_KEYS in
+#                           src/main.asm). Detaching a port the player may want
+#                           to use, to protect a scan that no longer runs, is
+#                           the kind of thing that outlives its reason.
+#
+# `-default` IS STILL ABSENT, and that is still the important one: with any
+# save it does not merely ignore the user's vicerc, it OVERWRITES it with
+# factory defaults, and their keyset bindings go with it.
+JOY2      ?= 2
+KEYSET    := -keyset
+VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 
 
 .PHONY: p3-fixtures p4-fixtures
 .PHONY: all build d64 test test-fast test-engine-full
 .PHONY: test-slice-a test-slice-a-prime test-slice-b
 .PHONY: test-p0 test-p1 test-p2 test-p3 test-p4 test-p5 test-renderer-full
-.PHONY: test-terrain test-turrets test-turret-combat run run-d64 clean
+.PHONY: test-terrain test-turrets test-turret-combat test-turret-firing run run-d64 clean
 
 all: build
 
@@ -191,6 +219,10 @@ test-p5: build
 #                         arbitration, the 16-pixel hitbox, the colour pulse
 #                         and hit flash, and destruction restoring the
 #                         authoritative terrain on BOTH pages
+#   test_turret_firing.py the other half: the recovered firing cadence and
+#                         eligibility, the capped hostile projectile pool, its
+#                         flight and despawn, software projectile -> player
+#                         collision, and the invulnerability window
 #   test_batch_window.py  legality-window batch merging: the window arithmetic
 #                         at the reuse boundary, the common-intersection rule,
 #                         a structural sweep, and the 6502 against the model.
@@ -220,6 +252,7 @@ test: build
 	python3 tests/test_terrain.py
 	python3 tests/test_turrets.py
 	python3 tests/test_turret_combat.py
+	python3 tests/test_turret_firing.py
 	python3 tests/test_batch_window.py --fast
 
 test-slice-a: build
@@ -245,6 +278,9 @@ test-turrets: build
 
 test-turret-combat: build
 	python3 tests/test_turret_combat.py
+
+test-turret-firing: build
+	python3 tests/test_turret_firing.py
 
 test-batch-window: build
 	python3 tests/test_batch_window.py --fast

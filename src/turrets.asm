@@ -110,6 +110,45 @@
 // here and in the report so the future score slice has nothing to rediscover.
 .const TURRET_SCORE_PER_KILL = 100      // documented, deliberately not wired
 
+// ---------------------------------------------------------------------------
+// FIRING, RECOVERED FROM updateBackgroundTurrets
+// ---------------------------------------------------------------------------
+//   TURRET_FIRE_INTERVAL   42   background_turrets.asm:42 -- 100 frames, and
+//                               the timer is PER TURRET, not global
+//   the fire window        the old test is `TURRET_Y >= 88` and `< 201`, in
+//                          the SAME sprite-Y space this engine's turretLogY
+//                          already uses and against the same 55-based player
+//                          band, so the two numbers come across as they are
+//                          rather than being re-derived
+//   hold fire if near      `turretY + 24 >= playerY` -- "existing bullets fly
+//                          downward: hold fire when player is above/near"
+//   the population gate    the old `SORTED_COUNT < 8`, an encounter-budget
+//                          policy rather than a renderer limit
+//
+// THE TIMER ONLY RUNS WHILE THE TURRET IS COMBAT-VISIBLE, and is reloaded to
+// the full interval the moment it is not. So a turret must be wholly on the
+// aperture for a hundred consecutive frames before it can shoot -- and it is
+// only ever on the aperture for about 184 (23 matrix rows, eight frames a
+// row), so each turret fires at most once or twice per pass. That is the old
+// game's pacing and it is also why this costs nothing: there is no barrage to
+// schedule.
+.const TURRET_FIRE_INTERVAL = 100
+.const TURRET_FIRE_MIN_Y    = 88        // below this it has only just arrived
+.const TURRET_FIRE_MAX_Y    = 201       // exclusive
+.const TURRET_FIRE_LEAD     = 24        // the ship must be this far below
+.const TURRET_MUZZLE_X      = 4         // centre an 8-pixel bolt on a 16-pixel
+.const TURRET_MUZZLE_Y      = 12        // mount, and launch it from the barrel
+
+// THE POPULATION GATE, AND IT IS NOT COSMETIC. docs/ENGINE_CONTRACT.md §10
+// puts the practical ceiling at about eight well-separated gameplay sprites,
+// and tests/test_slice_d.py's population-8 rung is a hard gate for this
+// repository. A turret that adds a projectile to an already-busy world spends
+// exactly the budget that rung measures. The old game reached the same
+// conclusion from the other direction -- it called the check a "calmer normal-
+// scrolling encounter budget (gameplay policy, NOT a renderer limit)" -- and
+// used the same number.
+.const TURRET_FIRE_MAX_POP  = 8
+
 .if (TURRET_HITBOX_W > 32) {
     .error "a hitbox wider than 32 breaks the single-byte delta test"
 }
@@ -343,6 +382,11 @@ turretCramRow: .fill TURRET_TOTAL, 0    // the matrix row this turret last
                                         // whole of "put the colour back".
 turretHitTimer:.fill TURRET_TOTAL, 0    // frames of hit flash remaining
 
+// Frames until this turret may fire. Counted down only while it is combat-
+// visible and alive, and slammed back to the full interval the moment it is
+// not -- so it measures time ON the aperture, not time since the last shot.
+turretFireTimer:.fill TURRET_TOTAL, 0
+
 // --- globals ---------------------------------------------------------------
 // The pulse is ONE phase for every turret, exactly as the old game had it:
 // turretPulseTable is indexed by a single global counter, so two turrets on
@@ -471,6 +515,8 @@ turretInit:
     sta turretAlive,x
     lda #TURRET_START_HEALTH
     sta turretHealth,x
+    lda #TURRET_FIRE_INTERVAL
+    sta turretFireTimer,x
     lda #0
     sta turretHitTimer,x
     sta turretVisible,x
@@ -664,11 +710,34 @@ turretWorldTick:
     // every frame until it is. Clearing them HERE, where the page changes,
     // means the per-frame pass can leave such a turret alone entirely instead
     // of rewriting two bytes eight times a frame to say nothing changed.
+    //
+    // ONLY THE TURRETS THAT ARE GENUINELY OFF THE NEW PAGE, and that condition
+    // is turretAimTick's own !next test restated -- pair == 0 or row < 0 --
+    // against the geometry adopted four instructions ago. A turret that IS on
+    // the page has both bytes written authoritatively by turretAimTick later
+    // this very frame, on the visible path and on !clipped alike, so clearing
+    // it here changes nothing it can observe...
+    //
+    // ...EXCEPT ONE THING, AND IT IS WHY THIS IS A CONDITIONAL AND NOT A FILL.
+    // turretAimTick arms the firing clock on the turretVisible 0 -> 1
+    // transition. Blanking all eight manufactured that transition for a turret
+    // that had not moved at all, once every eight frames, so turretFireTimer
+    // ran 100, 99 ... 93, 100 for ever and NO TURRET COULD EVER FIRE. It was
+    // invisible to a fixture that drives the tick directly and obvious the
+    // moment the production game was sampled frame by frame:
+    //
+    //     frame 0..8  scrollFine 7,0,1..7   timer 93,100,99..93  logY 70..78
+    //
+    // -- a perfect eight-frame sawtooth with a floor of 93, on a turret whose
+    // logY says it sat wholly inside the aperture the whole time.
     ldx #TURRET_TOTAL - 1
-    lda #0
 !blank:
-    sta turretVisible,x
+    lda turretPaintPair,x                // == 0 is turretAimTick's !next exactly:
+    bne !keep+                           // the shadow raises pair only for rel
+    lda #0                               // 0..23, where row is always positive,
+    sta turretVisible,x                  // so row < 0 cannot occur with pair != 0
     sta turretLogY,x
+!keep:
     dex
     bpl !blank-
 
@@ -894,6 +963,24 @@ turretAimTick:
     bcc !clipped+                       // the top of the body is clipped
     cmp #APERTURE_BOT_RASTER - TURRET_BODY_H * 8 + 1
     bcs !clipped+                       // the bottom of the body is clipped
+    // ---- ARM THE FIRING CLOCK WHEN THE TURRET ARRIVES ---------------------
+    // The recovered rule is "a hundred CONSECUTIVE frames wholly on the
+    // aperture", and the old engine spelled that as "reset the timer on every
+    // frame the turret is not visible". That needs the six turrets which are
+    // not on the page visited every frame, and turretFireTick deliberately
+    // does not visit them -- it leaves in five cycles unless some turret is
+    // combat-visible at all, which is the whole reason firing is affordable.
+    //
+    // Arming on the 0 -> 1 TRANSITION says the same thing from the other side
+    // and costs six cycles on a path at most two turrets a frame reach. It is
+    // also the stricter reading: a body flickering at a band edge as the fine
+    // scroll moves re-arms each time it returns, so "consecutive" really is
+    // consecutive.
+    ldy turretVisible,x
+    bne !stillVisible+
+    lda #TURRET_FIRE_INTERVAL
+    sta turretFireTimer,x
+!stillVisible:
     lda #1
     sta turretVisible,x
     lda trtVisibleMask
@@ -1376,6 +1463,111 @@ turretBit: .byte 1, 2, 4, 8, 16, 32, 64, 128
 .if (TURRET_TOTAL > 8) { .error "turretBit is one byte of flags" }
 
 // ===========================================================================
+// FIRING
+// ===========================================================================
+// ---------------------------------------------------------------------------
+// turretFireTick — the turrets take their shot. MAIN THREAD.
+//
+// WHERE THIS RUNS, AND WHY THAT FRAME CAN AFFORD IT. Late in gameFrame, beside
+// enemySpawnTick and after collisionTick, for two reasons that are both about
+// correctness before they are about cost: a turret destroyed by the player
+// this frame must not also fire this frame, and a projectile spawned now must
+// be rendered where it was launched rather than moved before it has ever been
+// seen -- which is the same rule that puts enemySpawnTick after
+// objectUpdateAll.
+//
+// It is NOT on the coarse-step frame and NOT on the scrollFine == 7
+// preparation frame. Neither of those is touched: the turret page geometry
+// still adopts a shadow at the step and still derives it on the quiet frame,
+// and this adds nothing to either.
+//
+// FIVE CYCLES WHEN NO TURRET CAN SHOOT. trtVisibleMask is the byte
+// turretAimTick already maintains for the player's hitscan -- one bit per
+// combat-visible turret -- so "is any turret even on the aperture" is a load
+// and a branch, and turrets are on the aperture for about a third of the
+// level. Nothing here walks the eight authored turrets unless one of them
+// genuinely could shoot, and the model sweep says at most two ever can.
+// ---------------------------------------------------------------------------
+turretFireTick:
+    lda trtVisibleMask
+    bne !any+
+    rts                                 // the whole cost of an ordinary frame
+!any:
+    ldx #TURRET_TOTAL - 1
+!turret:
+    lda turretVisible,x                 // turretAimTick already answered this,
+    beq !offAperture+                   // and it means "the whole 16-pixel body
+                                        // is inside the aperture"
+    lda turretAlive,x
+    beq !offAperture+                   // A DEAD TURRET NEVER FIRES, and its
+                                        // timer is held at the full interval so
+                                        // it cannot fire the instant it is
+                                        // somehow revived either
+
+    lda turretFireTimer,x
+    beq !fire+
+    dec turretFireTimer,x
+    jmp !next+
+
+!offAperture:
+    lda #TURRET_FIRE_INTERVAL           // not visible, or dead. turretAimTick
+    sta turretFireTimer,x               // arms the clock on arrival, so this is
+                                        // the DEAD case: a turret that is on the
+                                        // aperture but destroyed keeps a full
+                                        // interval rather than a stale count
+    jmp !next+
+
+!fire:
+    // THE TIMER RELOADS BEFORE THE ELIGIBILITY TESTS, which is the old game's
+    // order and is a gameplay decision, not an oversight: a shot the geometry
+    // refuses costs a whole interval rather than being retried every frame
+    // until it lands. Without that a turret held just out of position would
+    // run these tests sixty times a second.
+    lda #TURRET_FIRE_INTERVAL
+    sta turretFireTimer,x
+
+    lda turretLogY,x                    // only from the middle of its pass
+    cmp #TURRET_FIRE_MIN_Y
+    bcc !next+
+    cmp #TURRET_FIRE_MAX_Y
+    bcs !next+
+
+    clc                                 // the bolt falls: the ship has to be
+    adc #TURRET_FIRE_LEAD               // below, and not right on top of it
+    cmp plyY
+    bcs !next+
+
+    lda plyInvuln                       // an invulnerable ship is not shot at:
+    bne !next+                          // the old game's `PLAYER_STATE == 0`,
+                                        // in the terms this engine has
+
+    lda logCount                        // the encounter budget -- see the
+    cmp #TURRET_FIRE_MAX_POP            // constant. A busy world is left alone
+    bcs !next+
+
+    // ---- the muzzle -------------------------------------------------------
+    lda turretXLo,x                     // centre the 8-pixel bolt on the
+    clc                                 // 16-pixel mount, nine bits
+    adc #TURRET_MUZZLE_X
+    sta ebSpawnXLo
+    lda turretXHi,x
+    adc #0
+    sta ebSpawnXHi
+    lda turretLogY,x                    // out of the barrel, not the roof
+    clc
+    adc #TURRET_MUZZLE_Y
+    sta ebSpawnY
+
+    stx trtIdx
+    jsr ebulletSpawn                    // carry set = the cap or the pool said
+    ldx trtIdx                          // no, and that is not an error here
+
+!next:
+    dex
+    bpl !turret-
+    rts
+
+// ===========================================================================
 // DESTRUCTION: putting the terrain back, on both pages
 // ===========================================================================
 // ---------------------------------------------------------------------------
@@ -1564,6 +1756,6 @@ turretRepairRow:
     jmp renderTerrainRow                // the engine's own decode, unchanged,
                                         // with no overlay on top of it
 
-.if (* > $7400) {
+.if (* > $7500) {
     .error "the turret code has outgrown its $6f00 segment"
 }

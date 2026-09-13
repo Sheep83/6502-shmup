@@ -44,6 +44,7 @@ JOY_IDLE, JOY_FIRE_BIT = 0b00011111, 0b00010000
 JOY_FIRE = JOY_IDLE & ~JOY_FIRE_BIT                 # active low: fire held
 FRAME_IRQ_LINE = 250
 PLAYER_SLOT_MASK = 0b00000011
+TYPE_NONE, TYPE_ENEMY, TYPE_EBULLET = 0, 1, 2
 PTR_BASE, PTR_TRIM, PTR_FIRE = 0xd6, 0xd7, 0xd8
 COL_BASE, COL_MUZZLE = 14, 2
 HUD_HEAT_COL_NORMAL, HUD_HEAT_COL_ALARM, HUD_HEAT_COL_BLANK = 0x07, 0x02, 0x00
@@ -146,18 +147,39 @@ def quiet_mux(mon):
     if SPAWNER_BYTE[0] is None:
         SPAWNER_BYTE[0] = rd(mon, sym["enemySpawnTick"])[0]
     poke(mon, sym["enemySpawnTick"], 0x60)
+    # Turrets too: firing makes them a second producer of pool objects, and a
+    # projectile in flight is an object this file did not ask for.
+    if TURRET_FIRE_BYTE[0] is None:
+        TURRET_FIRE_BYTE[0] = rd(mon, sym["turretFireTick"])[0]
+    poke(mon, sym["turretFireTick"], 0x60)
     for i in range(16):
         mon.cmd("> 01ff c0"); mon.cmd("> 01fe fd")
         mon.cmd(f"r sp=fd, pc={sym['objectFree']:04x}, x={i:02x}")
         bb = set_bp(mon, 0xc0fe); mon.cmd("x"); mon.cmd(f"delete {bb}")
         mon.cmd(f"r pc={sym['mainLoop']:04x}")
     mon.cmd("delete")
+    # AND THE SHIP IS MADE SOLID. Turrets can now shoot the player, and a hit
+    # starts an invulnerability window that BLINKS the ship -- plyVisible 0 for
+    # four frames in eight, which correctly clears plyPresEnable and so clears
+    # the player's two bits in $d015. Every "the player publishes both reserved
+    # slots" check in this repository reads as a failure on a dark frame. That
+    # is the blink working, not the player being lost, so a file whose subject
+    # is the player asks for a ship that is not mid-blink, exactly as it asks
+    # for an empty mux above.
+    poke(mon, sym["plyInvuln"], 0)
+    poke(mon, sym["plyVisible"], 1)
+    poke(mon, sym["plyDirty"], 1)           # force the republish
 
+
+
+TURRET_FIRE_BYTE = [None]
 
 def busy_mux(mon):
-    """Hand production back its enemies."""
+    """Hand production back its enemies AND its turret fire."""
     if SPAWNER_BYTE[0] is not None:
         poke(mon, sym["enemySpawnTick"], SPAWNER_BYTE[0])
+    if TURRET_FIRE_BYTE[0] is not None:
+        poke(mon, sym["turretFireTick"], TURRET_FIRE_BYTE[0])
 
 
 def arm(mon, joy=JOY_IDLE, heat=0, locked=0, cd=0, phase=0):
@@ -610,12 +632,24 @@ def unchanged(mon):
     # nothing else could put a logical sprite in the pool. Slice C's enemies can,
     # so the check now says what it always meant: no fixture is loaded, and
     # anything in the pool got there through the production object pool.
+    #
+    # The turret-firing slice adds the second such producer. A hostile
+    # projectile is an ordinary pool object -- allocated by ebulletSpawn,
+    # presented through logX/logY/logPtr/logCol like everything else -- so it
+    # belongs in this pool exactly as an enemy does, and this check caught one
+    # in flight the first time turrets could actually shoot. What is being
+    # asserted is unchanged and is NOT relaxed: fixtureMoves is still required
+    # to be zero, and every live slot must still hold a KNOWN PRODUCTION TYPE
+    # rather than anything a fixture put there. TYPE_NONE in a live slot would
+    # still fail, and so would a live slot at index >= 16.
     live = [i for i in range(32) if rd(mon, sym["logActive"], 32)[i]]
     types = rd(mon, sym["objType"], 16)
     check("production startup still presents no fixture",
           rd(mon, sym["fixtureMoves"])[0] == 0
-          and all(i < 16 and types[i] == 1 for i in live),
-          f"fixtureMoves {rd(mon, sym['fixtureMoves'])[0]}, live {live}")
+          and all(i < 16 and types[i] in (TYPE_ENEMY, TYPE_EBULLET)
+                  for i in live),
+          f"fixtureMoves {rd(mon, sym['fixtureMoves'])[0]}, live {live}, "
+          f"types {[types[i] for i in live if i < 16]}")
 
 
 def muzzle_art(mon):

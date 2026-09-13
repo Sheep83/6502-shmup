@@ -54,6 +54,7 @@ SCREEN_A, SCREEN_B = 0x0400, 0x2800
 FRAME_IRQ_LINE  = 250
 TOP_SPLIT, BOT_SPLIT = (54, 55), 248
 PLAYER_SLOT_MASK = 0b00000011
+TYPE_NONE, TYPE_ENEMY, TYPE_EBULLET = 0, 1, 2
 HEXDIGIT = [0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,1,2,3,4,5,6]
 
 fails = []
@@ -404,12 +405,22 @@ def engine_unchanged(mon):
     # nothing else could put a logical sprite in the pool. Slice C's enemies can,
     # so the check now says what it always meant: no fixture is loaded, and
     # anything that IS in the pool got there through the production object pool.
+    #
+    # The turret-firing slice adds the second such producer. A hostile
+    # projectile is an ordinary pool object -- allocated by ebulletSpawn and
+    # presented through logX/logY/logPtr/logCol like everything else -- so it
+    # belongs here exactly as an enemy does. NOT a relaxation: fixtureMoves is
+    # still required to be zero and every live slot must still hold a KNOWN
+    # PRODUCTION TYPE, so TYPE_NONE in a live slot, or a live slot at index
+    # >= 16, still fails.
     live = [i for i in range(32) if rd(mon, sym["logActive"], 32)[i]]
     types = rd(mon, sym["objType"], 16)
     check("production startup still presents no fixture",
           rd(mon, sym["fixtureMoves"])[0] == 0
-          and all(i < 16 and types[i] == 1 for i in live),
-          f"fixtureMoves {rd(mon, sym['fixtureMoves'])[0]}, live {live}")
+          and all(i < 16 and types[i] in (TYPE_ENEMY, TYPE_EBULLET)
+                  for i in live),
+          f"fixtureMoves {rd(mon, sym['fixtureMoves'])[0]}, live {live}, "
+          f"types {[types[i] for i in live if i < 16]}")
 
     span, over, run = (g("gameSpanMax")[0], g("gameSpanOver")[0],
                        g("gameOverrun")[0])

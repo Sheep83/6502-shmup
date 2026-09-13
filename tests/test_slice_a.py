@@ -250,12 +250,30 @@ def quiet_mux(mon):
     # exactly what the first version of this did, and it duly found two enemies
     # in a mux it had just emptied.
     poke(mon, sym["enemySpawnTick"], 0x60)      # RTS
+    # The turrets are switched off for the same reason and by the same means.
+    # They became a SECOND producer of pool objects when turret firing started
+    # working: a hostile projectile is an ordinary pool object, so one in flight
+    # makes "the mux pool is empty" false for a reason that has nothing to do
+    # with the player.
+    poke(mon, sym["turretFireTick"], 0x60)      # RTS
     for i in range(16):
         mon.cmd("> 01ff c0"); mon.cmd("> 01fe fd")
         mon.cmd(f"r sp=fd, pc={sym['objectFree']:04x}, x={i:02x}")
         bb = set_bp(mon, 0xc0fe); mon.cmd("x"); mon.cmd(f"delete {bb}")
         mon.cmd(f"r pc={sym['mainLoop']:04x}")
     mon.cmd("delete")
+    # AND THE SHIP IS MADE SOLID. Turrets can now shoot the player, and a hit
+    # starts an invulnerability window that BLINKS the ship -- plyVisible 0 for
+    # four frames in eight, which correctly clears plyPresEnable and so clears
+    # the player's two bits in $d015. Every "the player publishes both reserved
+    # slots" check in this repository reads as a failure on a dark frame. That
+    # is the blink working, not the player being lost, so a file whose subject
+    # is the player asks for a ship that is not mid-blink, exactly as it asks
+    # for an empty mux above.
+    poke(mon, sym["plyInvuln"], 0)
+    poke(mon, sym["plyVisible"], 1)
+    poke(mon, sym["plyDirty"], 1)           # force the republish
+
     settle(mon, 0.2)
 
 

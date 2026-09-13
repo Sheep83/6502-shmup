@@ -297,6 +297,11 @@ BasicUpstart2(entry)
                                         // are LABELS, and KickAssembler
                                         // resolves those late; only constants
                                         // are strictly ordered.
+#import "ebullet.asm"                   // AFTER objects.asm (TYPE_EBULLET, the
+                                        // pool API) and enemy.asm (its bitmap
+                                        // and tables decide where the
+                                        // projectile's own 64 bytes fit);
+                                        // BEFORE turrets.asm, which fires it
 #import "turrets.asm"                   // AFTER terrain.asm, whose glyph
                                         // namespace, charset window, metatile
                                         // geometry and derived stage height it
@@ -334,6 +339,7 @@ entry:
                                         // terrain owns the playfield's colour
                                         // now, and owning it in one place is
                                         // what stops the two disagreeing.
+    jsr ebulletInit                     // no hostile projectiles at boot
     jsr turretInit                      // mark the authored turrets alive.
                                         // BEFORE scrollInit: that builds both
                                         // pages through renderRow, and a turret
@@ -505,12 +511,24 @@ gameFrame:
 
     jsr collisionTick
 
+    // ...and the projectiles already in the air meet the ship. Same temporal
+    // model as collisionTick: everything has moved, so the bolt and the hull
+    // are both end-of-frame state for the same frame. A load and a branch
+    // unless something is actually in flight.
+    jsr ebulletPlayerTick
+
     // AFTER collisionTick, so a hit lands its flash on the same frame the shot
     // resolved. Colour RAM only -- the VIC latches a row's colour once per
     // badline and holds it for the whole character, so a mid-frame write is a
     // one-frame granularity rather than a tear. The destroyed body's
     // CHARACTERS are a different matter and wait for turretRestoreTick above.
     jsr turretPaintTick
+
+    // The turrets shoot back. AFTER collisionTick, so a turret the player just
+    // destroyed does not also fire; beside enemySpawnTick, so a projectile
+    // born this frame is drawn where it was launched rather than moved first.
+    // Five cycles unless a turret is actually on the aperture.
+    jsr turretFireTick
 
     jsr enemySpawnTick
 

@@ -127,6 +127,23 @@
 .const PLAYER_CANNON_R  = 19
 .const PLAYER_MUZZLE_TIME = 3                       // frames the flash is held
 
+// --- taking a hit -----------------------------------------------------------
+// PLAYER_RESPAWN_TIME, from the old game's constant at main.asm:930:
+// "Invulnerable blinking frames after repositioning." The old ship reached
+// that state through explode -> lose a life -> reposition; this slice has
+// neither lives nor an explosion, so it keeps the WINDOW and not the journey.
+//
+// WHAT IS DELIBERATELY NOT HERE. No PLAYER_STATE machine, no explosion frames,
+// no life counter, no game over. The old game's updatePlayerState is a
+// four-state machine driving four explosion bitmaps, a lives HUD and a
+// terminal state, and none of that is needed to make a turret projectile
+// damage the player -- which is what this slice is. A hit costs the player
+// their invulnerability window and raises a counted event; the slice that adds
+// lives reads plyHits and decides what it means. That is the extension point,
+// and it is one byte.
+.const PLAYER_INVULN_TIME = 100                     // frames, the old value
+.const PLAYER_BLINK_MASK  = %00000100               // toggle every 4 frames
+
 // --- geometry ---------------------------------------------------------------
 // Y. The mux admission range, adopted UNCHANGED for HW0/HW1.
 //
@@ -194,6 +211,23 @@ plyVisible:  .byte 1                     // 0 hides the ship without changing it
 // decides what that looks like.
 plyMuzzle:   .byte 0
 
+// Frames of invulnerability left. NON-ZERO IS THE WHOLE OF "cannot be hit":
+// src/ebullet.asm refuses to test a projectile against the ship while this is
+// set, so a single collision cannot be re-applied on the frames that follow
+// it, and neither can any other projectile in flight.
+//
+// It starts at ZERO and nothing but a hit makes it non-zero. That matters more
+// than it looks: while it runs the ship blinks, and a blink is a presentation
+// change, and a presentation change republishes the schedule. A player who
+// booted invulnerable would rebuild every fourth frame for two seconds without
+// touching the stick, which is exactly the property tests/test_slice_a.py
+// exists to protect.
+plyInvuln:   .byte 0
+
+// Hits taken, saturating. THE EVENT A LIVES SYSTEM WILL CONSUME, and the only
+// thing this slice publishes about damage. Nothing reads it yet.
+plyHits:     .byte 0
+
 // 1 = the presentation block changed since the builder last consumed it, so
 // this frame must rebuild and republish. Cleared by the game frame that acts on
 // it. With a stationary player and no fixture, NOTHING is rebuilt and the
@@ -241,7 +275,11 @@ plyPresEnd:
 plyPub:      .fill PLY_PRES_BYTES, 0
 
 playerStateEnd:
-.if (playerStateEnd > $c600) { .error "the player state has grown into the P3 fixture data at $c600" }
+// $c540, NOT $c600. The P3 fixture data does begin at $c600, but src/scroll.asm
+// puts the scroll state at $c540 and it is this block that would reach it
+// first -- so the old guard was checking a boundary eighty bytes past the one
+// that actually binds. Found while adding two bytes here, with four left.
+.if (playerStateEnd > $c540) { .error "the player state has grown into the scroll state at $c540" }
 
 // ===========================================================================
 // The ship, converted from the old game's multicolour art at assembly time.
@@ -418,7 +456,64 @@ readInput:
 // sequence of writes to plyX/plyY -- by a later system, or by a test poking the
 // machine -- can leave the ship outside the range the renderer is promised.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// playerTakeHit — what being hit MEANS. Called by src/ebullet.asm when a
+// projectile's box overlaps the ship's.
+//
+// The projectile file owns the geometry and the player owns the consequence,
+// which is the same division src/collision.asm and src/turrets.asm already
+// use for the shot going the other way.
+//
+// IDEMPOTENT WITHIN A WINDOW. The caller already refuses to test anything
+// while plyInvuln is set, so this cannot normally be re-entered -- and it
+// checks anyway, because "one projectile cannot damage the player twice" is
+// the property, not "the caller is careful".
+// ---------------------------------------------------------------------------
+playerTakeHit:
+    lda plyInvuln
+    bne !done+
+    lda #PLAYER_INVULN_TIME
+    sta plyInvuln
+    lda plyHits                         // saturating: that the ship was hit is
+    cmp #$ff                            // the event; the exact count past 255
+    beq !done+                          // is not
+    inc plyHits
+!done:
+    rts
+
+// ---------------------------------------------------------------------------
+// playerInvulnTick — run the invulnerability window down, and blink while it
+// runs. Called first thing in playerTick.
+//
+// EIGHT CYCLES WHEN THE SHIP IS NOT INVULNERABLE, which is almost always.
+//
+// The blink is the whole of the feedback, and it is deliberately the cheapest
+// feedback that exists: plyVisible already drives plyPresEnable, so the ship
+// disappearing and reappearing costs nothing the presentation block did not
+// already do. It republishes on each toggle -- every fourth frame for two
+// seconds -- which is the same republication a moving ship causes anyway.
+// ---------------------------------------------------------------------------
+playerInvulnTick:
+    lda plyInvuln
+    bne !running+
+    rts
+!running:
+    dec plyInvuln
+    lda plyInvuln
+    beq !solid+                         // the window just ended: solid again
+    and #PLAYER_BLINK_MASK
+    bne !solid+
+    lda #0                              // four frames dark, four frames lit
+    sta plyVisible
+    rts
+!solid:
+    lda #1
+    sta plyVisible
+    rts
+
 playerTick:
+    jsr playerInvulnTick
+
     lda plyX                            // remember the position we came in with,
     sta pt_x                            // so the dirty test below is exact
     lda plyXHi

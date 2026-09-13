@@ -195,6 +195,33 @@ def clear_pool(mon):
     poke(mon, sym["enySpawnTimer"], 200)        # no spawn during the next steps
 
 
+TURRET_FIRE_BYTE = [None]
+
+def quiet_turrets(mon):
+    """Stop turrets firing, for a section that is measuring something else.
+
+    Same tool and same reason as tests/test_slice_b.py's quiet_mux: this file
+    already silences the ENEMY spawner while it rides one enemy out of the
+    world, because another object appearing underneath the measurement makes
+    "the pool is empty" untrue for a reason that has nothing to do with what is
+    being tested. Turrets became a second producer of pool objects the moment
+    they could actually shoot, and a hostile projectile in flight broke exactly
+    those two assertions.
+
+    Patched to RTS rather than delayed by its timer: a timer poked to its
+    maximum still expires inside the 200 frames that section can step.
+    """
+    if TURRET_FIRE_BYTE[0] is None:
+        TURRET_FIRE_BYTE[0] = rd(mon, sym["turretFireTick"])[0]
+    poke(mon, sym["turretFireTick"], 0x60)
+
+
+def noisy_turrets(mon):
+    """Hand production its turret fire back."""
+    if TURRET_FIRE_BYTE[0] is not None:
+        poke(mon, sym["turretFireTick"], TURRET_FIRE_BYTE[0])
+
+
 def hold_stick(mon, value=JOY_IDLE):
     poke(mon, sym["joyHold"], 1)
     poke(mon, sym["joyState"], value)
@@ -646,6 +673,15 @@ def rendering(mon):
     n = sched(mon, "next")
     check("25. no pool object was ever given a player slot",
           all(sl >= MUX_FIRST_SLOT for sl in n["slot"]), f"{n['slot']}")
+    # Not mid-blink: a turret projectile may have hit the ship during the
+    # frames above, and the invulnerability blink correctly clears
+    # plyPresEnable on four frames in eight. This check is about the player
+    # owning its two reserved slots, not about the blink, so it asks for a
+    # solid ship first -- the same way this section asks for a quiet spawner.
+    poke(mon, sym["plyInvuln"], 0)
+    poke(mon, sym["plyVisible"], 1)
+    poke(mon, sym["plyDirty"], 1)
+    step(mon, 1)
     d015 = rd(mon, sym["plyPresEnable"])[0]
     check("25b. the player still publishes both reserved slots",
           (d015 & PLAYER_SLOT_MASK) == PLAYER_SLOT_MASK, f"${d015:02x}")
@@ -678,7 +714,11 @@ def enemy_behaviour(mon):
     check(f"it descends exactly {ENEMY_VY} pixels a frame, the old ingress vector",
           deltas == {ENEMY_VY}, f"{ys}")
 
-    # Ride it all the way out.
+    # Ride it all the way out, with NOTHING else allowed to put an object in
+    # the pool: the enemy spawner is held off by its timer and the turrets are
+    # held off at their entry point. Both assertions below are about the pool
+    # being empty afterwards, and both are meant strictly.
+    quiet_turrets(mon)
     poke(mon, sym["enySpawnTimer"], 250)
     poke(mon, sym["enyDespawned"], 0); poke(mon, sym["enyDespawned"] + 1, 0)
     last_y, frames = 0, 0
@@ -696,6 +736,7 @@ def enemy_behaviour(mon):
           f"despawned {rd(mon, sym['enyDespawned'])[0]}")
     check("leaving nothing in the schedule",
           sched(mon, "next")["n"] == 0)
+    noisy_turrets(mon)
 
     # The Slice B shot event still fires and is still consumed by nobody.
     clear_pool(mon)
@@ -800,8 +841,8 @@ def regression(mon):
 # ===========================================================================
 def ladder(mon):
     print("\n=== 8. production population ladder ===")
-    print("     pop   span  peak  acc  batch  ovf  rejR  reuse  sortWork  "
-          "recSkip schedSkip  over")
+    print("     pop   span spanOver  peak  acc  batch  ovf  rejR  reuse  "
+          "sortWork  recSkip schedSkip  over")
     rows = []
     for pop in (0, 1, 4, 8, 12, 16):
         clear_pool(mon)
@@ -837,16 +878,28 @@ def ladder(mon):
             "sort": worst_sort,
             "recSkip": rd(mon, sym["publishSkip"])[0],
             "schedSkip": rd(mon, sym["schedBuildDefer"])[0],
-            "over": rd(mon, sym["gameOverrun"])[0] + rd(mon, sym["gameSpanOver"])[0],
+            # SEPARATE, and never summed. gameOverrun is a FAULT -- the main
+            # thread did not finish inside a 312-line frame. gameSpanOver is a
+            # DIAGNOSTIC -- the 8-bit gameSpanMax saturated, so the span column
+            # is a floor rather than a measurement. Summing them reports a
+            # saturated counter as a missed frame, which is what this row did:
+            # pop 16 read "over 4" with gameOverrun actually 0.
+            # tests/test_slice_d.py's ladder was corrected the same way.
+            "over": rd(mon, sym["gameOverrun"])[0],
+            "spanOver": rd(mon, sym["gameSpanOver"])[0],
         }
         rows.append(r)
-        print(f"    {r['pop']:4d}  {r['span']:5d} {r['peak']:5d} {r['acc']:4d} "
+        print(f"    {r['pop']:4d}  {r['span']:5d} {r['spanOver']:8d} "
+              f"{r['peak']:5d} {r['acc']:4d} "
               f"{r['batch']:6d} {r['ovf']:4d} {r['rejR']:5d} {r['reuse']:6d} "
               f"{r['sort']:9d} {r['recSkip']:8d} {r['schedSkip']:9d} {r['over']:5d}")
 
     check("the main thread finishes inside the frame at every population",
           all(r["over"] == 0 for r in rows),
           f"{[(r['pop'], r['over']) for r in rows]}")
+    print(f"    ..  gameSpanMax saturated (a floor on the span column, NOT a "
+          f"missed frame) at: "
+          f"{[(r['pop'], r['spanOver']) for r in rows if r['spanOver']]}")
     check("the frame-record publication never skipped",
           all(r["recSkip"] == 0 for r in rows),
           f"{[(r['pop'], r['recSkip']) for r in rows]}")
@@ -902,10 +955,28 @@ def vice_config_hygiene(before):
     opts = re.search(r"^VICE_OPTS\s*:?=\s*(.+)$", mk, re.M).group(1)
     check("the manual run does not start from factory defaults",
           "-default" not in opts, opts)
-    check("the manual run still refuses to write settings back",
-          "+saveres" in opts, opts)
-    check("selecting a keyset actually enables keysets",
-          re.search(r"KEYSET\s*:?=.*filter 2 3.*-keyset", mk) is not None)
+    # THE MANUAL RUN NOW SAVES ON EXIT, AND THAT IS THE POINT.
+    #
+    # This used to assert `+saveres` -- "do not write settings back" -- which
+    # protected the user's vicerc from the AUTOMATED suites. That protection
+    # belongs to those suites and they still carry it: tests/test_p0.py builds
+    # its own command line with `-default +saveres` and both ports detached,
+    # and the hashes above prove it changes nothing.
+    #
+    # A manual session is the player's own machine. If they move the window or
+    # change a setting from the menus, it must still be there next time, so
+    # save-on-exit is ENABLED. `-default` remains absent, which is the option
+    # that could actually destroy the file, and the check above still pins it.
+    check("the manual run saves the player's own settings on exit",
+          "-saveres" in opts and "+saveres" not in opts, opts)
+    # KEYSET is its own variable, so the option itself is one line further up.
+    kset = re.search(r"^KEYSET\s*:?=\s*(.+)$", mk, re.M).group(1).strip()
+    check("the manual run enables keysets, because port 2 is one",
+          kset == "-keyset", kset)
+    check("the manual run leaves control port 1 attached",
+          "-joydev1" not in opts, opts)
+    check("the manual run selects keyset A on port 2 by default",
+          re.search(r"^JOY2\s*\?=\s*2\s*$", mk, re.M) is not None)
 
     # --- and the user's own bindings are checked for the trap that bit us ----
     #
