@@ -333,15 +333,77 @@ dead  -> terrain only
 Because the overlay is applied *on top of* a freshly decoded row, clearing the
 byte makes the next regeneration of either page produce the underlying terrain
 with nothing to repair — no cached ground codes, no second copy of the map, no
-state that can go stale. A future destruction system adds only the immediate
-half: clear the byte, then poke that turret's four cells of the **displayed**
-page once, at a safe point in the frame, with the codes `renderTerrainRow`
-would have written. Those codes are recoverable at any time because the decode
-is a pure function of the stage row.
+state that can go stale.
 
-**Nothing in the presentation slice ever clears a byte.** There is no firing,
-no collision, no damage and no destruction; `turretInit` sets all eight and
-they stay set.
+## 8d. Turret combat
+
+Added by the turret combat slice. `src/turrets.asm` owns all of it; the only
+thing `src/collision.asm` knows is that a ray's winner is an index **and a
+kind**.
+
+| rule | value | source |
+|---|---|---|
+| health | **3** | `TURRET_START_HEALTH` |
+| damage | 1 HP per cannon hit | both rays trace independently |
+| hitbox | `turretX .. turretX+15` — **the body, 16 pixels** | not the enemy scan's 24 |
+| eligibility | alive, and the whole 16-pixel body inside rasters 55..247 | |
+| arbitration | one winner per ray, greatest Y wins, **an enemy wins an exact tie** | turrets are traced after every enemy and must beat the incumbent strictly |
+| pulse | white, red, yellow, red — one global phase, 8 frames a step | colour RAM only |
+| hit flash | `10\|8` for 4 frames, overriding the pulse | colour RAM only |
+| score | 100 on destruction, **documented and not wired** | no production score system exists yet |
+
+**The world → screen mapping is the contract's own and there is no second
+scroll counter.** A turret's authored top body row `R` is at matrix row
+`(R - stageTopRow) mod STAGE_ROWS`, and
+
+```
+turretLogY = 47 + scrollFine + 8 * matrixRow
+```
+
+is the sprite Y a sprite would need to cover the body's top pixel row — which
+is what lets the hitscan compare a background character against a sprite on one
+scale without either side knowing what the other is made of. Derived each frame
+from the **presented** origin, before the hitscan, because `scrollTick` runs at
+the end of `gameFrame`.
+
+**Drawing and combat are different questions with different answers.** A body
+straddling an aperture edge is still drawn, so its colour must still be
+painted; it is not hittable, because half of it is outside the aperture. The
+old game gated colour on the combat predicate and turrets entering or leaving
+rendered in flat terrain colour; `turretPaintRow` and `turretVisible` are
+deliberately separate here.
+
+**When each kind of write happens, and why.**
+
+| write | when | why then |
+|---|---|---|
+| colour RAM | after `collisionTick` | the VIC latches a row's colour once per badline and holds it for the whole character, so a mid-frame write is one-frame granularity, never a tear — and a hit flashes on the frame it landed |
+| screen RAM | the **first** thing `gameFrame` does | the main loop is paced by the frame counter, incremented in `exFrame` at raster 250, so this runs in the lower border with the whole next picture's matrix fetch ahead of it |
+
+A kill therefore **flags** itself and the characters are repaired at the top of
+the next frame — at most one frame later, at a point whose safety does not
+depend on how busy the frame was.
+
+**Both pages are repaired, and neither blindly.** The hidden page is rebuilt a
+few rows at a time, so a turret killed now may already have been composed into
+rows that are behind the regeneration cursor and will not be rewritten before
+the flip; repairing only the displayed page would make the body reappear for a
+whole coarse cycle. Each page is repaired against **its own** top row —
+`stageTopRow` for the displayed one, `regenTopRow` for the one being rebuilt —
+and back-page rows at or above `regenRow` are skipped because regeneration is
+about to write them with `turretAlive` already clear.
+
+**What is written is the authoritative decode.** The repair calls
+`renderTerrainRow`, the same routine that builds every page row, with no
+overlay on top. There is no cached-terrain table and there does not need to be:
+the terrain is a pure function of the stage row, so it can always be recomputed
+and can never be stale.
+
+**One turret is repaired per frame**, and that is a measurement: one turret on
+both pages costs 4,605–5,567 cycles, two measured 9,354–11,057, and the second
+figure does not fit a PAL frame on top of a worst-case main thread. Two turrets
+can only die together when one volley's two rays each land a last HP on a
+different body. The second waits a frame.
 
 ## 9. Direct VIC access — who owns what
 
@@ -397,6 +459,15 @@ misses it. That is a definite answer, not a race.
 | tie | equal `logY` goes to the **higher pool slot** |
 | damage | 1 HP per cannon hit; both cannons trace independently |
 | filter | `objType == TYPE_ENEMY` and `objHP > 0`, never "any active object" |
+
+**A ray's winner is an index AND a kind.** `src/turrets.asm`'s authored
+background turrets are hittable and are *not* objects — no pool slot, no
+logical sprite, no type field — so `traceRay` ends by calling `traceTurretRay`
+to extend the same nearest-Y result, and `applyDamage` dispatches on
+`csTargetKind`. Running the turrets **after** every enemy is not an
+implementation detail: it is the tie-break, and it is the old game's. With no
+turret in a ray's path the answer is bit-for-bit what §9a alone would give.
+See §8d.
 
 **Death is a state, not an immediate free.** Zero HP starts a bounded
 `DEATH_TIME` countdown during which the object stays active and renderable;

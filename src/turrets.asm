@@ -80,6 +80,44 @@
 }
 
 // ---------------------------------------------------------------------------
+// THE COMBAT CONSTANTS, READ OUT OF THE OLD ENGINE
+// ---------------------------------------------------------------------------
+// Every one of these came from ~/Desktop/c64Shooter-main.zip,
+// src/background_turrets.asm, and every one is checked against that archive by
+// tests/test_turret_combat.py rather than trusted here.
+//
+//   TURRET_START_HEALTH     41   three cannon hits to destroy
+//   TURRET_PULSE_LEN        45   four phases
+//   TURRET_PULSE_INTERVAL   46   gameplay frames between phase steps
+//   turretPulseTable       747   1, 2, 7, 2  =  white, red, yellow, red
+//   TURRET_HIT_CRAM         45   10 | 8, light red, NOT one of the pulse
+//                                colours, so a hit is unmistakable
+//   TURRET_HIT_FRAMES       44   gameplay frames a hit flash lasts
+//   the hitbox width       776   traceTurretCannon: `cmp #16` -- EXACTLY the
+//                                16-pixel body, not the 24 the enemy scan uses
+.const TURRET_START_HEALTH  = 3
+.const TURRET_PULSE_LEN     = 4
+.const TURRET_PULSE_INTERVAL = 8
+.const TURRET_HIT_CRAM      = 10 | 8    // light red; bit 3 keeps multicolour on
+.const TURRET_HIT_FRAMES    = 4
+.const TURRET_HITBOX_W      = TURRET_BODY_W * 8     // 16, and it IS the body
+
+// The old game awarded SCORE_PER_KILL = 100 for a destroyed turret -- the same
+// reward as an enemy -- from hitCannonTarget's `jmp awardKillScore`, once per
+// authored placement, at the instant health reached zero. THE SCORE ITSELF IS
+// NOT MIGRATED: this repo has no production score system yet (hudDemoTick
+// drives a demonstration counter). The value and the hook point are recorded
+// here and in the report so the future score slice has nothing to rediscover.
+.const TURRET_SCORE_PER_KILL = 100      // documented, deliberately not wired
+
+.if (TURRET_HITBOX_W > 32) {
+    .error "a hitbox wider than 32 breaks the single-byte delta test"
+}
+.if ((TURRET_HIT_CRAM & 8) == 0) {
+    .error "the hit-flash colour must keep the multicolour selector bit"
+}
+
+// ---------------------------------------------------------------------------
 // The body bitmaps, ASSEMBLED STRAIGHT INTO THE CHARSET WINDOW.
 // ---------------------------------------------------------------------------
 // The old game copied these 32 bytes into its charset at run time, from
@@ -212,6 +250,27 @@ turretAtMetaRow: .fill STAGE_METATILE_ROWS, turretAtRow.get(i)
 // is built from, and a test reads it to prove the two agree.
 turretMetaRow: .fill TURRET_TOTAL, floor(turretRows.get(i) / METATILE_H)
 turretCol:     .fill TURRET_TOTAL, turretCols.get(i)
+
+// The authored TOP body row, sixteen bits. The presentation slice never needed
+// it -- the overlay is asked about a stage row, not about a turret -- but
+// combat asks the other way round ("where is turret 3 right now"), and that
+// question starts from the authored row. Deriving it from turretMetaRow would
+// be a 16-bit multiply per turret per frame for a value that never changes.
+turretRowLo:   .fill TURRET_TOTAL, <turretRows.get(i)
+turretRowHi:   .fill TURRET_TOTAL, >turretRows.get(i)
+
+// The body's LEFT EDGE in hardware sprite X, nine bits, and it is CONSTANT:
+// the playfield scrolls vertically only, so a turret's column never moves.
+// Character column c's left edge is sprite X 24 + 8c, which is exactly the old
+// game's `turretAuthXLo = 24 + turretCols.get(i)*8`.
+turretXLo:     .fill TURRET_TOTAL, <(24 + turretCols.get(i) * 8)
+turretXHi:     .fill TURRET_TOTAL, >(24 + turretCols.get(i) * 8)
+
+// white, red, yellow, red -- the old turretPulseTable, byte for byte.
+turretPulseTable: .byte 1, 2, 7, 2
+.if (TURRET_PULSE_LEN != 4) {
+    .error "the pulse table and TURRET_PULSE_LEN disagree"
+}
 turretTablesEnd:
 
 .if (turretTablesEnd > $6e00) {
@@ -241,21 +300,164 @@ turretTablesEnd:
 // pure function of the stage row. No cached "ground codes" table, no repair
 // path, no state that can go stale.
 //
-// NOTHING IN THIS SLICE EVER CLEARS A BYTE. There is no firing, no collision,
-// no damage and no destruction here; turretInit sets all eight and they stay
-// set. The contract is the deliverable, not a gameplay system.
+// THE COMBAT SLICE CLEARS turretAlive, and nothing else about the contract
+// changed: destruction is still "clear the byte", and the only thing added is
+// making the CURRENTLY DISPLAYED page catch up promptly instead of waiting for
+// its next regeneration. See turretRestoreTick.
+//
+// EIGHT AUTHORED TURRETS, AND THAT IS THE WHOLE POOL. There is no slot
+// streaming, no admission, no eviction and no cursor: the old engine needed
+// those to decide which turrets owned one of eight shared glyph slots, and
+// this engine has no such resource to hand out. Every array below is indexed
+// by the AUTHORED index directly, so a turret cannot change identity, cannot
+// be evicted mid-flash, and needs no "keep it dead across re-admission" bitmap.
 * = $6e00 "turret state"
-turretAlive:   .fill TURRET_TOTAL, 1
 
+// --- authored lifetime -----------------------------------------------------
+turretAlive:   .fill TURRET_TOTAL, 1    // 1 = standing. THE restoration switch.
+turretHealth:  .fill TURRET_TOTAL, 0    // TURRET_START_HEALTH down to 0
+
+// --- derived once a frame from the DISPLAYED page's geometry ---------------
+// turretWorldTick writes all three; nothing else may.
+turretLogY:    .fill TURRET_TOTAL, 0    // the sprite Y a sprite would need to
+                                        // cover the body's top pixel row, so
+                                        // the hitscan can compare turrets and
+                                        // enemies on ONE scale
+turretVisible: .fill TURRET_TOTAL, 0    // 1 = the whole 16-pixel body is inside
+                                        // the aperture. COMBAT gate.
+turretPaintRow:.fill TURRET_TOTAL, 0    // matrix row of the first body cell row
+                                        // that is on the page, or TURRET_ROW_NONE.
+                                        // PRESENTATION gate, and deliberately
+                                        // NOT the same thing: a body straddling
+                                        // an aperture edge is still drawn, and
+                                        // the old game shipped a bug where it
+                                        // was drawn in flat terrain colour
+                                        // because the colour followed the
+                                        // combat gate instead of the glyphs.
+turretPaintPair:.fill TURRET_TOTAL, 0   // 1 = two body rows are on the page,
+                                        // 0 = only the one at turretPaintRow
+
+// --- what colour RAM currently holds ---------------------------------------
+turretCramRow: .fill TURRET_TOTAL, 0    // the matrix row this turret last
+                                        // painted, or TURRET_ROW_NONE. The
+                                        // whole of "put the colour back".
+turretHitTimer:.fill TURRET_TOTAL, 0    // frames of hit flash remaining
+
+// --- globals ---------------------------------------------------------------
+// The pulse is ONE phase for every turret, exactly as the old game had it:
+// turretPulseTable is indexed by a single global counter, so two turrets on
+// screen together pulse in step.
+trtPulseTimer: .byte 0
+trtPulseIndex: .byte 0
+trtPulseColour:.byte 0                  // the pulse colour for THIS frame
+
+// One bit per authored turret: "destroyed, and the pages have not caught up".
+// A bitmask rather than a byte array because the common case is asking whether
+// ANY restoration is owed, and that has to be one load and one branch on a
+// path that runs at the top of every frame.
+trtDeadPending:.byte 0
+
+// One bit per turret that is a LEGAL TARGET this frame, so the hitscan can ask
+// "is there anything to trace at all" in five cycles. Turrets are on the
+// aperture for about a third of the level, so two thirds of every volley's
+// turret scan was walking eight entries to reject all eight.
+trtVisibleMask:.byte 0
+
+// The stageTopRow the page derivation below was last built for, and the two
+// reasons the colour might need repainting. Both exist because the expensive
+// half of each per-frame routine has an answer that only changes on a COARSE
+// STEP -- one frame in eight -- and the sixteen-enemy ladder in
+// tests/test_slice_c.py has no room for the other seven.
+trtTopLo:      .byte 0
+trtTopHi:      .byte $ff               // $ff = no derivation yet; a stage row's
+                                       // high byte is never that
+trtRepaint:    .byte 0                 // the bodies moved, the pulse stepped,
+                                       // or a turret was hit or destroyed
+
+// THE NEXT COARSE STEP'S PAGE GEOMETRY, PREPARED BEFORE IT HAPPENS.
+//
+// The derivation is not expensive because it is complicated; it is expensive
+// because of WHICH FRAME it lands on. stageTopRow changes in scrollTick at the
+// end of a frame, so the first frame that can see the new value is also the
+// frame on which regenTick restarts the back page -- four rows, ~4,500 cycles.
+// The turret work piled onto the heaviest frame in the cycle, and at eight
+// well-separated enemies the engine has no room for that.
+//
+// One frame in eight has NO regeneration at all: the scroller finishes the
+// back page in seven ticks of ROWS_PER_TICK and the eighth is idle, and that
+// is exactly the frame on which scrollFine reads 7 -- the one immediately
+// before the coarse step. So the geometry for the step is derived THERE, into
+// this shadow, and the step itself only copies sixteen bytes.
+//
+// trtNextHi is $ff when no shadow stands. A real stage row's high byte is 0 or
+// 1, so the sign bit is the whole test, and a shadow can never be mistaken for
+// a page the scroller did not go to.
+trtNextRow:    .fill TURRET_TOTAL, 0   // shadow turretPaintRow
+trtNextPair:   .fill TURRET_TOTAL, 0   // shadow turretPaintPair
+trtNextLo:     .byte 0                 // the stageTopRow the shadow is for
+trtNextHi:     .byte $ff               // $ff = nothing prepared
+trtFlash:      .byte 0                 // how many hit flashes are running
+
+trtKills:      .byte 0                  // turrets destroyed, for the report and
+                                        // for a future score system to read
+
+// --- scratch ---------------------------------------------------------------
 trtHalf:       .byte 0                  // 0 = the authored row (TL/TR),
                                         // 1 = the row below it (BL/BR)
+trtIdx:        .byte 0                  // the turret a loop is working on
+trtRelLo:      .byte 0                  // (authored row - a page top row)
+trtRelHi:      .byte 0                  // reduced mod STAGE_ROWS
+trtRow:        .byte 0                  // a matrix row being painted
+trtColour:     .byte 0                  // the colour being painted
+trtPair:       .byte 0                  // 1 = paint trtRow and trtRow + 1
+trtPageHi:     .byte 0                  // high byte of the page being repaired
+trtRepairLim:  .byte 0                  // repair matrix rows BELOW this one
+trtScanRow:    .byte 0                  // metatile row the world scan is on
+trtScanLeft:   .byte 0                  // metatile rows left to scan
 turretStateEnd:
 
-.if (turretStateEnd > $6e40) {
+.if (turretStateEnd > $6f00) {
     .error "the turret state has outgrown its $6e00 segment"
 }
 
-* = $6e40 "turret code"
+.if (TURRET_TOTAL > 8) {
+    .error "trtDeadPending is one bit a turret"
+}
+
+// TURRET_ROW_NONE is $ff and every real matrix row is 0..24, so "is there one"
+// is the sign bit. It is also what turretCramRow holds when nothing is painted.
+.const TURRET_ROW_NONE = $ff
+
+// HOW MANY METATILE ROWS THE PAGE CAN REACH.
+//
+// The page shows stage rows T..T+24, and a turret matters if its authored top
+// body row R is in T-1..T+24 -- the -1 being a body entering with only its
+// bottom half on matrix row 0. The scan runs from floor(T/4)-1 upwards, and
+// the highest metatile row it must reach is floor((T+24)/4), which is exactly
+// floor(T/4)+6 whatever T is. So the window is floor(T/4)-1 .. floor(T/4)+6:
+//
+//     floor((SCREEN_ROWS - 1) / METATILE_H) + 2  =  6 + 2  =  8 rows
+//
+// floor() IS LOAD-BEARING and not decoration: KickAssembler's `/` is floating
+// point, and the same omission silently produced an entirely empty
+// turretAtMetaRow table in the presentation slice.
+.const TURRET_SCAN_ROWS = floor((SCREEN_ROWS - 1) / METATILE_H) + 2
+
+// THE ONE FRAME IN EIGHT THE SCROLLER LEAVES IDLE.
+//
+// src/scroll.asm rebuilds the back page at ROWS_PER_TICK rows a frame and stops
+// when regenRow reaches SCREEN_ROWS, which takes ceil(25/4) = 7 of the 8 frames
+// between coarse steps; the eighth does nothing. The fine scroll counts UP and
+// wraps 7 -> 0 AT the coarse step, so the idle frame is the one on which
+// scrollFine reads 7. src/scroll.asm carries the guard that keeps this true,
+// because ROWS_PER_TICK is its constant and it is imported after this file.
+.const TURRET_PREPARE_FINE = 7
+
+.if (STAGE_METATILE_ROWS < TURRET_SCAN_ROWS) {
+    .error "the stage is shorter than the turret world scan window"
+}
+
+* = $6f00 "turret code"
 
 // ---------------------------------------------------------------------------
 // turretInit — mark every authored turret alive. Called once from entry,
@@ -263,12 +465,452 @@ turretStateEnd:
 // and a turret inside the boot aperture must be composed into them.
 // ---------------------------------------------------------------------------
 turretInit:
-    lda #1
     ldx #TURRET_TOTAL - 1
-!alive:
+!slot:
+    lda #1
     sta turretAlive,x
+    lda #TURRET_START_HEALTH
+    sta turretHealth,x
+    lda #0
+    sta turretHitTimer,x
+    sta turretVisible,x
+    sta turretLogY,x
+    sta turretPaintPair,x
+    lda #TURRET_ROW_NONE
+    sta turretPaintRow,x
+    sta turretCramRow,x                 // nothing painted yet, so nothing owed
     dex
-    bpl !alive-
+    bpl !slot-
+
+    lda #0
+    sta trtPulseIndex
+    sta trtDeadPending
+    sta trtKills
+    sta trtFlash
+    sta trtTopLo
+    lda #1
+    sta trtRepaint                      // paint on the first gameplay frame
+    lda #$ff
+    sta trtTopHi                        // ...and derive the page on it too: no
+                                        // real stage row has that high byte
+    sta trtNextHi                       // and no shadow stands yet. Explicit
+                                        // rather than left to the PRG's own
+                                        // initialiser, so calling turretInit a
+                                        // second time is the same as the first
+    lda #0
+    lda #1
+    sta trtPulseTimer                   // step the pulse on the FIRST gameplay
+                                        // frame, exactly as initBackgroundTurrets
+                                        // did -- so the first colour a player
+                                        // ever sees is phase 1 (red), not 0
+    rts
+
+// ---------------------------------------------------------------------------
+// turretRelRow — where authored turret X sits relative to a page's row 0.
+//
+// In:   X = turret, A/Y = the page's top stage row (lo/hi)
+// Out:  trtRelLo/Hi = (authoredRow - pageTopRow) mod STAGE_ROWS
+//       X preserved
+//
+// This is the engine contract's own relation and nothing else:
+//
+//     matrix row == (stage row - stageTopRow) mod STAGE_ROWS
+//
+// There is deliberately no second scroll counter anywhere in this file. The
+// caller supplies which page's origin to measure against -- stageTopRow for
+// the displayed page, regenTopRow for the one being rebuilt -- and those two
+// are the scroller's, read-only.
+//
+// Both operands are already reduced to 0..STAGE_ROWS-1, so the difference lies
+// in (-STAGE_ROWS, STAGE_ROWS) and ONE conditional add reduces it. The borrow
+// out of the high byte is the test, which is why the add is on the carry-clear
+// path rather than on a sign test of a value that has already wrapped.
+// ---------------------------------------------------------------------------
+turretRelRow:
+    sta trtRelLo
+    sty trtRelHi
+    lda turretRowLo,x
+    sec
+    sbc trtRelLo
+    sta trtRelLo
+    lda turretRowHi,x
+    sbc trtRelHi
+    sta trtRelHi
+    bcs !reduced+                       // no borrow: already 0..STAGE_ROWS-1
+    lda trtRelLo
+    clc
+    adc #<TERRAIN_STAGE_ROWS
+    sta trtRelLo
+    lda trtRelHi
+    adc #>TERRAIN_STAGE_ROWS
+    sta trtRelHi
+!reduced:
+    rts
+
+// ---------------------------------------------------------------------------
+// turretWorldTick — one frame of world -> screen, for all eight turrets.
+//
+// Called from gameFrame BEFORE collisionTick, which is where the old game put
+// positionBackgroundTurrets: "derive positions from the PRESENTED origin/phase,
+// after coarse finish and before the player's hitscan".
+//
+// THE PRESENTED ORIGIN IS THE RIGHT ONE AND IT IS FREE. scrollTick runs at the
+// END of gameFrame, so throughout the frame stageTopRow and scrollFine still
+// describe the picture the player is looking at. Nothing has to be latched.
+//
+// GEOMETRY, DERIVED FROM THE ENGINE CONTRACT RATHER THAN COPIED:
+//
+//     matrix row m occupies rasters  48 + scrollFine + 8m .. +7   (§8a)
+//     a VIC sprite at Y=n covers     n+1 .. n+21                  (§3)
+//
+// so a body whose top pixel row is raster 48 + fine + 8m is covered by a sprite
+// at Y = 47 + fine + 8m. That value is turretLogY, and it exists so the
+// hitscan can compare a background character against a sprite ON ONE SCALE
+// without either side knowing what the other is made of. The old game's
+// equivalent was `rel*8 + 64 + RASTER_DISPLAY_FINE`, whose constants belong to
+// an aperture this engine does not have.
+//
+// VISIBILITY IS THE OLD RULE, RE-DERIVED: "combat only while the full 16-pixel
+// body is visible". The aperture is rasters 55..247, so:
+//
+//     top    = 48 + fine + 8m  >=  55
+//     bottom = top + 15        <=  247   ->   top <= 232
+//
+// PRESENTATION IS A DIFFERENT QUESTION AND GETS A DIFFERENT ANSWER. A body
+// straddling an aperture edge is still DRAWN -- turretOverlayRow gates on the
+// stage row alone -- so its colour must still be painted. The old game gated
+// colour on the combat predicate, and a turret entering or leaving rendered in
+// flat terrain colour until its whole body was inside; that is what its
+// four-turret-cluster forensics chased down. Here turretPaintRow answers the
+// drawing question and turretVisible answers the combat one.
+//
+// ---------------------------------------------------------------------------
+// IT DOES NOT DERIVE ALL EIGHT, AND THAT IS A MEASUREMENT
+// ---------------------------------------------------------------------------
+// The first version did: eight sixteen-bit subtractions with a modulo fold,
+// every frame, for an answer that is "not on the page" for at least six of
+// them. It cost 983 to 1,246 cycles a frame -- about sixteen raster lines, on
+// EVERY frame -- and tests/test_slice_c.py's sixteen-enemy ladder, which had
+// been clean, started overrunning the frame.
+//
+// The page can only reach TURRET_SCAN_ROWS metatile rows, and
+// turretAtMetaRow -- the table the presentation slice already built to answer
+// "is there a turret in this metatile row" for the page generator -- answers
+// that in one indexed load. So the scan walks eight table entries and does the
+// sixteen-bit work only for the turrets it actually finds, of which level 1
+// never has more than two at once. Measured at 250 to 480 cycles, and no new
+// state, no cache and nothing to invalidate: the table is assembled once and
+// the scan is a pure function of stageTopRow.
+// ---------------------------------------------------------------------------
+turretWorldTick:
+    // ---- has the page moved since the last adoption? ----------------------
+    // turretPaintRow and turretPaintPair are functions of stageTopRow ALONE,
+    // and stageTopRow changes once every eight frames. Rebuilding them on the
+    // other seven cost 400 cycles for an answer already in memory.
+    lda stageTopRowLo
+    cmp trtTopLo
+    bne !moved+
+    lda stageTopRowHi
+    cmp trtTopHi
+    bne !moved+
+    jmp turretPrepareTick               // unchanged: only the fine scroll moved.
+                                        // A jmp because the target is out of
+                                        // branch range, which is the renderer's
+                                        // own convention for exactly this.
+
+    // ---- the page moved. Was it prepared? ---------------------------------
+!moved:
+    lda stageTopRowLo
+    cmp trtNextLo
+    bne !fallback+
+    lda stageTopRowHi
+    cmp trtNextHi
+    beq !adopt+                         // yes: the shadow is this very page
+
+    // ---- THE FALLBACK, for movement the preparation did not predict -------
+    // The shadow is only ever built for stageTopRow - 1, which is where the
+    // scroller goes next and nowhere else. Anything that moves the row some
+    // other way -- boot, a test poking the scroll state, or any future system
+    // that seeks through the stage -- lands here and derives the page it
+    // actually asked for, immediately. It is the old cost on the old frame,
+    // which is exactly what a fallback should be: correct, and not free.
+!fallback:
+    lda stageTopRowLo
+    sta trtNextLo
+    lda stageTopRowHi
+    sta trtNextHi
+    jsr turretDeriveShadow
+
+    // ---- adopt: sixteen bytes, and no arithmetic at all --------------------
+!adopt:
+    ldx #TURRET_TOTAL - 1
+!swap:
+    lda trtNextRow,x
+    sta turretPaintRow,x
+    lda trtNextPair,x
+    sta turretPaintPair,x
+    dex
+    bpl !swap-
+
+    lda stageTopRowLo
+    sta trtTopLo
+    lda stageTopRowHi
+    sta trtTopHi
+    lda #$ff
+    sta trtNextHi                       // spent: the next preparation rebuilds
+
+    // ---- the aim pass's reject path, paid for once a coarse step ----------
+    // A turret that is not on the page must read visible = 0 and logY = 0 on
+    // every frame until it is. Clearing them HERE, where the page changes,
+    // means the per-frame pass can leave such a turret alone entirely instead
+    // of rewriting two bytes eight times a frame to say nothing changed.
+    ldx #TURRET_TOTAL - 1
+    lda #0
+!blank:
+    sta turretVisible,x
+    sta turretLogY,x
+    dex
+    bpl !blank-
+
+    inc trtRepaint                      // every body just moved a matrix row,
+                                        // so the colour has to follow them
+
+// ---------------------------------------------------------------------------
+// turretPrepareTick — derive the NEXT coarse step's geometry, on the one frame
+// in eight that the scroller leaves idle. Falls through into turretAimTick.
+// ---------------------------------------------------------------------------
+turretPrepareTick:
+    lda scrollFine
+    cmp #TURRET_PREPARE_FINE
+    bne !nothing+                       // not the quiet frame
+    lda trtNextHi
+    bmi !prepare+                       // no shadow stands: build one
+!nothing:
+    jmp turretAimTick                   // out of branch range, so a jmp
+!prepare:
+
+    // nextTop = stageTopRow - 1, wrapping 0 -> STAGE_ROWS-1. Written as "fold
+    // zero up to STAGE_ROWS, then subtract", which is src/scroll.asm's rowBack
+    // exactly -- and for its reason: the other form has to recognise $ffff as a
+    // special case and this one cannot go wrong.
+    lda stageTopRowLo
+    ora stageTopRowHi
+    bne !noFold+
+    lda #<TERRAIN_STAGE_ROWS
+    sta trtNextLo
+    lda #>TERRAIN_STAGE_ROWS
+    sta trtNextHi
+    jmp !sub+
+!noFold:
+    lda stageTopRowLo
+    sta trtNextLo
+    lda stageTopRowHi
+    sta trtNextHi
+!sub:
+    lda trtNextLo
+    sec
+    sbc #1
+    sta trtNextLo
+    lda trtNextHi
+    sbc #0
+    sta trtNextHi
+
+    jsr turretDeriveShadow
+    jmp turretAimTick
+
+// ---------------------------------------------------------------------------
+// turretDeriveShadow — the page geometry for the stage row in trtNextLo/Hi,
+// into trtNextRow / trtNextPair. THE ONLY DERIVATION IN THIS FILE.
+//
+// It always writes the shadow and never the live arrays, so there is one copy
+// of this arithmetic whether it runs a frame early or as the fallback. The
+// live arrays are only ever reached by the sixteen-byte adopt above.
+// ---------------------------------------------------------------------------
+turretDeriveShadow:
+    ldx #TURRET_TOTAL - 1
+!clear:
+    lda #TURRET_ROW_NONE
+    sta trtNextRow,x
+    lda #0
+    sta trtNextPair,x
+    dex
+    bpl !clear-
+
+    // ---- which metatile rows can the page reach? --------------------------
+    // m0 = thatRow / METATILE_H, and the scan starts one row below it. The
+    // stage row is at most nine bits (guarded above), so two shifts land the
+    // whole quotient in A, and m0 is at most 104 -- comfortably positive, which
+    // is what makes `bpl` a correct test for the one row that underflows.
+    lda trtNextHi
+    lsr
+    lda trtNextLo
+    ror
+    lsr
+    sec
+    sbc #1
+    bpl !haveScan+
+    clc
+    adc #STAGE_METATILE_ROWS            // row 0 scans from the stage's last
+!haveScan:
+
+    // THE SCAN KEEPS ITS CURSOR IN X AND ITS COUNTER IN Y, and spills them
+    // only on the rare iteration that actually finds a turret. The first
+    // version reloaded both from memory every time round -- eleven
+    // instructions a row where five will do -- which cost 39 cycles an
+    // iteration against 18 for an empty one.
+    tax                                 // X = the first metatile row to look at
+    ldy #TURRET_SCAN_ROWS
+!scanRow:
+    lda turretAtMetaRow,x               // the presentation slice's table, doing
+    bpl !found+                         // its second job for free
+!scanNext:
+    inx
+    cpx #STAGE_METATILE_ROWS
+    bcc !noWrap+
+    ldx #0                              // the stage wraps and so does the scan
+!noWrap:
+    dey
+    bne !scanRow-
+    rts
+
+!found:
+    stx trtScanRow                      // spilled only here, and this happens
+    sty trtScanLeft                     // at most twice in this level
+    tax
+    jsr turretDeriveOne
+    ldx trtScanRow
+    ldy trtScanLeft
+    jmp !scanNext-
+
+// ---------------------------------------------------------------------------
+// turretDeriveOne — one turret's page geometry, into the shadow.
+// X = the turret, preserved. The page is trtNextLo/Hi.
+// ---------------------------------------------------------------------------
+turretDeriveOne:
+    lda trtNextLo
+    ldy trtNextHi
+    jsr turretRelRow                    // trtRel = matrix row of the TOP body row
+
+    lda trtRelHi
+    beq !onLowPage+
+
+    // ---- the only high-byte case that is still on the page ---------------
+    // rel == STAGE_ROWS-1 means the authored top row is the row immediately
+    // ABOVE matrix row 0, so the body's BOTTOM half is on matrix row 0 and its
+    // top half is off the page. turretOverlayRow draws exactly that, so the
+    // colour has to follow it there. It can never be combat-visible: half the
+    // body is outside the aperture by construction.
+    cmp #>(TERRAIN_STAGE_ROWS - 1)
+    bne turretDeriveNone
+    lda trtRelLo
+    cmp #<(TERRAIN_STAGE_ROWS - 1)
+    bne turretDeriveNone
+    lda #0
+    sta trtNextRow,x                    // row 0, one cell row only
+turretDeriveNone:
+    rts
+
+!onLowPage:
+    lda trtRelLo
+    cmp #SCREEN_ROWS                    // rel 0..24: the top body row is on the
+    bcs turretDeriveNone                // page. 25.. : nothing of it is.
+    sta trtNextRow,x
+    cmp #SCREEN_ROWS - 1
+    bcs !single+                        // rel 24: only the top row fits
+    inc trtNextPair,x                   // rel 0..23: both body rows are on
+!single:
+    rts                                 // logY and visibility are the FINE
+                                        // scroll's business, and it moves every
+                                        // frame. See turretAimTick.
+
+// ---------------------------------------------------------------------------
+// turretAimTick — the half of the derivation that changes every frame.
+//
+// turretPaintRow is already correct for this stageTopRow, so the body's matrix
+// row is known; only the eight-pixel fine offset inside it is new. That makes
+// logY one shift-and-add per turret that is on the page at all, and the six
+// that are not cost a load and a branch.
+//
+// WHY logY COMES FROM turretPaintRow AND NOT FROM rel. They are the same
+// number in every case that can matter, and turretPaintPair is what separates
+// the case where they are not. A body ENTERING has only its bottom row on
+// matrix row 0, so paintRow names the wrong row and logY would come out a whole
+// character too high. The pair test below rejects it before that matters.
+//
+// It was written without that test first, on the argument that the raster
+// bounds would reject such a body anyway. They do not: at fine scroll 7 the
+// derived top lands on exactly raster 55 and reads as fully visible. The
+// model test in tests/test_turret_combat.py found it at the first origin that
+// reaches it.
+// ---------------------------------------------------------------------------
+turretAimTick:
+    // ---- FLAT, AND DELIBERATELY NOT GATED ON shotFired --------------------
+    // It was gated on it once: turretLogY and turretVisible have exactly one
+    // consumer, traceTurretRay, which is only reached on a frame that resolved
+    // a volley, so deriving them on the other seven looked like pure waste.
+    //
+    // It cost 340 cycles on seven frames in eight and put them ALL on the
+    // eighth -- and the weapon's cadence is eight frames too, so the spike
+    // landed on the volley frame, every volley, in phase. tests/test_slice_b.py
+    // steps the machine frame by frame to judge that cadence and could no
+    // longer collect enough contiguous frames to do it.
+    //
+    // A flat cost is worth more here than a smaller total. The reject path is
+    // made cheap instead: turretVisible and turretLogY are cleared once per
+    // COARSE STEP, where the page geometry is adopted, so a turret that is not
+    // on the page costs a load and a branch and nothing else.
+    lda #0
+    sta trtVisibleMask
+    ldx #TURRET_TOTAL - 1
+!aim:
+    lda turretPaintPair,x
+    beq !next+                          // ONLY ONE BODY ROW IS ON THE PAGE, so
+                                        // the full sixteen pixels cannot be.
+                                        // This is not redundant with the raster
+                                        // test below: a body ENTERING has its
+                                        // bottom row on matrix row 0 and its
+                                        // top row off the page, and deriving
+                                        // logY from that row puts the body a
+                                        // whole character too high -- at fine
+                                        // scroll 7 it lands on exactly raster
+                                        // 55 and reads as fully visible.
+    lda turretPaintRow,x
+    bmi !next+                          // not on the page: not a target
+
+    // ---- logY = 47 + scrollFine + 8 * matrixRow --------------------------
+    // matrixRow <= 24 and scrollFine <= 7, so the largest value is
+    // 47 + 7 + 192 = 246 and the arithmetic cannot leave a byte.
+    asl
+    asl
+    asl
+    clc
+    adc scrollFine
+    adc #47
+    sta turretLogY,x
+
+    // ---- the full-body visibility test, in raster terms ------------------
+    // top = logY + 1. Visible iff 55 <= top <= 232, i.e. 54 <= logY <= 231.
+    cmp #APERTURE_TOP_RASTER - 1
+    bcc !clipped+                       // the top of the body is clipped
+    cmp #APERTURE_BOT_RASTER - TURRET_BODY_H * 8 + 1
+    bcs !clipped+                       // the bottom of the body is clipped
+    lda #1
+    sta turretVisible,x
+    lda trtVisibleMask
+    ora turretBit,x
+    sta trtVisibleMask
+    dex
+    bpl !aim-
+    rts
+
+!clipped:
+    lda #0
+    sta turretVisible,x                 // on the page but not wholly inside the
+                                        // aperture: drawn, not hittable, and it
+                                        // can change with the fine scroll alone
+!next:
+    dex
+    bpl !aim-
     rts
 
 // ---------------------------------------------------------------------------
@@ -283,6 +925,12 @@ turretInit:
 //
 // Two cells, never four: a body spans two stage rows and each row is generated
 // on its own call, so this writes the top pair or the bottom pair, never both.
+//
+// THIS IS THE PAGE GENERATOR'S PATH AND IS INDEPENDENT OF turretWorldTick.
+// It asks "what belongs in stage row S", which has an answer whether or not
+// that row is anywhere near the aperture -- the back page is built one coarse
+// step ahead of the displayed one. The screen-space state above exists for
+// combat and colour, and neither is consulted here.
 // ---------------------------------------------------------------------------
 
 // The answer for 404 of the level's 420 rows, and for every row of a stage
@@ -305,9 +953,6 @@ turretOverlayRow:
     sta trtHalf                         // this is where half the rows leave
 
     // ---- metatileRow = stageRow / METATILE_H, and it fits a byte ----------
-    // The stage row is at most nine bits (the guard above says so), so the
-    // high byte contributes exactly one bit and two shifts land the whole
-    // answer in A. 105 metatile rows means A is at most 104.
     lda rrStageHi
     lsr                                 // C = bit 8 of the stage row
     lda rrStageLo
@@ -342,6 +987,583 @@ turretOverlayRow:
     sta (scrPtr),y                      // TR or BR
     rts
 
-.if (* > $6f00) {
-    .error "the turret code has outgrown its $6e40 segment"
+// ===========================================================================
+// COLOUR: the pulse, the hit flash, and putting the terrain colour back
+// ===========================================================================
+// COLOUR RAM IS NOT DOUBLE BUFFERED -- there is one $d800 for both screen
+// pages -- and src/terrain.asm fills it with ONE level-global value at init
+// and never touches it again. That is what makes the real terrain affordable,
+// and this slice does not change it: the ONLY cells ever written after init
+// are the two-by-two of a turret that is on screen, and they are written back
+// to TERRAIN_COLOUR_RAM the moment the body leaves them or dies.
+//
+// So there is no per-cell colour map, no second copy, and no ABI. The
+// invariant is simply:
+//
+//     every colour RAM cell is TERRAIN_COLOUR_RAM, except the cells named by
+//     turretCramRow for a turret that is alive and on the page
+//
+// and turretCramRow is the whole of the bookkeeping that makes it true.
+//
+// WHEN THIS RUNS, AND WHY IT IS SAFE MID-FRAME. The VIC latches a row's colour
+// RAM once, in that row's badline c-access, and holds it for all eight raster
+// lines of the row. A write therefore either lands before that row's badline
+// and shows this frame, or after it and shows the next -- never inside a
+// character. That is why colour may be painted here, right after the hitscan,
+// while the destroyed body's CHARACTERS have to wait for the top of the next
+// frame: characters are fetched the same way, but a half-updated 2x2 body is a
+// visible tear where a one-frame-late colour is not.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// turretPaintTick — one frame of turret colour. Called AFTER collisionTick, so
+// a hit lands its flash on the same frame the shot resolved.
+// ---------------------------------------------------------------------------
+turretPaintTick:
+    // ---- step the ONE global pulse phase ---------------------------------
+    // One phase for every turret, exactly as the old game had it: two turrets
+    // on screen together pulse in step rather than each on its own clock.
+    dec trtPulseTimer
+    bne !phaseReady+
+    lda #TURRET_PULSE_INTERVAL
+    sta trtPulseTimer
+    ldx trtPulseIndex
+    inx
+    cpx #TURRET_PULSE_LEN
+    bcc !storeIdx+
+    ldx #0
+!storeIdx:
+    stx trtPulseIndex
+    inc trtRepaint                      // a new colour: the cells must change
+!phaseReady:
+    ldx trtPulseIndex
+    lda turretPulseTable,x
+    ora #$08                            // keep the multicolour selector bit:
+    sta trtPulseColour                  // the dome is bit pair 11
+
+    // ---- IS THERE ANYTHING TO PAINT AT ALL? ------------------------------
+    // Colour RAM already holds what this frame wants unless the pulse stepped,
+    // a body moved to a different matrix row, a turret was hit or destroyed, or
+    // a hit flash is running and has to be decayed. The first three set
+    // trtRepaint; the fourth is trtFlash, which turretDamage raises and the
+    // decay below lowers. Both are one frame in eight or rarer, so six frames
+    // out of eight leave here in fifteen cycles instead of walking eight
+    // turrets to rewrite cells with the values they already hold.
+    //
+    // Same shape as the page derivation above, and the same measured reason:
+    // 640 cycles a frame with two turrets on screen was enough to overrun the
+    // frame on tests/test_slice_c.py's sixteen-enemy ladder.
+    lda trtRepaint
+    ora trtFlash
+    bne !work+
+    rts
+!work:
+    lda #0
+    sta trtRepaint
+
+    ldx #TURRET_TOTAL - 1
+!turret:
+    // ---- the cheap question first ----------------------------------------
+    // Nothing on the page AND nothing painted last frame AND not flashing means
+    // there is no work for this turret, which is the answer for six of the
+    // eight on a good frame and for all eight on two frames in three. Both
+    // row bytes are TURRET_ROW_NONE = $ff exactly when there is nothing to do,
+    // so ANDing them makes it one test of the sign bit.
+    lda turretPaintRow,x
+    and turretCramRow,x
+    bpl !work+
+    lda turretHitTimer,x
+    beq !skip+
+!work:
+    stx trtIdx
+
+    // ---- decay the hit flash ---------------------------------------------
+    // UNCONDITIONALLY, for an alive turret, where the old game decayed it only
+    // while the turret was combat-visible. A turret can only be hit while
+    // visible, so the only case the old rule changed was a turret scrolling
+    // off mid-flash: its timer froze and the flash reappeared when it came
+    // back. Decaying always costs the same four cycles and cannot leave a
+    // stale flash behind.
+    lda turretAlive,x
+    beq !target+                        // dead: paint nothing, restore below
+    lda turretHitTimer,x
+    beq !target+
+    dec turretHitTimer,x
+    bne !target+
+    dec trtFlash                        // that flash is over; when the last one
+                                        // ends this routine goes quiet again
+
+!target:
+    // ---- where should this turret's colour be THIS frame? -----------------
+    // A destroyed turret's target becomes "nowhere", and giving its cells back
+    // to the terrain colour is then the ordinary vacate path below: destruction
+    // needs no separate colour code at all.
+    //
+    // BUT NOT UNTIL ITS CHARACTERS HAVE GONE. A turret killed this frame still
+    // has its body on both pages until turretRestoreTick repairs them at the
+    // top of the next one, so dropping the colour now would show the dome in
+    // flat terrain colour for exactly one frame. Painting while the repair is
+    // still owed -- while its trtDeadPending bit is set -- makes the body and
+    // its colour disappear together, on the same frame, which is the only
+    // version of this that has no intermediate state to see.
+    lda turretAlive,x
+    bne !stillThere+
+    lda trtDeadPending
+    and turretBit,x
+    beq !wantNone+                      // dead AND repaired: nothing to paint
+!stillThere:
+    lda turretPaintRow,x
+    jmp !haveWant+
+!wantNone:
+    lda #TURRET_ROW_NONE
+!haveWant:
+    cmp turretCramRow,x
+    beq !paint+                         // unchanged: repaint in place below
+
+    // ---- the body has moved or gone: give the old cells back -------------
+    pha
+    lda turretCramRow,x
+    bmi !noOld+                         // TURRET_ROW_NONE: nothing was painted
+    sta trtRow
+    lda #TERRAIN_COLOUR_RAM
+    sta trtColour
+    lda #1
+    sta trtPair                         // RESTORE BOTH ROWS, ALWAYS, and do not
+                                        // ask how many were painted. The pair
+                                        // flag describes THIS frame's geometry
+                                        // and the cells being given back are
+                                        // last frame's; the two disagree for
+                                        // exactly one step as a body leaves the
+                                        // bottom edge. Writing the terrain
+                                        // colour over a cell that already holds
+                                        // it costs four cycles and cannot be
+                                        // wrong, and no second turret can be
+                                        // within one matrix row to be harmed by
+                                        // it -- the build guard puts them in
+                                        // different metatile rows.
+    jsr paintTurretCells
+    ldx trtIdx
+!noOld:
+    pla
+    sta turretCramRow,x
+
+!paint:
+    lda turretCramRow,x
+    bmi !next+                          // nothing on the page: nothing to paint
+    sta trtRow
+
+    // ---- the hit flash wins over the pulse while it runs ------------------
+    ldy turretHitTimer,x
+    beq !usePulse+
+    lda #TURRET_HIT_CRAM
+    bne !doPaint+                       // always taken: 18 is not zero
+!usePulse:
+    lda trtPulseColour
+!doPaint:
+    sta trtColour
+    ldx trtIdx
+    lda turretPaintPair,x               // ...but PAINT only the rows that are
+    sta trtPair                         // really on the page: turret colour on
+                                        // a terrain cell is visible
+    jsr paintTurretCells
+
+!next:
+    ldx trtIdx
+!skip:
+    dex
+    bmi !done+
+    jmp !turret-                        // the loop body outgrew branch range
+!done:
+    rts
+
+// ---------------------------------------------------------------------------
+// paintTurretCells — write trtColour into one turret's body cells.
+//
+// In:  trtIdx = turret, trtRow = the matrix row of the FIRST body cell row,
+//      trtColour = the value, trtPair = 1 to write trtRow + 1 as well
+// Out: two or four colour RAM cells written. Clobbers A, X, Y and trSrc.
+//
+// The row address comes from the scroller's own rowLo/rowHi tables, so there
+// is exactly one place in this engine that knows a matrix row is forty bytes.
+//
+// trSrc is src/terrain.asm's zero-page pointer and borrowing it is safe by
+// call order rather than by luck: it is live only INSIDE renderTerrainRow, and
+// nothing on this path calls that. The alternative was a fourth zero-page
+// pointer on a machine that has two pairs left.
+// ---------------------------------------------------------------------------
+// ONE POINTER FOR ALL FOUR CELLS. The two body rows are consecutive, so the
+// second row's cells are the first row's plus SCREEN_COLS, and the largest
+// offset any of them needs is column 38 + 41 -- well inside the one byte Y
+// has. Setting the pointer up twice, once per row, cost twenty-five cycles
+// that bought nothing, on the one frame in eight that can least afford them.
+paintTurretCells:
+    ldy trtRow
+    lda rowLo,y
+    sta trSrc
+    lda rowHi,y
+    clc
+    adc #>COLOUR_RAM
+    sta trSrc + 1
+
+    ldx trtIdx
+    ldy turretCol,x
+    lda trtColour
+    sta (trSrc),y                       // the top-left cell
+    iny
+    sta (trSrc),y                       // the top-right cell
+
+    ldx trtPair
+    beq !done+
+    ldx trtRow
+    cpx #SCREEN_ROWS - 1                // row 24 has no successor on the page
+    bcs !done+
+    tya
+    clc
+    adc #SCREEN_COLS - 1                // back to the left column, one row down
+    tay
+    lda trtColour
+    sta (trSrc),y                       // the bottom-left cell
+    iny
+    sta (trSrc),y                       // the bottom-right cell
+!done:
+    rts
+
+// The pointer is the ROW's address, so Y only ever spans one row plus the body:
+// the rightmost legal column is SCREEN_COLS - TURRET_BODY_W, and the furthest
+// cell is that plus SCREEN_COLS + 1.
+.if (SCREEN_COLS - TURRET_BODY_W + SCREEN_COLS + 1 > 255) {
+    .error "the second body row is out of reach of a one-byte Y offset"
+}
+
+// ===========================================================================
+// COMBAT: the player's hitscan meets a background character
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// traceTurretRay — extend the hitscan's nearest-target search over the turrets.
+//
+// Called by src/collision.asm's traceRay, AFTER it has scanned every enemy,
+// and it works on that file's scan variables:
+//
+//   in    csRayLo/csRayHi   the ray being traced, nine bits
+//         shotY             the ray's origin Y; the ray travels UP from it
+//         csTarget/csTargetY/csTargetKind   the incumbent, if any
+//   out   the same three, updated only if a turret BEATS the incumbent
+//
+// This is the old game's split exactly: traceTurretCannon extended
+// tracePlayerCannon's result rather than running a second competition, and the
+// tag it set is what hitCannonTarget dispatched on. Keeping the shape means
+// there is still ONE winner per ray and one place that decides it.
+//
+// THE ARBITRATION RULE, AND THE TIE. The test below is `bcc` AND `beq` to the
+// reject path -- a turret must be STRICTLY nearer than the incumbent, where
+// the enemy scan's own test replaces an equal incumbent. So:
+//
+//     nearest wins, and AN ENEMY WINS AN EXACT TIE.
+//
+// That is the old game's behaviour, from the same two branches, and it is
+// reproduced rather than improved on. It also means that with no turret in
+// the ray's path NOTHING here can change Slice D's answer: the scan either
+// rejects every turret and returns, or replaces an incumbent it strictly beat.
+//
+// THE HITBOX IS SIXTEEN PIXELS, NOT TWENTY-FOUR. traceTurretCannon's own
+// `cmp #16` against the enemy scan's `cmp #24`: a turret is a 2x2 character
+// body and its hitbox is exactly the body, where an enemy's is the full sprite
+// width. Recovered, not assumed.
+// ---------------------------------------------------------------------------
+traceTurretRay:
+    lda trtVisibleMask                  // IS THERE ANYTHING TO TRACE AT ALL?
+    bne !scan+                          // Turrets are on the aperture for about
+    rts                                 // a third of the level, so two volleys
+!scan:                                  // in three leave in five cycles
+    ldx #TURRET_TOTAL - 1
+!turret:
+    lda turretVisible,x                 // tested FIRST: it is 0 for six of the
+    beq !next+                          // eight even when a turret is on screen,
+                                        // where turretAlive is 1 for all eight.
+                                        // A body that is not wholly inside the
+                                        // aperture is not a target, and
+                                        // off-screen world objects are never
+                                        // hittable.
+    lda turretAlive,x
+    beq !next+                          // kept as its own gate rather than
+                                        // folded into the mask: the mask is
+                                        // rebuilt once a frame and a turret can
+                                        // die between the two rays of a volley
+
+    // ---- Y: above the ship, and nearer than the incumbent -----------------
+    lda turretLogY,x
+    cmp shotY
+    bcs !next+                          // at or below the ship: the ray is
+                                        // fired UPWARD, so this is behind it
+    cmp csTargetY
+    bcc !next+                          // strictly farther
+    beq !next+                          // EQUAL: the enemy keeps it
+
+    // ---- X: the nine-bit delta against the 16-pixel body ------------------
+    lda csRayLo
+    sec
+    sbc turretXLo,x
+    sta trtRelLo
+    lda csRayHi
+    sbc turretXHi,x
+    bne !next+                          // negative, or 256 or more
+    lda trtRelLo
+    cmp #TURRET_HITBOX_W
+    bcs !next+                          // hit iff turretX <= rayX <= turretX+15
+
+    lda turretLogY,x
+    sta csTargetY
+    stx csTarget
+    lda #CS_KIND_TURRET
+    sta csTargetKind
+!next:
+    dex
+    bpl !turret-
+    rts
+
+// ---------------------------------------------------------------------------
+// turretDamage — one cannon's worth of damage to the turret in slot X.
+// Called by src/collision.asm's applyDamage when csTargetKind says turret.
+// Entry/exit: X = the turret, preserved.
+//
+// ONE HP PER CANNON HIT, and the two cannons trace independently, so a volley
+// can take two HP off the SAME turret when both rays land inside its sixteen
+// pixels. The cannons are fifteen pixels apart (PLAYER_CANNON_L 4, _R 19) and
+// the body is sixteen wide, so that needs the ship aligned to within a single
+// pixel -- rare, reachable, and exactly what the old geometry produced.
+//
+// DESTRUCTION IS IMMEDIATE IN LOGIC AND DEFERRED IN PIXELS. Clearing
+// turretAlive is the whole of the gameplay state change and the whole of the
+// restoration contract; the pages catch up at the top of the next frame, in
+// turretRestoreTick, where writing screen RAM cannot tear a row the VIC is
+// part-way through fetching.
+// ---------------------------------------------------------------------------
+turretDamage:
+    lda turretHealth,x
+    beq !done+                          // already destroyed: never underflow
+    dec turretHealth,x
+    beq !destroy+
+
+    ldy turretHitTimer,x                // a survivable hit: flash, and let
+    bne !reload+                        // turretPaintTick apply the colour.
+    inc trtFlash                        // Counted, not RE-counted: a second hit
+!reload:                                // while the first flash still runs
+    lda #TURRET_HIT_FRAMES              // reloads the timer without raising
+    sta turretHitTimer,x                // trtFlash twice, which would leave it
+    rts                                 // permanently non-zero
+
+!destroy:
+    ldy turretHitTimer,x                // dying mid-flash: give the count back
+    beq !noFlash+                       // before the timer is cleared
+    dec trtFlash
+!noFlash:
+    inc trtRepaint                      // and its cells have to be given back
+    lda #0
+    sta turretAlive,x                   // THE restoration switch: every future
+                                        // page regeneration now omits the body
+    sta turretHitTimer,x                // a dead turret does not flash
+    inc trtKills                        // the kill event. The old game awarded
+                                        // TURRET_SCORE_PER_KILL here; score is
+                                        // not migrated -- see the constant.
+    lda trtDeadPending
+    ora turretBit,x
+    sta trtDeadPending                  // the pages owe this turret a repair
+!done:
+    rts
+
+turretBit: .byte 1, 2, 4, 8, 16, 32, 64, 128
+.if (TURRET_TOTAL > 8) { .error "turretBit is one byte of flags" }
+
+// ===========================================================================
+// DESTRUCTION: putting the terrain back, on both pages
+// ===========================================================================
+// ---------------------------------------------------------------------------
+// turretRestoreTick — the FIRST thing gameFrame does.
+//
+// WHY HERE, AND NOWHERE ELSE. The main loop is paced by the frame counter,
+// which the renderer increments in exFrame at raster 250 -- so gameFrame's
+// first instruction runs in the LOWER BORDER, below the playfield, with the
+// whole of the next picture's matrix fetch still ahead of it. Every row of
+// both pages can be written freely. By the time collisionTick resolves a hit,
+// forty to eighty raster lines later, that is no longer true for every row,
+// and the main-thread span moves with the load. So a kill FLAGS itself and the
+// repair happens here, at most one frame later, at a point whose safety does
+// not depend on how busy the frame was. The old game reached the same
+// conclusion and put its own revert in publishTurretGlyphs, "at frame start,
+// beam still in the border".
+//
+// BOTH PAGES, AND NEITHER BLINDLY. The hidden page is regenerated a few rows
+// at a time across the eight frames between coarse steps, so a turret killed
+// now may already have been composed into rows the back page wrote MINUTES of
+// raster ago -- and those rows are behind the regeneration cursor, so they
+// will not be rewritten before the page flips. Repairing only the displayed
+// page would make the body reappear for a whole coarse cycle at the next flip.
+// So both are repaired, each against ITS OWN top row: stageTopRow for the
+// displayed page, regenTopRow for the one being rebuilt. Those are the
+// scroller's own two origins and this file only reads them.
+//
+// WHAT IS WRITTEN IS THE AUTHORITATIVE DECODE, NOT A CACHE. The repair calls
+// renderTerrainRow -- the same routine that builds every page row -- for the
+// body's stage rows. It writes the forty terrain codes that row has always
+// had, with no turret overlay, because turretOverlayRow is not called. There
+// is no turretGroundCodes table here and there does not need to be: the terrain
+// is a pure function of the stage row, so it can always be recomputed and can
+// never be stale. Re-rendering the whole row rather than four cells costs more
+// and is worth it -- it is the engine's own tested decode, it needs no second
+// implementation of the metatile arithmetic, and no other turret can share
+// those rows (the build guard forbids two turrets in one metatile row).
+// ---------------------------------------------------------------------------
+turretRestoreTick:
+    lda trtDeadPending
+    bne !work+
+    rts                                 // the whole cost on an ordinary frame:
+!work:                                  // one load and one branch, 12 cycles
+
+    ldx #TURRET_TOTAL - 1
+!turret:
+    stx trtIdx
+    lda trtDeadPending
+    and turretBit,x
+    bne !repair+
+    ldx trtIdx
+    dex
+    bpl !turret-
+    rts
+
+!repair:
+    // ---- the displayed page, every row of the body that is on it ----------
+    lda #SCREEN_ROWS
+    sta trtRepairLim
+    ldy dispPage
+    lda pageHiTable,y
+    sta trtPageHi
+    ldx trtIdx
+    lda stageTopRowLo
+    ldy stageTopRowHi
+    jsr turretRepairPage
+
+    // ---- the page being rebuilt, only the rows it has ALREADY written -----
+    // regenRow is the next row regeneration will write, so rows below it were
+    // composed this cycle -- possibly before this turret died, which is the
+    // whole reason the back page needs repairing at all. Rows at or above it
+    // have not been written yet and will be written with turretAlive already
+    // clear, so repairing them is work whose result is about to be recomputed.
+    // At regenRow = 0 that skips the back page entirely.
+    lda regenRow
+    sta trtRepairLim
+    lda regenPageHi
+    sta trtPageHi
+    ldx trtIdx
+    lda regenTopRowLo
+    ldy regenTopRowHi
+    jsr turretRepairPage
+
+    ldx trtIdx
+    lda trtDeadPending
+    eor turretBit,x
+    sta trtDeadPending                  // paid
+    inc trtRepaint                      // the body is gone from the pages now,
+                                        // so its colour may go with it
+
+    // ---- ONE TURRET A FRAME, AND THAT IS A MEASUREMENT --------------------
+    // Repairing one turret on both pages costs 4,480 to 6,002 cycles; two in
+    // the same frame measured 9,354 to 11,057, which on top of a worst-case
+    // main thread of about 9,800 does not fit in a PAL frame's 19,656 and
+    // would show up as a missed frame. Two turrets can only die together when
+    // one volley's two rays each land the last HP on a different body -- rare,
+    // reachable, and not worth an overrun. The second simply waits a frame,
+    // which is twenty milliseconds later than the first and not a thing a
+    // player can see.
+    rts
+
+pageHiTable: .byte >SCREEN_A, >SCREEN_B
+
+// ---------------------------------------------------------------------------
+// turretRepairPage — rewrite turret X's body rows on one page as pure terrain.
+// In: X = turret, A/Y = that page's top stage row, trtPageHi = its high byte.
+// ---------------------------------------------------------------------------
+turretRepairPage:
+    jsr turretRelRow                    // trtRel = matrix row of the top body row
+
+    lda trtRelHi
+    beq !onLowPage+
+
+    // The entering-from-the-top case again: the authored row sits just above
+    // matrix row 0, so only the BOTTOM body row is on this page, at row 0.
+    cmp #>(TERRAIN_STAGE_ROWS - 1)
+    bne !done+
+    lda trtRelLo
+    cmp #<(TERRAIN_STAGE_ROWS - 1)
+    bne !done+
+    lda trtRepairLim                    // matrix row 0: is it below the limit?
+    beq !done+
+    ldx trtIdx
+    lda turretRowLo,x                   // the bottom body row is authored + 1,
+    clc                                 // and the build guard keeps it inside
+    adc #1                              // the stage, so there is no wrap here
+    sta rrStageLo
+    lda turretRowHi,x
+    adc #0
+    sta rrStageHi
+    lda #0
+    jmp turretRepairRow
+
+!onLowPage:
+    lda trtRelLo
+    cmp #SCREEN_ROWS
+    bcs !done+                          // no body row is on this page
+
+    // ---- the top body row -------------------------------------------------
+    cmp trtRepairLim
+    bcs !second+                        // at or above the limit: regeneration
+                                        // will write this row itself
+    pha
+    ldx trtIdx
+    lda turretRowLo,x
+    sta rrStageLo
+    lda turretRowHi,x
+    sta rrStageHi
+    pla
+    pha
+    jsr turretRepairRow
+
+    // ---- and the one below it, if the page has it -------------------------
+    pla
+!second:
+    cmp #SCREEN_ROWS - 1
+    bcs !done+                          // the top body row was matrix row 24
+    clc
+    adc #1
+    cmp trtRepairLim
+    bcs !done+
+    pha
+    ldx trtIdx
+    lda turretRowLo,x
+    clc
+    adc #1
+    sta rrStageLo
+    lda turretRowHi,x
+    adc #0
+    sta rrStageHi
+    pla
+    jmp turretRepairRow
+!done:
+    rts
+
+// A = matrix row, rrStageLo/Hi = the stage row, trtPageHi = the page.
+// Writes forty terrain codes and nothing else.
+turretRepairRow:
+    tax
+    lda rowLo,x
+    sta scrPtr
+    lda rowHi,x
+    clc
+    adc trtPageHi
+    sta scrPtr + 1
+    jmp renderTerrainRow                // the engine's own decode, unchanged,
+                                        // with no overlay on top of it
+
+.if (* > $7400) {
+    .error "the turret code has outgrown its $6f00 segment"
 }

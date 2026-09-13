@@ -539,11 +539,24 @@ def unchanged(mon):
     # Measured with an empty pool: about twenty raster lines, some 1300 cycles,
     # for two sixteen-slot scans. tests/test_slice_d.py attributes the collision
     # half of it directly, by switching collisionTick off and re-measuring.
+    #
+    # AND THE TURRET COMBAT SLICE WIDENED IT AGAIN, for the same reason and in
+    # the same way. traceRay now ends by calling traceTurretRay, which walks all
+    # eight authored turrets once per cannon -- so a firing frame carries two
+    # sixteen-slot object scans AND two eight-turret scans. Measured at 30
+    # raster lines against the 26 this bound was set at, which is the ~250
+    # cycles those two extra scans cost.
+    #
+    # THE BOUND IS RAISED, NOT REMOVED, and it is still the thing that would
+    # catch a hitscan that started doing real work per frame rather than per
+    # volley. Only the firing frame pays it: turretWorldTick and turretPaintTick
+    # run on EVERY frame, so they are in `moving` as well and cancel out of this
+    # difference entirely.
     weapon_and_collision = fire_span - move_span
     check("firing plus its hitscan costs a bounded amount over moving",
-          weapon_and_collision <= 28,
+          weapon_and_collision <= 34,
           f"firing {fire_span} vs moving {move_span}: {weapon_and_collision} "
-          f"raster lines for the volley and both cannon scans")
+          f"raster lines for the volley, both cannon scans and both turret scans")
     check("and moving and idle sit close together, both being republication",
           abs(move_span - idle_span) <= 20,
           f"idle {idle_span} moving {move_span}")

@@ -132,6 +132,13 @@
 .const TOP_SPLIT_LINE = 55
 .const BOT_SPLIT_LINE = 248
 
+// The same two boundaries stated as the rasters the PLAYFIELD occupies, which
+// is what a game system asking "is this thing fully on screen" needs. The
+// split lines are where the charset CHANGES; these are the first and last
+// raster that shows terrain. Derived, so the two can never drift.
+.const APERTURE_TOP_RASTER = TOP_SPLIT_LINE          // 55, first terrain line
+.const APERTURE_BOT_RASTER = BOT_SPLIT_LINE - 1      // 247, last terrain line
+
 // ---------------------------------------------------------------------------
 // $D021 IS APERTURE STATE, NOT BOOT STATE.
 //
@@ -431,6 +438,21 @@ mainLoop:
 // page that is. Nothing above them touches a page at all.
 // ---------------------------------------------------------------------------
 gameFrame:
+    // FIRST, AND THE POSITION IS THE WHOLE POINT.
+    //
+    // The main loop is paced by the frame counter, which the renderer
+    // increments in exFrame at raster 250 -- so this instruction runs in the
+    // LOWER BORDER, below the playfield, with the entire next picture's matrix
+    // fetch still ahead of it. Every row of both screen pages can be written
+    // freely here and nowhere later is that unconditionally true: by
+    // collisionTick the beam is forty to eighty lines further on, and how much
+    // further moves with the frame's load.
+    //
+    // So a destroyed turret FLAGS itself when the hitscan resolves and its
+    // characters are repaired here, at most one frame later. On an ordinary
+    // frame this costs one load and one branch.
+    jsr turretRestoreTick
+
 .if (HUD_VISIBLE) {
     jsr hudTick                         // the displayed page, before scrollTick
 }                                       // can change which page that is
@@ -475,7 +497,20 @@ gameFrame:
     // One visible consequence, named so it is not mistaken for a bug: an enemy
     // that left the world this frame was already freed above, so a shot fired
     // on that frame misses it.
+    // The turrets' world -> screen derivation, and it belongs HERE: after all
+    // movement and before the hitscan, which is exactly where the old game put
+    // positionBackgroundTurrets. scrollTick runs at the END of this routine, so
+    // stageTopRow and scrollFine still describe the picture on screen.
+    jsr turretWorldTick
+
     jsr collisionTick
+
+    // AFTER collisionTick, so a hit lands its flash on the same frame the shot
+    // resolved. Colour RAM only -- the VIC latches a row's colour once per
+    // badline and holds it for the whole character, so a mid-frame write is a
+    // one-frame granularity rather than a tear. The destroyed body's
+    // CHARACTERS are a different matter and wait for turretRestoreTick above.
+    jsr turretPaintTick
 
     jsr enemySpawnTick
 

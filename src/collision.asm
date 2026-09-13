@@ -66,9 +66,11 @@
 //   and damageEnemy refuses to act on an already-zero health: "Already
 //   dead/dying: never underflow health."
 //
-// DELIBERATELY NOT TAKEN:
-//   * traceTurretCannon. The old trace extended target selection to world
-//     turrets; there are no turrets yet and they are not this slice.
+// MIGRATED LATER, IN THE TURRET COMBAT SLICE:
+//   * traceTurretCannon, as traceTurretRay in src/turrets.asm. The old trace
+//     extended this same nearest-Y selection over the world's turrets, and
+//     that is what the call at the end of traceRay now does. The enemy scan
+//     above is untouched by it.
 //   * updateEnemyHealthSprite. The old game gave each damaged enemy a PRIVATE
 //     64-byte sprite copy with a health bar burned into its bottom two rows,
 //     built by self-modifying code. That is a rendering feature, it costs a
@@ -92,6 +94,16 @@
 .const DEATH_COL_2     = 8          // orange middle blast
 .const DEATH_COL_3     = 2          // red final breakup
 
+// WHAT KIND OF THING A RAY HIT. The pool is not the only thing a ray can
+// intersect any more: src/turrets.asm's authored background turrets are
+// hittable too, and they are NOT objects -- no pool slot, no logical sprite,
+// no type field. So the winner of a ray is a pair, an index and a kind, and
+// applyDamage dispatches on the kind. The old game packed the same decision
+// into bit 7 of HITSCAN_TARGET; a separate byte keeps csTarget usable as an
+// index without a mask on every read.
+.const CS_KIND_ENEMY   = 0
+.const CS_KIND_TURRET  = 1
+
 // The lowest hittable line. The old game used GAMEPLAY_SPRITE_MIN_Y, which is
 // 55 for RSEL=0 -- the same number this engine calls MIN_SPRITE_Y. Sharing it
 // is a DECISION and gets a check rather than an alias, as in src/player.asm.
@@ -111,6 +123,8 @@ csRayLo:     .byte 0                // the ray being traced, nine bits
 csRayHi:     .byte 0
 csTarget:    .byte 0                // slot of the best candidate, or $ff
 csTargetY:   .byte 0                // its Y; greatest Y wins
+csTargetKind: .byte 0               // CS_KIND_ENEMY or CS_KIND_TURRET. Which
+                                    // pool csTarget indexes, and nothing else.
 csTmp:       .byte 0                // the nine-bit delta's low byte
 
 // --- the kill event, which is ALL the score coupling there is --------------
@@ -203,6 +217,9 @@ traceRay:
     sta csTarget                        // $ff = nothing has intersected yet
     lda #0
     sta csTargetY                       // greatest qualifying Y wins
+    sta csTargetKind                    // CS_KIND_ENEMY is 0, so the enemy scan
+                                        // below never has to set it; only a
+                                        // turret that WINS changes it
 
     ldx #0
 !scan:
@@ -255,6 +272,24 @@ traceRay:
     cpx #MAX_OBJECTS
     bne !scan-
 
+    // ---- and now the world's own targets ---------------------------------
+    // THE ORDER IS THE OLD GAME'S AND IT DECIDES THE TIE. tracePlayerCannon
+    // scanned every enemy and then called traceTurretCannon to EXTEND the same
+    // nearest-Y result rather than run a second competition. A turret must beat
+    // the incumbent STRICTLY, where an enemy replaces an equal one -- so:
+    //
+    //     one winner per ray, nearest (greatest Y) wins, ENEMY WINS A TIE.
+    //
+    // Running the turrets second is therefore not an implementation detail; it
+    // is the tie-break. It also makes the effect on Slice D exactly nothing
+    // when no turret is in the ray's path: this call either rejects every
+    // turret and returns, or replaces an incumbent it strictly beat.
+    //
+    // src/turrets.asm owns the turret half -- its geometry, its sixteen-pixel
+    // hitbox and its visibility gate are turret facts -- and works on the three
+    // scan variables above. This file keeps the RULE and the dispatch.
+    jsr traceTurretRay
+
     ldx csTarget
     cpx #$ff
     beq !miss+
@@ -273,6 +308,13 @@ traceRay:
 // and performs the free, so there is exactly one place a slot is released.
 // ---------------------------------------------------------------------------
 applyDamage:
+    lda csTargetKind
+    beq !enemy+
+    jmp turretDamage                    // X = the turret. src/turrets.asm owns
+                                        // its health, its flash and its
+                                        // destruction, exactly as this file
+                                        // owns the enemy's.
+!enemy:
     lda objHP,x
     beq !done+                          // "Already dead/dying: never underflow
                                         // health" -- damageEnemy:2551

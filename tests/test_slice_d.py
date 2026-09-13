@@ -626,7 +626,14 @@ def ladder(mon):
     print("     would make the suite's own instrument the thing it measures.")
     print("     Each population is run twice, with collisionTick switched OFF")
     print("     and ON, so the cost is ATTRIBUTED rather than merely observed.\n")
-    print("     enemies  collision   span   over  recSkip  schedSkip")
+    print("     TWO DIFFERENT COUNTERS, REPORTED SEPARATELY. They were summed")
+    print("     into one `over` column, and they do not mean the same thing:")
+    print("       overrun   the main thread did not finish inside a 312-line")
+    print("                 frame. A FAULT.")
+    print("       spanOver  the span passed 255 lines, so the 8-bit gameSpanMax")
+    print("                 is a floor. A SATURATED DIAGNOSTIC, not a fault --")
+    print("                 src/main.asm says so where it is incremented.\n")
+    print("     enemies  collision   span  spanOver  overrun  recSkip  schedSkip")
 
     col_byte = rd(mon, sym["collisionTick"])[0]
     rows = []
@@ -656,12 +663,14 @@ def ladder(mon):
             k = "on" if coll else "off"
             row[k] = {
                 "span": rd(mon, sym["gameSpanMax"])[0],
-                "over": rd(mon, sym["gameOverrun"])[0] + rd(mon, sym["gameSpanOver"])[0],
+                "spanOver": rd(mon, sym["gameSpanOver"])[0],
+                "over": rd(mon, sym["gameOverrun"])[0],
                 "recSkip": rd(mon, sym["publishSkip"])[0],
                 "schedSkip": rd(mon, sym["schedBuildDefer"])[0]}
             r = row[k]
             print(f"    {pop:7d}  {'ON ' if coll else 'OFF'}        "
-                  f"{r['span']:5d}  {r['over']:5d}  {r['recSkip']:7d}  {r['schedSkip']:9d}")
+                  f"{r['span']:5d}  {r['spanOver']:8d}  {r['over']:7d}  "
+                  f"{r['recSkip']:7d}  {r['schedSkip']:9d}")
         rows.append(row)
     poke(mon, sym["collisionTick"], col_byte)
 
@@ -669,11 +678,24 @@ def ladder(mon):
     # sustainable. Whether 12 or 16 well-separated sprites are sustainable AT
     # ALL is a property of the renderer and the main thread, and predates this
     # slice -- switching collisionTick off does not rescue them.
+    # SUSTAINABLE MEANS THE MAIN THREAD FINISHED INSIDE THE FRAME, and nothing
+    # else. It used to mean `gameOverrun + gameSpanOver == 0`, which conflated
+    # a fault with a precision limit: gameSpanOver only says the 8-bit
+    # gameSpanMax has saturated and the number printed is a floor. A frame that
+    # takes 260 of the 312 lines trips it and misses nothing.
+    #
+    # The population SET is still chosen with both, though, and deliberately.
+    # A population whose cost cannot be measured is not one to draw conclusions
+    # about, so it is excluded from the comparisons rather than asserted on --
+    # which keeps the set exactly what it has always been (1, 4, 8) and stops
+    # this change quietly dragging 12 and 16 into assertions written for the
+    # populations the engine comfortably sustains.
     same = [r["pop"] for r in rows if (r["off"]["over"] == 0) != (r["on"]["over"] == 0)]
     check("collision never turns a sustainable population into an unsustainable one",
           not same, f"changed at {same}")
 
-    sustained = [r for r in rows if r["off"]["over"] == 0]
+    sustained = [r for r in rows
+                 if r["off"]["over"] == 0 and r["off"]["spanOver"] == 0]
     check("at every population the engine sustains, collision is free of overruns",
           all(r["on"]["over"] == 0 for r in sustained),
           f"{[(r['pop'], r['on']['over']) for r in sustained]}")
@@ -681,16 +703,25 @@ def ladder(mon):
           all(r["on"]["recSkip"] == 0 and r["on"]["schedSkip"] == 0 for r in sustained),
           f"{[(r['pop'], r['on']['recSkip'], r['on']['schedSkip']) for r in sustained]}")
 
-    deltas = [(r["pop"], r["on"]["span"] - r["off"]["span"]) for r in sustained]
+    # A DELTA AGAINST A FLOOR IS NOT A DELTA. Where the collision-on span
+    # saturated, gameSpanMax is a lower bound and the difference understates the
+    # cost by an unknown amount, so those rows are reported and not asserted on.
+    deltas = [(r["pop"], r["on"]["span"] - r["off"]["span"]) for r in sustained
+              if r["on"]["spanOver"] == 0]
+    floored = [r["pop"] for r in sustained if r["on"]["spanOver"] != 0]
     check("collision's own cost is small and bounded",
-          all(d <= 40 for _, d in deltas), f"{deltas} raster lines")
+          all(d <= 40 for _, d in deltas),
+          f"{deltas} raster lines"
+          + (f"; not measurable at {floored}, where the span saturated" if floored else ""))
 
-    over = [r["pop"] for r in rows if r["off"]["over"] > 0]
+    over = [r["pop"] for r in rows
+            if r["off"]["over"] > 0 or r["off"]["spanOver"] > 0]
     if over:
         advise("the engine sustains this sprite spread at every population tested",
                False, scope="pre-existing engine limit, not a Slice D regression",
                detail=
-               f"populations {over} overrun the frame WITH COLLISION SWITCHED OFF."
+               f"populations {over} exceed the 255-line span counter WITH"
+               f"\n       COLLISION SWITCHED OFF, and 16 misses frames outright."
                f"\n       Well-separated sprites produce many batches where a"
                f"\n       descending column produces one, so this is a heavier"
                f"\n       RENDERER load than Slice C's ladder ever applied. It is a"

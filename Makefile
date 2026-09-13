@@ -86,7 +86,7 @@ VICE_OPTS := +saveres -pal -joydev1 0 -joydev2 $(JOY2) $(KEYSET)
 .PHONY: all build d64 test test-fast test-engine-full
 .PHONY: test-slice-a test-slice-a-prime test-slice-b
 .PHONY: test-p0 test-p1 test-p2 test-p3 test-p4 test-p5 test-renderer-full
-.PHONY: test-terrain test-turrets run run-d64 clean
+.PHONY: test-terrain test-turrets test-turret-combat run run-d64 clean
 
 all: build
 
@@ -186,6 +186,11 @@ test-p5: build
 #                         hidden-page overlay, the terrain-recoverable contract,
 #                         zero sprite/object resources, and $d021 as aperture
 #                         state sampled by raster
+#   test_turret_combat.py the player-vs-turret combat contract: the old
+#                         constants, the nearest-wins/enemy-takes-a-tie
+#                         arbitration, the 16-pixel hitbox, the colour pulse
+#                         and hit flash, and destruction restoring the
+#                         authoritative terrain on BOTH pages
 #   test_batch_window.py  legality-window batch merging: the window arithmetic
 #                         at the reuse boundary, the common-intersection rule,
 #                         a structural sweep, and the 6502 against the model.
@@ -214,6 +219,7 @@ test: build
 	python3 tests/test_slice_d.py
 	python3 tests/test_terrain.py
 	python3 tests/test_turrets.py
+	python3 tests/test_turret_combat.py
 	python3 tests/test_batch_window.py --fast
 
 test-slice-a: build
@@ -236,6 +242,9 @@ test-terrain: build
 
 test-turrets: build
 	python3 tests/test_turrets.py
+
+test-turret-combat: build
+	python3 tests/test_turret_combat.py
 
 test-batch-window: build
 	python3 tests/test_batch_window.py --fast

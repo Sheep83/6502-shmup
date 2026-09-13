@@ -90,6 +90,7 @@
 .if (STAGE_ROWS < SCREEN_ROWS + 1) { .error "a stage must be taller than one screen" }
 .if (STAGE_START_ROW < 0)          { .error "STAGE_START_ROW is negative" }
 
+
 .const ROWS_PER_TICK = 4                // 25 rows over the 8 frames between
                                         // coarse steps, with margin. Spread on
                                         // purpose: a single 25-row burst is
@@ -144,6 +145,29 @@
                                         // says whether the margin is enough, and
                                         // it is measured at zero over free runs
                                         // with enemies live and the gun firing.
+
+// ---------------------------------------------------------------------------
+// ONE FRAME IN EIGHT IS IDLE HERE, AND SOMETHING ELSE NOW RELIES ON IT.
+//
+// regenTick rebuilds the back page at ROWS_PER_TICK rows a frame and stops when
+// regenRow reaches SCREEN_ROWS, so it finishes in ceil(25/4) = 7 of the 8
+// frames between coarse steps and the eighth does nothing at all. The fine
+// scroll counts UP and wraps 7 -> 0 at the coarse step, so that idle frame is
+// the one on which scrollFine reads 7.
+//
+// src/turrets.asm derives the NEXT coarse step's page geometry on exactly that
+// frame (TURRET_PREPARE_FINE), which is what keeps the derivation off the frame
+// where this routine restarts the page -- measured as the difference between
+// eight well-separated enemies being sustainable and not. If ROWS_PER_TICK ever
+// drops far enough that regeneration fills all eight frames, that quiet frame
+// is gone and the turret preparation has nowhere to go, so this is a build
+// error rather than a silent performance regression.
+.if (floor((SCREEN_ROWS + ROWS_PER_TICK - 1) / ROWS_PER_TICK) >= 8) {
+    .error "regeneration now fills every frame: TURRET_PREPARE_FINE has no idle frame to run on"
+}
+.if (TURRET_PREPARE_FINE != 7) {
+    .error "the idle frame is the one before the coarse step, which is fine scroll 7"
+}
 
 // ===========================================================================
 // Scroll state. MAIN THREAD ONLY, and OUTSIDE VIC BANK 0 with everything else
