@@ -649,7 +649,17 @@ renderBackgroundRow:
     // cadence visible before there was any real content to judge them by, and
     // Slice A' qualified both. pageTopRow still reports the same information
     // off-screen for the tests that want it.
-    jmp renderTerrainRow
+    //
+    // THEN THE TURRET OVERLAY, ON THE SAME ROW, BEFORE THE PAGE IS PUBLISHED.
+    // The old game's static background-character turrets are composed HERE,
+    // during hidden-page generation, rather than poked into the visible screen
+    // from gameplay code later: a page is then coherent the moment it flips,
+    // and "base terrain + turret overlay = generated page" is a statement
+    // about how the page was built rather than a convention to be maintained.
+    // The authored terrain underneath is never modified. See src/turrets.asm
+    // for the restoration contract that rests on exactly that.
+    jsr renderTerrainRow
+    jmp turretOverlayRow
 
 
 // --- the playfield aperture -------------------------------------------------

@@ -86,7 +86,7 @@ VICE_OPTS := +saveres -pal -joydev1 0 -joydev2 $(JOY2) $(KEYSET)
 .PHONY: all build d64 test test-fast test-engine-full
 .PHONY: test-slice-a test-slice-a-prime test-slice-b
 .PHONY: test-p0 test-p1 test-p2 test-p3 test-p4 test-p5 test-renderer-full
-.PHONY: test-terrain run run-d64 clean
+.PHONY: test-terrain test-turrets run run-d64 clean
 
 all: build
 
@@ -180,6 +180,12 @@ test-p5: build
 #   test_terrain.py       the level-1 terrain contract: the authored package is
 #                         the original, metatile expansion, the stage-row
 #                         mapping, colour RAM, and the $d018 charset windows
+#   test_turrets.py       the static background-character turrets and the black
+#                         open border: the authored placement is the old repo's
+#                         own, the world row -> generated cell mapping, the
+#                         hidden-page overlay, the terrain-recoverable contract,
+#                         zero sprite/object resources, and $d021 as aperture
+#                         state sampled by raster
 #   test_batch_window.py  legality-window batch merging: the window arithmetic
 #                         at the reuse boundary, the common-intersection rule,
 #                         a structural sweep, and the 6502 against the model.
@@ -207,6 +213,7 @@ test: build
 	python3 tests/test_slice_c.py
 	python3 tests/test_slice_d.py
 	python3 tests/test_terrain.py
+	python3 tests/test_turrets.py
 	python3 tests/test_batch_window.py --fast
 
 test-slice-a: build
@@ -226,6 +233,9 @@ test-slice-d: build
 
 test-terrain: build
 	python3 tests/test_terrain.py
+
+test-turrets: build
+	python3 tests/test_turrets.py
 
 test-batch-window: build
 	python3 tests/test_batch_window.py --fast

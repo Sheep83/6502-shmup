@@ -37,6 +37,10 @@ from test_p0 import PRG, SYM, symbols, Vice, rd, set_bp, free_run, LAUNCHED_PIDS
 # The terrain model, so a row's expected content is derived from the authored
 # level rather than restated here. One model, used by both files.
 import test_terrain as T
+# ...and the turret overlay, which is part of a generated page now: the rows
+# that carry a turret body hold four character codes the terrain model alone
+# does not predict. One model, used by test_turrets.py and by this file.
+import turret_model as TM
 DEFS = T.byte_rows("stage_map.asm", "metatileDefs")
 ROWS = T.byte_rows("stage_map.asm", "stageMetatileRows")
 
@@ -250,7 +254,8 @@ def row_continuity(mon):
         return tuple(page[r * 40: (r + 1) * 40])
 
     def want(row):
-        return tuple(T.expand(DEFS, ROWS, row % STAGE_ROWS))
+        r = row % STAGE_ROWS
+        return tuple(TM.apply(T.expand(DEFS, ROWS, r), r))
 
     bad = [(r, ident(front, r), want(top + r)) for r in range(SCREEN_ROWS)
            if ident(front, r) != want(top + r)]
@@ -331,7 +336,9 @@ def flip_continuity(mon):
           bool(steps) and all(s == 1 for s in steps), f"{steps}")
     idents = []
     for _, after, first in seen:
-        idents.append((first, tuple(T.expand(DEFS, ROWS, after % STAGE_ROWS))))
+        r_after = after % STAGE_ROWS
+        idents.append((first, tuple(TM.apply(T.expand(DEFS, ROWS, r_after),
+                                             r_after))))
     check("the newly displayed page's top row IS the newly revealed stage row",
           bool(idents) and all(a == b for a, b in idents),
           f"{[(list(a[:6]), list(b[:6])) for a, b in idents[:2] if a != b]}")

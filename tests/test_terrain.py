@@ -27,10 +27,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 from test_p0 import PRG, SYM, symbols, Vice, rd, set_bp, free_run, LAUNCHED_PIDS
 from test_p2 import poke
+import old_repo
 
 sym = symbols(SYM)
 LEVEL = ROOT / "src" / "level1"
-OLD = Path("/Users/brianmorrice/Dev/C64 ASM/shooter_test/src/generated/level1")
+# The old repo is read out of ~/Desktop/c64Shooter-main.zip. It used to be a
+# checkout at "/Users/brianmorrice/Dev/C64 ASM/shooter_test", which does not
+# exist on this machine -- so this whole section was reporting one failure and
+# checking nothing. See tests/old_repo.py.
+OLD = "src/generated/level1/"
 
 # --- the contract, restated independently of the assembler ------------------
 METATILE_W = METATILE_H = 4
@@ -87,12 +92,12 @@ def provenance():
     pairs = [("stage_config.asm", "stage_config.asm"),
              ("stage_charset.asm", "stage_charset.asm"),
              ("stage_map.asm", "stage_test.asm")]
-    if not OLD.exists():
-        check("the reference checkout is present", False, str(OLD))
+    if not old_repo.present():
+        check("the reference archive is present", False, str(old_repo.ARCHIVE))
         return
     for new, old in pairs:
         a = (LEVEL / new).read_bytes()
-        b = (OLD / old).read_bytes()
+        b = old_repo.old_bytes(OLD + old)
         check(f"src/level1/{new} is byte-identical to the old repo's {old}",
               a == b, f"{len(a)} vs {len(b)} bytes")
 
@@ -239,11 +244,19 @@ def ownership():
         check(f"terrain.asm never touches ${reg} ({what})", not hits)
     writes = sorted(set(re.findall(r"sta\s+\$(d0[0-9a-f]{2})", t, re.I)))
     # $d016 is the multicolour mode bit and is set ONCE at init, read-modify-
-    # write so XSCROLL and CSEL survive. The playfield's three shared colours
-    # are the only other VIC state terrain owns, and all four are written from
-    # terrainInit and never again -- there is no per-frame terrain VIC work.
+    # write so XSCROLL and CSEL survive. Two shared colours are the only other
+    # VIC state terrain owns, and all three are written from terrainInit and
+    # never again -- there is no per-frame terrain VIC work.
+    #
+    # $D021 IS NOT AMONG THEM, and that is the border-black fix. The playfield
+    # and the open border are the same bit pair of the same register, so
+    # nothing that writes it once can be right for both; terrain still AUTHORS
+    # the value (APERTURE_D021 derives from TERRAIN_BACKGROUND_COLOUR) and the
+    # renderer's aperture splits write the register.
     check("the only VIC registers terrain writes are the playfield's own",
-          set(writes) <= {"d016", "d021", "d022", "d023"}, f"{writes}")
+          set(writes) <= {"d016", "d022", "d023"}, f"{writes}")
+    check("terrain.asm no longer writes $d021: the aperture owns it",
+          "d021" not in writes)
     check("terrain.asm reads $d016 before writing it, preserving XSCROLL/CSEL",
           re.search(r"lda\s+\$d016\s*\n\s*ora\s+#%00010000\s*\n\s*sta\s+\$d016", t)
           is not None)
@@ -277,8 +290,13 @@ def machine():
               want & 8, f"{want}")
 
         # The multicolour registers and the mode bit.
-        for reg, key in ((0xd021, "TERRAIN_BACKGROUND_COLOUR"),
-                         (0xd022, "TERRAIN_MC_COLOUR_1"),
+        #
+        # $D021 IS NOT IN THIS LIST ANY MORE, and reading it at an arbitrary
+        # stop would be meaningless if it were: the border-black fix makes it
+        # aperture state, switched by the same two raster splits that switch
+        # $d018, so its value depends entirely on where the beam is. It is
+        # sampled by raster below, and again in tests/test_turrets.py.
+        for reg, key in ((0xd022, "TERRAIN_MC_COLOUR_1"),
                          (0xd023, "TERRAIN_MC_COLOUR_2")):
             got = rd(mon, reg)[0] & 0x0f
             check(f"${reg:04x} = {c[key]} ({key})", got == c[key], f"{got}")
@@ -338,20 +356,37 @@ def machine():
                   cb in (TERRAIN_CHARSET, BLANK_CHARSET), f"${got:02x} -> ${cb:04x}")
             check(f"at {phase} the screen page bits are a real page",
                   page in (SCREEN_A, SCREEN_B), f"${got:02x} -> ${page:04x}")
+            # ...and the playfield's own background, sampled the same way.
+            # exBottom runs at raster 243, inside the aperture and before its
+            # own store, so $d021 there is what the whole playfield was drawn
+            # with. exTop runs at 53, above the aperture, so $d021 there is the
+            # black the open border needs. One register, two answers, and the
+            # raster is the only thing that separates them.
+            d021 = rd(mon, 0xd021)[0] & 0x0f
+            want21 = 0 if phase == "exTop" else c["TERRAIN_BACKGROUND_COLOUR"]
+            check(f"at {phase} (raster {raster}) $d021 = {want21}",
+                  d021 == want21, f"{d021}")
 
         # Nothing outside the glyph namespace ever reaches a page.
         mon.cmd("delete")
         free_run(mon, sym["frameCounter"], 2)
         mon.cmd("delete")
+        # Nothing outside the terrain namespace OR the four turret body codes.
+        # The turret overlay is composed into the page during hidden-page
+        # generation, so 226..229 are legal page content now; anything else
+        # still is not, and this is the check that would catch a decode
+        # walking off its table.
+        TURRET_CODES = set(range(226, 230))
         bad = []
         for base in (SCREEN_A, SCREEN_B):
             page = rd(mon, base, 1000)
             out = {x for x in page
                    if not (TERRAIN_GLYPH_BASE <= x
-                           < TERRAIN_GLYPH_BASE + c["TERRAIN_GLYPH_COUNT"])}
+                           < TERRAIN_GLYPH_BASE + c["TERRAIN_GLYPH_COUNT"])
+                   and x not in TURRET_CODES}
             if out:
                 bad.append((hex(base), sorted(out)[:6]))
-        check("after two seconds both pages hold only terrain glyph codes",
+        check("after two seconds both pages hold only terrain and turret codes",
               not bad, f"{bad}")
     finally:
         v.close()

@@ -25,10 +25,16 @@
 
 // --- VIC bank 0 memory map --------------------------------------------------
 //   $0400-$07ff   screen page A          sprite pointers $07f8-$07ff
-//   $0810-$1fff   our code               VIC sees the CHARACTER ROM at
-//                                        $1000-$1fff, so code living there is
-//                                        invisible to the VIC. This is the
-//                                        stock C64 arrangement, not a trick.
+//   $0800-$0fff   THE TERRAIN CHARACTER SET, the window $d018 selects for the
+//                 playfield. $0b00-$0d3f is the level's 72 terrain glyphs
+//                 (codes 96..167) and $0f10-$0f2f the four static turret body
+//                 glyphs (codes 226..229). Everything else in the window is
+//                 zero-filled by the PRG and renders as $d021. See
+//                 src/terrain.asm and src/turrets.asm.
+//   $1000-$1fff   our code               VIC sees the CHARACTER ROM here, so
+//                                        code living there is invisible to it.
+//                                        This is the stock C64 arrangement,
+//                                        not a trick.
 //   $2000-$23ff   sprite bitmaps (16 x 64)
 //   $2800-$2bff   screen page B          sprite pointers $2bf8-$2bff
 //   $2c00-$2fff   raster executor code (moved from $1500; it outgrew the hole
@@ -46,6 +52,25 @@
 //                 tileset. Weapons, enemies and waves belong here too.
 //                 $1a00-$1bff is free again because the scroller left it.
 //   $c000-...     schedule + frame records, OUTSIDE bank 0 by design
+
+// ---------------------------------------------------------------------------
+// THE LEVEL PACKAGE'S CONSTANTS, IMPORTED FIRST.
+//
+// stage_config.asm emits no bytes, no segment and no program-counter change --
+// it is a constants-only include, and its own generated header says it is
+// "imported very early so every level-owned constant exists before the engine
+// constants/code that consume them". It used to be imported from inside
+// src/terrain.asm, which was early enough while terrain was the only consumer.
+//
+// It is not any more. APERTURE_D021 below is a RENDERER constant derived from
+// the level's authored background colour, and KickAssembler resolves `.const`
+// strictly in order: renderer.asm is imported before terrain.asm, so the value
+// has to exist up here or the raster splits cannot name it. Honouring the
+// package's own documented contract is the fix; restating 12 in a second place
+// would have been the bug.
+// ---------------------------------------------------------------------------
+#import "level1/stage_config.asm"
+
 .const SCREEN_A       = $0400
 .const SCREEN_B       = $2800
 .const PTR_A          = SCREEN_A + $3f8
@@ -106,6 +131,35 @@
 // before the border was opened.
 .const TOP_SPLIT_LINE = 55
 .const BOT_SPLIT_LINE = 248
+
+// ---------------------------------------------------------------------------
+// $D021 IS APERTURE STATE, NOT BOOT STATE.
+//
+// The vertical border is held OPEN all frame, so nothing above raster 55 or
+// below raster 247 is ever painted in $d020. Rasters 0..47 and 248..311 are
+// VIC IDLE lines -- it fetches $3fff and renders it -- and rasters 48..54 are
+// real matrix lines rendered through the BLANK charset. All three cases come
+// out as bit pair 00, which in multicolour text mode is $d021 and nothing
+// else. So the open top and bottom border are exactly "$d021, whatever it is".
+//
+// The terrain slice authored $d021 = 12 once, at init, because 12 is the
+// level's bit-pair-00 colour -- and the open border went grey with it. There
+// is no second register to separate the two: the playfield's background and
+// the border's background are THE SAME BIT PAIR OF THE SAME REGISTER, and the
+// only thing that can tell them apart is WHERE THE BEAM IS.
+//
+// So $d021 now rides the aperture, switched by the same two raster splits that
+// already switch $d018, from the same frame record's phase. Two stores a
+// frame, eight cycles, no main-thread involvement and no new phase.
+//
+//     raster  55   exTop      $d021 = APERTURE_D021   (the level's colour)
+//     raster 248   exBottom   $d021 = BORDER_D021     (black)
+//
+// APERTURE_D021 is DERIVED from the level package rather than restated, for
+// the same reason STAGE_ROWS is: a level that authors a different background
+// must not be able to disagree with the raster that displays it.
+.const APERTURE_D021  = TERRAIN_BACKGROUND_COLOUR
+.const BORDER_D021    = 0               // the open top/bottom border. BLACK.
 
 // $D011 without the fine scroll: DEN=1, RSEL=0, RST8=0.
 // RSEL=0 (24 rows) is deliberate. Scrolling 25 matrix rows through a 24-row
@@ -236,6 +290,13 @@ BasicUpstart2(entry)
                                         // are LABELS, and KickAssembler
                                         // resolves those late; only constants
                                         // are strictly ordered.
+#import "turrets.asm"                   // AFTER terrain.asm, whose glyph
+                                        // namespace, charset window, metatile
+                                        // geometry and derived stage height it
+                                        // is guarded against; BEFORE
+                                        // scroll.asm, whose renderBackgroundRow
+                                        // composes the overlay onto the row
+                                        // terrain has just decoded
 #import "scroll.asm"
 
 // OUTSIDE VIC BANK 0, with the player, the scroller, the weapon, the object
@@ -266,6 +327,11 @@ entry:
                                         // terrain owns the playfield's colour
                                         // now, and owning it in one place is
                                         // what stops the two disagreeing.
+    jsr turretInit                      // mark the authored turrets alive.
+                                        // BEFORE scrollInit: that builds both
+                                        // pages through renderRow, and a turret
+                                        // inside the boot aperture has to be
+                                        // composed into them.
 
     lda #0
     sta fixtureIndex

@@ -47,7 +47,11 @@
 // used here comes from src/level1/stage_config.asm, which is the generated
 // level package and therefore authoritative.
 //
-//   TERRAIN_BACKGROUND_COLOUR = 12  -> $d021   (bit pair 00)
+//   TERRAIN_BACKGROUND_COLOUR = 12  -> $d021   (bit pair 00) -- the VALUE is
+//                                      authored here, but the REGISTER is
+//                                      written by the renderer's aperture
+//                                      splits, not by terrainInit. See
+//                                      APERTURE_D021 in src/main.asm.
 //   TERRAIN_MC_COLOUR_1       = 15  -> $d022   (bit pair 01)
 //   TERRAIN_MC_COLOUR_2       = 11  -> $d023   (bit pair 10)
 //   TERRAIN_CHARACTER_COLOUR  = 1   -> colour RAM low 3 bits (bit pair 11)
@@ -69,7 +73,13 @@
 // the row cost and forced a colour-RAM double buffer the VIC cannot give us.
 // ===========================================================================
 
-#import "level1/stage_config.asm"
+// src/level1/stage_config.asm IS NOT IMPORTED HERE ANY MORE. It is imported at
+// the top of src/main.asm instead, before every module, because the renderer's
+// APERTURE_D021 is derived from TERRAIN_BACKGROUND_COLOUR and renderer.asm is
+// parsed first. The level package's own header asks for exactly that ("imported
+// very early so every level-owned constant exists before the engine constants
+// /code that consume them"), so this is the package being used as designed
+// rather than a workaround. Every constant it authors is still in scope here.
 
 .const METATILE_W        = 4
 .const METATILE_H        = 4
@@ -277,9 +287,18 @@ terrainInit:
     inx
     bne !fill-
 
-    // ---- the three shared multicolour registers --------------------------
-    lda #TERRAIN_BACKGROUND_COLOUR
-    sta $d021                           // bit pair 00
+    // ---- the two shared multicolour registers terrain still owns ---------
+    //
+    // $D021 IS NOT WRITTEN HERE. It used to be, and that is what turned the
+    // open top and bottom border grey: the border has no colour of its own
+    // while the vertical flip-flop is held open, so it shows bit pair 00 --
+    // $d021 -- exactly like the playfield does.
+    //
+    // The playfield's background is still THIS LEVEL'S value and still comes
+    // from this file's constant; the renderer's two aperture splits read it as
+    // APERTURE_D021 and write the register at rasters 55 and 248. Terrain owns
+    // the colour, the renderer owns the register -- the same division
+    // src/hud.asm already lives by.
     lda #TERRAIN_MC_COLOUR_1
     sta $d022                           // bit pair 01
     lda #TERRAIN_MC_COLOUR_2

@@ -70,9 +70,9 @@ dispatch reaches a mid-screen batch in eight cycles.
 ```
 raster   4   exHud       program HW2-HW7 as the HUD, enable, arm 40
 raster  40   exHandoff   restore gameplay sprite modes, run batch 0, enable
-raster  53   exTop       poll to 55 (54 at YSCROLL=7), switch to the REAL charset
+raster  53   exTop       poll to 55 (54 at YSCROLL=7), REAL charset + $d021
 raster 68+   exBatch     mid-screen multiplex batches
-raster 243   exBottom    hold the vertical border open, poll to 248, blank charset
+raster 243   exBottom    hold the border open, poll to 248, blank charset + $d021
 raster 250   exFrame     ADOPTION ONLY: frame record, schedule, page, $d015 = 0
 ```
 
@@ -154,18 +154,44 @@ clips nothing, so the playfield is clipped by a **blank character set** instead:
 
 ```
 BLANK_CHARSET = $3800     2 KB of zeros; also supplies the VIC idle byte at $3fff
-real charset  = $1000     the character ROM image the VIC sees in bank 0
+real charset  = $0800     the level's terrain tileset (src/terrain.asm)
 
-$d018 values:  A real $14   A blank $1e
-               B real $a4   B blank $ae
+$d018 values:  A real $12   A blank $1e
+               B real $a2   B blank $ae
 
-raster  55   exTop     blank -> real      (54 at YSCROLL=7: see exTop)
-raster 248   exBottom  real  -> blank
+raster  55   exTop     blank -> real,  $d021 = APERTURE_D021
+raster 248   exBottom  real  -> blank, $d021 = BORDER_D021
 visible terrain = rasters 55..247, 193 lines
 ```
 
 Matrix rows 0 and 24 carry ordinary terrain. There are **no blank guard rows**,
 and reintroducing them would bring back the 6.25 Hz edge pop they caused.
+
+**`$d021` is aperture state, not boot state.** An open vertical border paints
+no `$d020` anywhere: rasters 0..47 and 248..311 are VIC *idle* lines rendered
+from `$3fff`, and rasters 48..54 are real matrix lines rendered through the
+blank charset. All three come out as bit pair 00 — which in multicolour text
+mode is `$d021` and nothing else. The playfield's background and the open
+border's background are therefore **the same bit pair of the same register**,
+and the only thing that separates them is where the beam is. So the two
+aperture splits write `$d021` alongside `$d018`, from the same frame record:
+`BORDER_D021 = 0` below raster 55 and from 248, `APERTURE_D021` in between.
+`APERTURE_D021` is *derived* from the level package's
+`TERRAIN_BACKGROUND_COLOUR`, so a level cannot author a background the raster
+disagrees with.
+
+At YSCROLL 0..6 both stores land on line 55, `$d018` first because its deadline
+(the g-access in cycle 15) is earlier than `$d021`'s (the first visible
+playfield pixel, cycle 17). **At YSCROLL = 7 they separate**: `$d018` splits on
+line 54 to dodge that phase's badline, and it may, because 48..54 are idle at
+that phase and the VIC renders them from `$3fff` whatever the charset says.
+`$d021` *cannot* follow it there — idle lines are drawn in `$d021`, so a
+background store on 54 would paint one line grey at one phase in eight. The
+background gets its own short poll to 55 on that path alone.
+
+**The boundary is a raster and never a row.** A `$d021` boundary that moved
+with YSCROLL would climb seven pixels and jump back, which is precisely the
+6.25 Hz edge pop the guard rows were removed to kill.
 
 The scroller publishes a **frame record** (fine scroll, `$d018`, pointer
 destination, page) with the same atomic-publication discipline as the schedule;
@@ -269,14 +295,70 @@ the next schedule simply does not contain it, and `$d015` is composed from the
 schedule rather than edited. Freeing gameplay state cannot disturb an already
 adopted CURRENT schedule, which stays immutable for its frame.
 
+## 8c. World-placed background characters
+
+Added by the turret-presentation slice. `src/turrets.asm` owns it.
+
+**A generated page is base terrain plus a world overlay, and the authored
+terrain is never modified.**
+
+```
+renderRow
+  renderTerrainRow    40 character codes for one stage row, from the map
+  turretOverlayRow    0 or 2 of them replaced, from the authored placement
+```
+
+Both run during **hidden-page generation**, so a page is coherent before it is
+published. Nothing patches the visible screen from gameplay code, and there is
+no second scroll coordinate system: the overlay is a pure function of the stage
+row the terrain decoder was already given.
+
+| rule | value |
+|---|---|
+| placement | `src/level1/stage_turrets.asm`, the level editor's own output |
+| body | 2x2 background characters, codes 226..229 (TL, TR, BL, BR) |
+| world row `R` | the top pair; `R+1` the bottom pair |
+| world col `C` | the left cell; `C+1` the right cell |
+| colour RAM | **untouched** — the level's single terrain colour, as everywhere |
+| resources | no sprite, no logical object, no mux batch, no VIC register |
+
+**The restoration contract.** Each authored turret has one `turretAlive` byte,
+and it is the whole of "put the terrain back":
+
+```
+alive -> terrain + turret
+dead  -> terrain only
+```
+
+Because the overlay is applied *on top of* a freshly decoded row, clearing the
+byte makes the next regeneration of either page produce the underlying terrain
+with nothing to repair — no cached ground codes, no second copy of the map, no
+state that can go stale. A future destruction system adds only the immediate
+half: clear the byte, then poke that turret's four cells of the **displayed**
+page once, at a safe point in the frame, with the codes `renderTerrainRow`
+would have written. Those codes are recoverable at any time because the decode
+is a pure function of the stage row.
+
+**Nothing in the presentation slice ever clears a byte.** There is no firing,
+no collision, no damage and no destruction; `turretInit` sets all eight and
+they stay set.
+
 ## 9. Direct VIC access — who owns what
 
 | register | owner | who may write it |
 |---|---|---|
 | `$d000-$d010`, `$d015`, `$d017`, `$d01b`, `$d01c`, `$d01d`, `$d027-$d02e` | the renderer | `src/renderer.asm` only |
 | sprite pointer tables | the renderer | `exPtrStore` and `huPtrStore`, both in the renderer |
-| `$d011`, `$d018` | the renderer's frame transaction and the two aperture splits | `src/renderer.asm` only |
-| `$d020`, `$d021`, colour RAM | boot | `src/main.asm`, once |
+| `$d011`, `$d018`, `$d021` | the renderer's frame transaction and the two aperture splits | `src/renderer.asm` only |
+| `$d016`, `$d022`, `$d023`, colour RAM | the playfield | `src/terrain.asm`, once at init |
+| `$d020` | boot | `src/main.asm`, once |
+
+`$d021` moved out of boot when the open border had to be black: see §8. The
+playfield still **authors** the value — `APERTURE_D021` derives from
+`src/level1/stage_config.asm` — and the renderer **writes the register**. That
+is the same division `src/hud.asm` lives by, and the reason it exists is that
+one write at init cannot be correct for two regions of the screen that share a
+register.
 
 **Game logic must not bypass these owners.** `src/hud.asm` is the model for how
 a new subsystem participates: it owns HUD *data* and writes not one VIC

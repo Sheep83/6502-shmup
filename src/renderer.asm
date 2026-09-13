@@ -340,6 +340,14 @@ handoffExitMax:   .byte 0
 topSplitMin:      .byte $ff               // 55 normally, 54 at YSCROLL=7:
 topSplitMax:      .byte 0                 // see exTop for why the phase differs
 topTarget:        .byte 0                 // the line THIS frame's split aimed at
+topLanded:        .byte 0                 // the line the $d018 half of the top
+                                          // split ACTUALLY landed on. Only the
+                                          // YSCROLL=7 path needs it: there the
+                                          // two halves of the split are a line
+                                          // apart, so by the time $d021 has
+                                          // been written the beam has moved on
+                                          // and $d012 no longer answers the
+                                          // question the measurement asks.
 botSplitMin:      .byte $ff
 botSplitMax:      .byte 0
 // A split phase entered so late that its poll would have to wrap a whole frame.
@@ -1559,6 +1567,11 @@ exBottom:
     // 2 and `sta abs` writes on its 4th cycle, so the write lands in cycles
     // 6..12, comfortably before the line's first g-access in cycle 15.
     lda frameD018B,x                    // blank charset, same page
+    ldx #BORDER_D021                    // and the open border's own background,
+                                        // loaded before the poll for the same
+                                        // reason the charset is. X stops being
+                                        // frameCurrent here and is reloaded
+                                        // after the split.
 
     // Never spin a whole frame with I set. Entered at 243 this cannot fire;
     // if a chain ever pushed the phase past 248 it would, and a hang inside
@@ -1572,7 +1585,24 @@ exBottom:
     bne !wait-
 !split:
     sta $d018
+    stx $d021                           // THE BOTTOM HALF OF THE BLACK BORDER.
+                                        // Everything from here to the end of
+                                        // the frame is idle or blank-charset
+                                        // and therefore bit pair 00. The store
+                                        // is SECOND because its deadline is
+                                        // later: $d018 must beat the line's
+                                        // first g-access in cycle 15, while
+                                        // $d021 only has to beat the first
+                                        // visible playfield pixel, which the
+                                        // main border flip-flop uncovers in
+                                        // cycle 17. Detection lands in cycles
+                                        // 0..6, so $d018 writes in 6..12 and
+                                        // this writes in 10..16. Measured, and
+                                        // recorded beside the constant it
+                                        // justifies, in the migration report.
 
+    ldx frameCurrent                    // X carried the colour through the
+                                        // split; the frame record needs it back
     lda frameD011,x                     // RSEL=0: the close at 251 misses too
     sta $d011
 
@@ -1647,17 +1677,45 @@ exTop:
     // one -- MAXCAP's Y=50 entry is in HW2, fetched at the end of line 54 --
     // and the MIN_SPRITE_Y admission rule in the handoff slice removes the
     // possibility by construction. edgeLate is what would catch it meanwhile.
-    ldy #TOP_SPLIT_LINE
+    //
+    // ---------------------------------------------------------------------
+    // AND $D021 SPLITS HERE TOO, BUT NOT ALWAYS ON THE SAME LINE.
+    //
+    // The open border is black because $d021 is black, and the playfield is
+    // the level's colour because $d021 is that colour -- so the top edge of
+    // the black border is wherever $d021 changes, and that is raster 55 for
+    // EVERY fine-scroll phase. It has to be: a boundary that moved with
+    // YSCROLL would climb seven pixels and jump back, which is precisely the
+    // 6.25 Hz edge pop the guard rows were removed to kill.
+    //
+    // At every phase but 7 the two stores are one line apart from nothing --
+    // both belong on 55 -- and they go out back to back, $d018 first because
+    // its deadline (the g-access in cycle 15) is earlier than $d021's (the
+    // first visible playfield pixel, cycle 17).
+    //
+    // At YSCROLL = 7 they genuinely separate. $d018 splits on 54 to dodge the
+    // badline, and it can: lines 48..54 are IDLE at that phase and the VIC
+    // renders them from $3fff whatever the charset says. $D021 CANNOT FOLLOW
+    // IT THERE. Idle lines are drawn in $d021, so a background store on 54
+    // would paint line 54 grey at one phase in eight and black at the other
+    // seven -- the flicker, moved from the charset to the colour. So the
+    // background gets its own short poll to 55 on that path alone, which lands
+    // it in cycles 6..12 with the whole of line 54 in hand beforehand.
+    //
+    // The two paths are written out rather than merged because the merge point
+    // is inside the deadline: a single `cpy/beq` to pick between them after the
+    // charset store costs five cycles, and five cycles is the entire margin.
     lda frameD011,x
     and #$07
     cmp #$07
-    bne !target+
-    ldy #TOP_SPLIT_LINE - 1
-!target:
-    sty topTarget
+    beq exTopPhase7
 
+    // ---- YSCROLL 0..6: charset and background both land on line 55 --------
+    ldy #TOP_SPLIT_LINE
+    sty topTarget
     lda frameD018,x                     // REAL charset, the page exFrame chose.
                                         // Loaded BEFORE the poll: see exBottom.
+    ldx #APERTURE_D021                  // the playfield background, likewise
     cpy $d012                           // already there, or already past it?
     beq !split+
     bcc !split+
@@ -1665,9 +1723,41 @@ exTop:
     cpy $d012
     bne !wait-
 !split:
-    sta $d018
+    sta $d018                           // writes in cycles 6..12
+    stx $d021                           // writes in cycles 10..16
+    lda $d012                           // the beam has not left the split line
+    jmp exTopLanded
 
-    lda $d012
+    // ---- YSCROLL 7: charset on 54, background on 55 -----------------------
+exTopPhase7:
+    ldy #TOP_SPLIT_LINE - 1
+    sty topTarget
+    lda frameD018,x
+    cpy $d012
+    beq !split+
+    bcc !split+
+!wait:
+    cpy $d012
+    bne !wait-
+!split:
+    sta $d018                           // line 54 is idle at this phase: this
+                                        // store has a whole line of slack, and
+                                        // nothing it selects is displayed here
+    lda $d012                           // record the landing NOW, before the
+    sta topLanded                       // second poll moves the beam to 55
+    ldx #APERTURE_D021
+    ldy #TOP_SPLIT_LINE
+    cpy $d012                           // NEVER SPIN A WHOLE FRAME WITH I SET:
+    beq !at55+                          // if 55 has already gone, store at once
+    bcc !at55+
+!wait55:
+    cpy $d012
+    bne !wait55-
+!at55:
+    stx $d021
+    lda topLanded
+
+exTopLanded:
     cmp topTarget
     beq !onTime+
     ldy edgeLate
