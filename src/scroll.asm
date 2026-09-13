@@ -78,13 +78,19 @@
 // visual order and the authored BOTTOM is the beginning of play, so the first
 // page shows the last 25 rows, [STAGE_ROWS-25 .. STAGE_ROWS-1], with no wrap in
 // it. stageTopRow then walks down to 0 over the whole stage.
-.const STAGE_ROWS      = 420
+// DERIVED FROM THE LEVEL, not restated. src/level1/stage_config.asm authors
+// STAGE_METATILE_ROWS = 105 and the metatiles are four rows tall, so the stage
+// is 420 character rows -- which is exactly the number this scroller has been
+// walking since Slice A' chose it as a placeholder height. That it matches is
+// luck; that it is now DERIVED is not, and the guard in src/terrain.asm fails
+// the build if a future level disagrees with the scroller that walks it.
+.const STAGE_ROWS      = TERRAIN_STAGE_ROWS
 .const STAGE_START_ROW = STAGE_ROWS - SCREEN_ROWS
 
 .if (STAGE_ROWS < SCREEN_ROWS + 1) { .error "a stage must be taller than one screen" }
 .if (STAGE_START_ROW < 0)          { .error "STAGE_START_ROW is negative" }
 
-.const ROWS_PER_TICK = 5                // 25 rows over the 8 frames between
+.const ROWS_PER_TICK = 4                // 25 rows over the 8 frames between
                                         // coarse steps, with margin. Spread on
                                         // purpose: a single 25-row burst is
                                         // ~12,000 cycles of the 19,656 in a
@@ -118,6 +124,26 @@
                                         // has no measurement that needs it, and a
                                         // qualified scroller is not worth
                                         // changing on evidence that dissolved.
+                                        //
+                                        // NOW FOUR, AND THIS TIME THE EVIDENCE IS
+                                        // A MEASUREMENT. The terrain slice replaced
+                                        // the diagnostic pattern with real metatile
+                                        // decoding: a row went from roughly 800
+                                        // cycles to 1,158, so a five-row frame went
+                                        // from ~4,000 to ~6,285. That is not a
+                                        // burst -- it is still spread -- but it is
+                                        // a 50% higher PEAK, and the peak is what
+                                        // collides with a dense sprite frame.
+                                        //
+                                        // Four rows a frame finishes 25 rows in
+                                        // seven of the eight frames between coarse
+                                        // steps, one frame of margin instead of
+                                        // three, and drops the peak to ~4,630 --
+                                        // back to roughly what the placeholder
+                                        // cost. scrollLate is the counter that
+                                        // says whether the margin is enough, and
+                                        // it is measured at zero over free runs
+                                        // with enemies live and the gun firing.
 
 // ===========================================================================
 // Scroll state. MAIN THREAD ONLY, and OUTSIDE VIC BANK 0 with everything else
@@ -611,53 +637,20 @@ renderBackgroundRow:
     sta rrStageHi
 !reduced:
 
-    lda rrStageLo
-    and #3
-    bne !blank+
-    lda #$a0                            // reverse space: a solid bar
-    jmp !fill+
-!blank:
-    lda #$20
-!fill:
-    ldy #39
-!f:
-    sta (scrPtr),y
-    dey
-    cpy #4
-    bne !f-
+    // ---- the real terrain -------------------------------------------------
+    // rrStage is now a stage CHARACTER row in the authored level, reduced mod
+    // STAGE_ROWS above. src/terrain.asm turns it into forty character codes
+    // from the metatile map; nothing about the schedule that got us here has
+    // changed, and this routine still writes exactly one row per call.
+    //
+    // The diagnostic pattern that used to live here -- a solid bar every
+    // fourth row, a walking '*' and the row number in hex -- is gone rather
+    // than disabled. It existed to make the scroll direction and the coarse
+    // cadence visible before there was any real content to judge them by, and
+    // Slice A' qualified both. pageTopRow still reports the same information
+    // off-screen for the tests that want it.
+    jmp renderTerrainRow
 
-    lda rrStageLo                       // the walking marker
-    and #31
-    clc
-    adc #6
-    tay
-    lda #42                             // '*'
-    sta (scrPtr),y
-
-    lda rrStageLo                       // row identity in hex, low byte
-    lsr
-    lsr
-    lsr
-    lsr
-    tax
-    lda hexDigit,x
-    ldy #0
-    sta (scrPtr),y
-    lda rrStageLo
-    and #$0f
-    tax
-    lda hexDigit,x
-    ldy #1
-    sta (scrPtr),y
-
-    lda #$20
-    ldy #2
-    sta (scrPtr),y
-    ldy #3                              // was the page letter; see pageTopRow
-    sta (scrPtr),y
-    ldy #4
-    sta (scrPtr),y
-    rts
 
 // --- the playfield aperture -------------------------------------------------
 //

@@ -50,8 +50,14 @@
 .const SCREEN_B       = $2800
 .const PTR_A          = SCREEN_A + $3f8
 .const PTR_B          = SCREEN_B + $3f8
-.const D018_A         = $14             // VM = $0400, CB = $1000 (char ROM)
-.const D018_B         = $a4             // VM = $2800, CB = $1000
+// CB = $0800, the TERRAIN charset. It was $1000, the character ROM, for as
+// long as the playfield was a diagnostic pattern drawn out of PETSCII. The
+// terrain slice replaces that with the old game's authored tileset, which is
+// RAM the VIC must be able to see -- and the ROM image at $1000 is exactly
+// what it is not. See the charset-window note in src/terrain.asm for why
+// $0800 is the slot that was free.
+.const D018_A         = $12             // VM = $0400, CB = $0800 (terrain)
+.const D018_B         = $a2             // VM = $2800, CB = $0800
 
 // ---------------------------------------------------------------------------
 // THE BLANK CHARACTER SET — the playfield aperture.
@@ -110,6 +116,7 @@
 
 .const COLOUR_RAM     = $d800
 .const SCREEN_ROWS    = 25
+.const SCREEN_COLS    = 40
 
 // ---------------------------------------------------------------------------
 // HUD_VISIBLE — the visual qualification switch.
@@ -222,9 +229,22 @@ BasicUpstart2(entry)
 #import "fixtures.asm"
 #import "p5_tables.asm"
 #import "p5_ring.asm"
+#import "terrain.asm"                   // BEFORE scroll.asm, which derives
+                                        // STAGE_ROWS from TERRAIN_STAGE_ROWS.
+                                        // Its own references the other way --
+                                        // rrStageLo/Hi in the row decoder --
+                                        // are LABELS, and KickAssembler
+                                        // resolves those late; only constants
+                                        // are strictly ordered.
 #import "scroll.asm"
 
-* = $0810 "main"
+// OUTSIDE VIC BANK 0, with the player, the scroller, the weapon, the object
+// pool, the enemy and collision. This segment was at $0810 while $0800-$0fff
+// had no other claim on it; the terrain charset needs that window, and every
+// byte in this file is main-thread code or main-thread data -- entry,
+// mainLoop, gameFrame, gameInit and the diagnostic HUD, with no interrupt
+// handler anywhere in it -- so it belongs out here and always did.
+* = $5000 "main"
 
 entry:
     sei
@@ -240,7 +260,12 @@ entry:
 
     jsr clearCharset                    // MUST precede any display: it is both
                                         // the aperture mask and the idle byte
-    jsr initColour
+    jsr terrainInit                     // colour RAM, $d021/$d022/$d023, the
+                                        // multicolour bit, and the transposed
+                                        // metatile tables. Replaces initColour:
+                                        // terrain owns the playfield's colour
+                                        // now, and owning it in one place is
+                                        // what stops the two disagreeing.
 
     lda #0
     sta fixtureIndex

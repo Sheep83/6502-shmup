@@ -742,7 +742,74 @@ bs_enDone:
 
 // ---- batch pass ------------------------------------------------------------
 // Batch 0 = the first up-to-MUX_SLOTS entries, programmed by the frame IRQ.
-// After that, one batch per entry, merged when two entries need the same line.
+// After that, entries are grouped by their LEGAL PROGRAMMING WINDOW.
+//
+// ---------------------------------------------------------------------------
+// THE WINDOW, AND WHY IT WAS ALREADY SITTING HERE UNUSED
+// ---------------------------------------------------------------------------
+// The acceptance rule at the top of this file is written as one inequality:
+//
+//     Y_i - REUSE_LEAD  >=  Y_(i-6) + SPRITE_HEIGHT
+//
+// Read it as two endpoints rather than one test and it IS a window. Accepted
+// entry i may legally be programmed at any raster in
+//
+//     earliest_i = Y_(i-6) + SPRITE_HEIGHT   the raster its predecessor's
+//                                            slot falls free -- a sprite with
+//                                            Y = n occupies n .. n+20
+//     latest_i   = Y_i - REUSE_LEAD          the last raster that still leaves
+//                                            the measured lead before the VIC
+//                                            fetches this sprite
+//
+// and acceptance is exactly the statement that the window is non-empty. The
+// builder used to take `latest_i` for every entry and then merge two entries
+// only if those two numbers happened to be EQUAL. At the minimum accepted gap
+// of 33 the window is one raster wide and that is all there is; at a gap of 60
+// it is 27 rasters wide, and every one of those rasters was being thrown away.
+//
+// Sixteen sprites ten rasters apart therefore cost ELEVEN raster interrupts,
+// where the same sixteen in four rows cost four. The sprites were never the
+// problem; the batch count was.
+//
+// ---------------------------------------------------------------------------
+// THE GROUPING RULE
+// ---------------------------------------------------------------------------
+// Batches address a CONTIGUOUS run of accepted entries -- batchFirst plus
+// batchCount is the whole representation, and the executor walks it as a run --
+// so grouping can only ever join neighbours. Within that constraint:
+//
+//     open a batch at entry j, on line L = latest_j
+//     absorb entry k while  earliest_k <= L
+//     close when it will not fit, or at MUX_SLOTS entries
+//
+// L is the LARGEST line the batch may use, because the batch line must be
+// <= latest_m for every member and the accepted list is sorted by Y, so
+// latest_j is the smallest of those. Choosing the largest legal line is also
+// what admits the most followers, since their constraint is earliest_k <= L.
+//
+// WHY ONE LINE TESTED AGAINST EVERY MEMBER, AND NOT PAIRWISE OVERLAP. Windows
+// that overlap in pairs need not share a common raster: [0,10], [5,15], [12,20]
+// overlap pairwise around the chain but have no line in all three. Testing each
+// candidate against the single chosen L makes the common intersection the only
+// thing that can ever be true, so that shape cannot be mis-grouped. It is in
+// tests/test_p2.py under the name the model gives it.
+//
+// WHY THE DEADLINES ARE UNCHANGED. The leader keeps exactly the line it had
+// before, so the critical path P2 measured -- batch line to the leader's own
+// fetch -- is the same number against the same 756-cycle budget, and the leader
+// has the smallest Y in the batch so it is the binding one. Every follower is
+// moved EARLIER than the line it used to get, which can only increase its own
+// lead, and is checked against its predecessor's last displayed raster before
+// it is allowed to move at all. Nothing is programmed later than it was, and
+// nothing is programmed before its slot is free.
+//
+// WHY A BATCH CANNOT EXCEED SIX. Entry j+6's predecessor is entry j itself, so
+// earliest_(j+6) = Y_j + SPRITE_HEIGHT, while the batch line is Y_j -
+// REUSE_LEAD. The first is always the larger, so entry j+6 can never join a
+// batch that entry j leads. The explicit cap below is therefore provably
+// unreachable -- it is kept because "one update per hardware slot" is the
+// executor's contract and a contract that is only implied by arithmetic
+// elsewhere is one nobody checks.
     ldx schedNext
     lda #0
     cpx #0
@@ -778,53 +845,79 @@ bs_enDone:
     sta bs_i                            // next entry to place
     inc bs_nb
 
+// ---- open a new mid-screen batch, led by entry bs_i ------------------------
+// Reached only with bs_i < bs_acc. Batch 0 is never extended by this loop: the
+// handoff owns it, its line is not derived from a sprite Y at all, and the
+// first mid-screen entry always starts a fresh record here.
 bs_bLoop:
     lda bs_i
     cmp bs_acc
     bcs bs_batchDone
 
-    // required line for this entry
-    clc
-    lda bs_i
-    adc bs_base
-    tay
-    lda schedY,y
-    sec
-    sbc #REUSE_LEAD
-    sta bs_line
-
-    // merge into the previous batch if the line matches
-    // (INC has no absolute,Y mode, so index the batch arrays with X here)
-    lda bs_nb
-    sec
-    sbc #1
-    clc
-    adc bs_bbase
-    tax
-    lda batchLine,x
-    cmp bs_line
-    bne bs_newBatch
-    inc batchCount,x
-    jmp bs_bNext
-
-bs_newBatch:
     lda bs_nb
     cmp #MAX_BATCH
     bcs bs_batchOverflow                // out of batch slots: report it
     clc
     adc bs_bbase
-    tay
-    lda bs_line
+    sta bs_bcur                         // this batch's record, for the absorb
+    tay                                 // loop, which needs it in X for INC
+
+    clc
+    lda bs_i
+    adc bs_base
+    tax
+    lda schedY,x
+    sec
+    sbc #REUSE_LEAD                     // L = latest_j, the leader's own line:
+    sta bs_line                         // the same raster it received before
     sta batchLine,y
     lda bs_i
     sta batchFirst,y
     lda #1
     sta batchCount,y
     inc bs_nb
-
-bs_bNext:
     inc bs_i
-    jmp bs_bLoop
+
+// ---- absorb the following entries while L is legal for each of them --------
+bs_absorb:
+    lda bs_i
+    cmp bs_acc
+    bcs bs_batchDone
+
+    // ONE UPDATE PER HARDWARE SLOT. Provably unreachable (see the note above);
+    // kept because it is the executor's contract rather than a derived fact.
+    // INC has no absolute,Y mode, so the batch record is indexed with X here.
+    ldx bs_bcur
+    lda batchCount,x
+    cmp #MUX_SLOTS
+    bcs bs_bLoop
+
+    // earliest_k = Y of the entry that owns this slot now, plus the 21 rasters
+    // it occupies. Predecessor = accepted index - MUX_SLOTS, which exists for
+    // every entry this loop sees: bs_i started at MUX_SLOTS.
+    sec
+    lda bs_i
+    sbc #MUX_SLOTS
+    clc
+    adc bs_base
+    tay
+    lda schedY,y
+    clc
+    adc #SPRITE_HEIGHT
+    bcs bs_bLoop                        // carried past 255: cannot be <= L.
+                                        // MAX_SPRITE_Y + SPRITE_HEIGHT is 247
+                                        // so this cannot fire today -- it is
+                                        // here so that raising MAX_SPRITE_Y
+                                        // cannot silently wrap into a false
+                                        // "the slot is already free"
+    cmp bs_line
+    bcc !joins+                         // earliest_k <  L
+    bne bs_bLoop                        // earliest_k >  L: close the batch
+!joins:                                 // earliest_k == L: still legal
+    ldx bs_bcur
+    inc batchCount,x
+    inc bs_i
+    jmp bs_absorb
 
 bs_batchOverflow:
     // Unreachable while MAX_SCHED is 24 (batch 0 holds six, so at most 19
@@ -916,7 +1009,8 @@ bs_n:         .byte 0
 bs_b:         .byte 0
 bs_nb:        .byte 0
 bs_y:         .byte 0
-bs_line:      .byte 0
+bs_line:      .byte 0                  // the open batch's chosen raster
+bs_bcur:      .byte 0                  // the open batch's record index
 bs_enable:    .byte 0
 bs_d010:      .byte 0
 bs_slot:      .byte 0                  // P4: the slot just assigned, so the

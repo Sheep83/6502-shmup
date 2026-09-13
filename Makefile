@@ -85,7 +85,8 @@ VICE_OPTS := +saveres -pal -joydev1 0 -joydev2 $(JOY2) $(KEYSET)
 .PHONY: p3-fixtures p4-fixtures
 .PHONY: all build d64 test test-fast test-engine-full
 .PHONY: test-slice-a test-slice-a-prime test-slice-b
-.PHONY: test-p0 test-p1 test-p2 test-p3 test-p4 test-p5 run run-d64 clean
+.PHONY: test-p0 test-p1 test-p2 test-p3 test-p4 test-p5 test-renderer-full
+.PHONY: test-terrain run run-d64 clean
 
 all: build
 
@@ -176,6 +177,19 @@ test-p5: build
 #   test_slice_d.py       the player's hitscan: cannon geometry, target
 #                         selection, damage, hit feedback, death and the safe
 #                         removal of a killed object
+#   test_terrain.py       the level-1 terrain contract: the authored package is
+#                         the original, metatile expansion, the stage-row
+#                         mapping, colour RAM, and the $d018 charset windows
+#   test_batch_window.py  legality-window batch merging: the window arithmetic
+#                         at the reuse boundary, the common-intersection rule,
+#                         a structural sweep, and the 6502 against the model.
+#                         Runs `--fast` here: the deterministic boundary/trap/
+#                         batch-size proofs plus ONE machine-vs-model layout,
+#                         no random sweep. Measured: 22s fast vs 54s full, and
+#                         the 4,144-layout sweep itself is 0.06s of that 54s --
+#                         the cost is a second VICE population setup for five
+#                         more layouts, not the sweep. The full run lives under
+#                         `make test-renderer-full` below.
 #
 # The last five are what break while a game is being built on an engine that
 # is already qualified, so they belong in the target that gets run constantly
@@ -192,6 +206,8 @@ test: build
 	python3 tests/test_slice_b.py
 	python3 tests/test_slice_c.py
 	python3 tests/test_slice_d.py
+	python3 tests/test_terrain.py
+	python3 tests/test_batch_window.py --fast
 
 test-slice-a: build
 	python3 tests/test_slice_a.py
@@ -208,6 +224,12 @@ test-slice-c: build
 test-slice-d: build
 	python3 tests/test_slice_d.py
 
+test-terrain: build
+	python3 tests/test_terrain.py
+
+test-batch-window: build
+	python3 tests/test_batch_window.py --fast
+
 test-fast: build
 	python3 tests/test_engine.py
 	python3 tests/p5_model.py
@@ -222,6 +244,14 @@ test-engine-full: build
 	python3 tests/test_p3.py
 	python3 tests/test_p4.py
 	python3 tests/test_p5.py
+
+# test-renderer-full — the exhaustive legality-window qualification:
+# tests/test_batch_window.py in FULL mode, its 4,144-layout random/shaped
+# sweep and all six machine-vs-model layouts, not just the one `make test`
+# checks. Same relationship as test-engine-full to test_p5.py --fast: the
+# deterministic core runs constantly, the exhaustive proof runs on demand.
+test-renderer-full: build
+	python3 tests/test_batch_window.py
 
 # The acceptance configuration.
 #

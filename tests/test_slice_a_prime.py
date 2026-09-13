@@ -34,6 +34,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 from test_p0 import PRG, SYM, symbols, Vice, rd, set_bp, free_run, LAUNCHED_PIDS
+# The terrain model, so a row's expected content is derived from the authored
+# level rather than restated here. One model, used by both files.
+import test_terrain as T
+DEFS = T.byte_rows("stage_map.asm", "metatileDefs")
+ROWS = T.byte_rows("stage_map.asm", "stageMetatileRows")
 
 sym = symbols(SYM)
 
@@ -70,11 +75,17 @@ def source_invariants():
           "jsr rowBack" in src and "inc stageTopRow" not in src)
     check("world progress only ever increases",
           "inc worldProgressLo" in src and "dec worldProgress" not in src)
-    m = re.search(r"^\.const STAGE_ROWS\s*=\s*(\d+)", src, re.M)
+    # STAGE_ROWS is DERIVED from the level package now, not a literal: the
+    # terrain slice ties it to STAGE_METATILE_ROWS * METATILE_H so a level and
+    # the scroller that walks it cannot disagree. The value is unchanged, and
+    # the machine section below still checks it against the real map.
+    m = re.search(r"^\.const STAGE_ROWS\s*=\s*TERRAIN_STAGE_ROWS", src, re.M)
     n = re.search(r"^\.const STAGE_START_ROW\s*=\s*STAGE_ROWS - SCREEN_ROWS", src, re.M)
-    check("the stage height and start row are stated as constants",
-          m is not None and int(m.group(1)) == STAGE_ROWS and n is not None,
-          f"STAGE_ROWS {m.group(1) if m else '?'}")
+    derived = T.consts()["STAGE_METATILE_ROWS"] * 4
+    check("the stage height is derived from the level and the start row from it",
+          m is not None and n is not None and derived == STAGE_ROWS,
+          f"level gives {derived}, this file expects {STAGE_ROWS}, "
+          f"STAGE_ROWS derived: {m is not None}")
     check("the scroller still writes no VIC register",
           not re.search(r"^\s*sta\s+\$d0", src, re.M | re.I))
     # The old name carried the opposite direction. Leaving it in place while
@@ -195,39 +206,74 @@ def w16_pair(mon, name):
 # ===========================================================================
 def row_continuity(mon):
     print("\n=== 3. every row of both pages carries the stage row it should ===")
+    # SAMPLE A SELF-CONSISTENT FRAME.
+    #
+    # src/scroll.asm states the invariant narrowly and says why: pageTopRow[p]
+    # is correct whenever p is the page being DISPLAYED, and there is one frame
+    # between the software flip and the IRQ adopting it at raster 250 during
+    # which curPage has not caught up with the stamp. Landing in that window
+    # makes a correct machine look like it has the wrong page on screen.
+    #
+    # So the snapshot is retried until the two agree, and the check below fails
+    # loudly if they never do -- which would be the real fault this is guarding.
     mon.cmd("delete")
     b = set_bp(mon, sym["frameDiagnostics"])
-    mon.cmd("x")
+    settled = False
+    for _ in range(8):
+        mon.cmd("x")
+        cur = rd(mon, sym["curPage"])[0]
+        top = w16(mon, "stageTopRow")
+        stamp = (rd(mon, sym["pageTopRowLo"] + cur)[0]
+                 | (rd(mon, sym["pageTopRowHi"] + cur)[0] << 8))
+        if stamp == top:
+            settled = True
+            break
     mon.cmd(f"delete {b}")
+    check("a frame was sampled with the displayed page's stamp settled",
+          settled, "curPage and stageTopRow never agreed in 8 frames")
 
-    cur = rd(mon, sym["curPage"])[0]
-    top = w16(mon, "stageTopRow")
     regen = w16(mon, "regenTopRow")
     regen_row = rd(mon, sym["regenRow"])[0]
     front = rd(mon, SCREEN_A if cur == 0 else SCREEN_B, 1000)
     back = rd(mon, SCREEN_B if cur == 0 else SCREEN_A, 1000)
     mon.cmd("delete")
 
+    # A ROW IS NOW IDENTIFIED BY ITS TERRAIN, not by two hex digits.
+    #
+    # The placeholder wrote the stage row number into columns 0-1 and these
+    # checks read it back. Real terrain has no such label, so the row is
+    # compared against the forty character codes the level data says it should
+    # hold -- which is a stronger check than the two digits it replaces, and
+    # it fails for the same reasons: a reversed page, an off-by-one window, a
+    # half-rebuilt back page.
     def ident(page, r):
-        return tuple(page[r * 40: r * 40 + 2])
+        return tuple(page[r * 40: (r + 1) * 40])
 
     def want(row):
-        v = row % STAGE_ROWS & 0xff
-        return (HEXDIGIT[v >> 4], HEXDIGIT[v & 0x0f])
+        return tuple(T.expand(DEFS, ROWS, row % STAGE_ROWS))
 
     bad = [(r, ident(front, r), want(top + r)) for r in range(SCREEN_ROWS)
            if ident(front, r) != want(top + r)]
     check(f"the DISPLAYED page holds stage rows {top}..{top + 24}, in order",
           not bad, f"{bad[:3]}")
 
-    # Rows increase DOWN the screen and the window steps back, so consecutive
-    # matrix rows must differ by exactly one. A mirrored page would still have
-    # the right SET of rows; this is what catches the order.
-    order = [((front[(r + 1) * 40] << 8 | front[(r + 1) * 40 + 1])
-              != (front[r * 40] << 8 | front[r * 40 + 1]))
-             for r in range(SCREEN_ROWS - 1)]
-    check("no two adjacent rows of the displayed page are identical",
-          all(order))
+    # ORDER, CHECKED AGAINST A REVERSED PAGE.
+    #
+    # This used to assert that no two adjacent rows were identical, which was
+    # true of the placeholder because every row carried its own number. Real
+    # terrain repeats: metatile M0 is forty identical characters on all four of
+    # its sub-rows, so adjacent rows being equal is normal content and asserting
+    # otherwise would fail on correct output.
+    #
+    # What the check was FOR was catching a mirrored page, so that is what it
+    # now tests: the page must match the rows running DOWN from stageTopRow and
+    # must NOT match them running up.
+    mirrored = [tuple(want(top + SCREEN_ROWS - 1 - r)) for r in range(SCREEN_ROWS)]
+    actual = [ident(front, r) for r in range(SCREEN_ROWS)]
+    forward = [tuple(want(top + r)) for r in range(SCREEN_ROWS)]
+    check("the displayed page runs DOWN the map, not up",
+          actual == forward and (actual != mirrored or forward == mirrored),
+          "the page matches the reversed order" if actual == mirrored else "")
 
     check("the hidden page is being built one row FURTHER BACK",
           regen == (top - 1) % STAGE_ROWS, f"regenTopRow {regen}, stageTopRow {top}")
@@ -271,8 +317,8 @@ def flip_continuity(mon):
         cur = rd(mon, sym["curPage"])[0]
         top = w16(mon, "stageTopRow")
         if last is not None and cur != last[0]:
-            first = rd(mon, SCREEN_A if cur == 0 else SCREEN_B, 2)
-            seen.append((last[1], top, (first[0] << 8) | first[1]))
+            first = rd(mon, SCREEN_A if cur == 0 else SCREEN_B, 40)
+            seen.append((last[1], top, tuple(first)))
         last = (cur, top)
         if len(seen) >= 4:
             break
@@ -285,11 +331,10 @@ def flip_continuity(mon):
           bool(steps) and all(s == 1 for s in steps), f"{steps}")
     idents = []
     for _, after, first in seen:
-        v = after % STAGE_ROWS & 0xff
-        idents.append((first, (HEXDIGIT[v >> 4] << 8) | HEXDIGIT[v & 0x0f]))
+        idents.append((first, tuple(T.expand(DEFS, ROWS, after % STAGE_ROWS))))
     check("the newly displayed page's top row IS the newly revealed stage row",
           bool(idents) and all(a == b for a, b in idents),
-          f"{[(hex(a), hex(b)) for a, b in idents[:3]]}")
+          f"{[(list(a[:6]), list(b[:6])) for a, b in idents[:2] if a != b]}")
 
 
 # ===========================================================================

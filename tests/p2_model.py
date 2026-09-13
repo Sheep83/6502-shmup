@@ -138,21 +138,33 @@ def build(ys, y_offset=0, xs=None, order=None):
         n0 = min(MUX_SLOTS, len(entries))
         batches.append({"line": HANDOFF_LINE, "first": 0, "count": n0,
                         "frame": True})
+        # LEGALITY-WINDOW GROUPING. Accepted entry i may be programmed at any
+        # raster in [pred_y + SPRITE_HEIGHT, y - REUSE_LEAD]; acceptance is
+        # exactly the statement that this window is non-empty. The builder
+        # opens a batch on the leader's LATEST legal line -- the largest the
+        # batch can use, since the line must be <= every member's latest and
+        # the list is Y-sorted -- and absorbs followers while that one line is
+        # still >= their earliest.
+        #
+        # Tested against the single chosen line, never pairwise: windows can
+        # overlap in pairs without sharing a common raster, and only a common
+        # raster is legal.
+        #
+        # Batch 0 is never extended. It is the handoff, its line is not derived
+        # from a sprite Y, and the builder always opens a fresh record for the
+        # first mid-screen entry.
         i = n0
         while i < len(entries):
             line = (entries[i]["y"] - REUSE_LEAD) & 0xff
-            if batches[-1]["line"] == line and not batches[-1].get("frame"):
-                batches[-1]["count"] += 1
-            elif batches[-1]["line"] == line and batches[-1].get("frame"):
-                # A mid-screen entry whose line collides with FRAME_IRQ_LINE
-                # would merge into batch 0 in the 6502 too: it compares only
-                # the previous batch's line. Kept explicit so the model does
-                # not quietly diverge if a sweep ever reaches Y = 262.
-                batches[-1]["count"] += 1
-            else:
-                batches.append({"line": line, "first": i, "count": 1,
-                                "frame": False})
+            b = {"line": line, "first": i, "count": 1, "frame": False}
+            batches.append(b)
             i += 1
+            while i < len(entries) and b["count"] < MUX_SLOTS:
+                earliest = entries[i - MUX_SLOTS]["y"] + SPRITE_HEIGHT
+                if earliest > 0xff or earliest > line:
+                    break
+                b["count"] += 1
+                i += 1
 
     # The COMPLETE $D010 after each batch, accumulated forwards exactly as the
     # builder does: each entry SETS its slot's bit when X >= 256 and CLEARS it

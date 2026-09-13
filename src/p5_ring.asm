@@ -68,7 +68,14 @@ ringOrbits:   .byte 0, 0                // phase index wrapped through zero
 rt_dy:   .byte 0                        // this frame's sweep offset, signed
 rt_idx:  .byte 0                        // phase index of the sprite in hand
 
-* = $1300 "p5 ring"
+// RELOCATED out of VIC bank 0. The legality-window batch merge grew the
+// schedule builder five bytes past the $1000..$12ff hole it has always had, and
+// this is qualification-fixture code called only from motionTick and the
+// fixture loader -- main thread, never the executor -- so it belongs outside
+// bank 0 with the player, the scroller, the weapon, the pool and collision.
+// The alternative was shaving five bytes off a routine this task had just
+// rewritten, which is the worse trade.
+* = $4e00 "p5 ring"
 
 // ===========================================================================
 // loadRingFixture — install a ring mode. fx_src points at the 4-byte record.

@@ -90,14 +90,22 @@ def model(ys):
     if sched:
         n0 = min(MUX_SLOTS, len(sched))
         batches.append({"line": HANDOFF_LINE, "first": 0, "count": n0})
+        # Legality-window grouping; see the long note in tests/p2_model.py.
+        # A batch is led by an entry on its own latest legal line, and absorbs
+        # following entries while that line is still at or after each one's
+        # earliest legal line (its predecessor's last displayed raster).
         i = n0
         while i < len(sched):
             line = sched[i]["y"] - REUSE_LEAD
-            if batches[-1]["line"] == line:
-                batches[-1]["count"] += 1
-            else:
-                batches.append({"line": line, "first": i, "count": 1})
+            b = {"line": line, "first": i, "count": 1}
+            batches.append(b)
             i += 1
+            while i < len(sched) and b["count"] < MUX_SLOTS:
+                earliest = sched[i - MUX_SLOTS]["y"] + SPRITE_HEIGHT
+                if earliest > 0xff or earliest > line:
+                    break
+                b["count"] += 1
+                i += 1
     return sched, unsafe, margin, reuse, batches
 
 # --- VICE monitor -----------------------------------------------------------
