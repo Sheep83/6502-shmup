@@ -109,7 +109,17 @@ def snap(mon):
     # logY/logX/logXHi/logPtr/logCol are contiguous and MAX_LOGICAL apart.
     log = rd(mon, sym["logY"], 5 * MAX_LOGICAL)
     srt = rd(mon, sym["sortedIDs"], MAX_LOGICAL + 1)
-    pool = rd(mon, sym["objType"], 3 * MAX_OBJECTS + 3)
+    # READ THE SCALARS BY SYMBOL, NOT BY COMPUTED OFFSET.
+    #
+    # This used to bulk-read from objType and index the three counters at
+    # 3*MAX_OBJECTS onward, which silently assumed objType/objVX/objVY were the
+    # only per-object arrays. Slice D inserted objHP and objTimer ahead of the
+    # counters, and the "double free" counter quietly became a live enemy's
+    # health -- a probe reporting six double frees on a pool that had had one.
+    # One extra monitor command is a fair price for a read that cannot drift
+    # when the next slice adds a field.
+    pool = rd(mon, sym["objType"], 3 * MAX_OBJECTS)
+    counters = rd(mon, sym["objPeak"], 3)
     misc = rd(mon, sym["logCount"], 1)
     g = lambda i: log[i * MAX_LOGICAL:(i + 1) * MAX_LOGICAL]
     n = srt[MAX_LOGICAL]
@@ -121,9 +131,9 @@ def snap(mon):
         "objType": pool[0:MAX_OBJECTS],
         "objVX": pool[MAX_OBJECTS:2 * MAX_OBJECTS],
         "objVY": pool[2 * MAX_OBJECTS:3 * MAX_OBJECTS],
-        "peak": pool[3 * MAX_OBJECTS],
-        "allocFail": pool[3 * MAX_OBJECTS + 1],
-        "doubleFree": pool[3 * MAX_OBJECTS + 2],
+        "peak": counters[0],
+        "allocFail": counters[1],
+        "doubleFree": counters[2],
         "live": [i for i in range(MAX_LOGICAL) if act[i]],
     }
 

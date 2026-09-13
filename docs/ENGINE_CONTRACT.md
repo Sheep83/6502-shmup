@@ -285,6 +285,43 @@ register; the code that touches the VIC lives in the renderer beside the handoff
 The previous project accumulated thirteen independent writers of `$d015` and
 became unreasonable. Do not repeat that.
 
+## 9a. Logical collision — the player's weapon
+
+Added in Slice D. `src/collision.asm` owns it.
+
+**The decision never touches hardware sprite identity, and `$d01e` is not read.**
+The mux time-shares HW2..HW7: the same physical sprite draws different logical
+objects on different rasters of one frame, and an object's slot changes between
+frames. A VIC collision bit names a *slot*, and a slot is not an object, so
+"which enemy did the player hit" has no correct answer there.
+
+```
+weaponTick       emits the shot event: two ray origins (9-bit X) and a Y
+objectUpdateAll  every object takes its movement
+collisionTick    the rays meet the objects; damage is applied to logical HP
+enemyTick        next frame, turns damage into feedback, death and the free
+```
+
+**Temporal model.** Collision runs *after* all movement, so rays and targets are
+both end-of-frame state for the same frame. One visible consequence: an enemy
+that left the world this frame was already freed, so a shot fired that frame
+misses it. That is a definite answer, not a race.
+
+| rule | value |
+|---|---|
+| hitbox | `enemyX .. enemyX+23`, the full sprite width |
+| eligibility | `logY >= 55` and `logY < shotY` (strictly above the ship) |
+| nearest | greatest `logY` wins |
+| tie | equal `logY` goes to the **higher pool slot** |
+| damage | 1 HP per cannon hit; both cannons trace independently |
+| filter | `objType == TYPE_ENEMY` and `objHP > 0`, never "any active object" |
+
+**Death is a state, not an immediate free.** Zero HP starts a bounded
+`DEATH_TIME` countdown during which the object stays active and renderable;
+the frame the timer reaches zero calls the same `objectFree` every despawn uses.
+There is exactly one place an enemy slot is released, so publication safety has
+one path to reason about.
+
 ## 10. Known deferred performance issue
 
 **`RING-SLOW` and `RING-SHIFT` show visibly jerky motion and background glitching
@@ -309,3 +346,27 @@ the budget is measured against a real load rather than a torture fixture.
 24 accepted, 19 batches — and is **not a production optimisation target**. Its
 historical visual glitch has varied as the raster phases changed and may
 currently be clean. Use it to detect *new* catastrophic corruption, nothing else.
+
+### Measured again in Slice D: well-separated sprites are the heavier load
+
+Slice C's ladder spawned enemies one per frame into a descending column two
+rasters apart, which the reuse rule collapses into a **single batch**. Slice D
+measured the same populations **spread ten rasters apart**, which produces up to
+eleven batches, and the main thread saturates:
+
+| enemies (spread) | main-thread span | frames missed |
+|---:|---:|---:|
+| 1 | 133 | 0 |
+| 4 | 171 | 0 |
+| 8 | 235 | 0 |
+| 12 | 255 (saturated) | yes |
+| 16 | 255 (saturated) | yes, with publication skips |
+
+**This is not collision.** Switching `collisionTick` to an immediate `RTS` and
+re-running gives the same overruns at 12 and 16, so the cost is the schedule
+build and the batch count. Collision's own contribution is 4 to 15 raster lines
+at the populations the engine sustains.
+
+The practical ceiling for *well-separated* gameplay sprites is therefore around
+**eight**, not sixteen. Packing matters more than count. Nothing here has been
+optimised; it is recorded so a wave designer knows the shape of the budget.

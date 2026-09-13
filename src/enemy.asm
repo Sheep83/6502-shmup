@@ -65,6 +65,9 @@
 // ===========================================================================
 
 // --- the numbers, from shooter_test/src/main.asm:5921 and 991-994 ----------
+.const ENEMY_MAX_HP      = 6        // ENEMY_START_HEALTH, main.asm:995. TYPE
+                                   // data: every enemy of this type starts
+                                   // here, so no per-object maximum is stored
 .const ENEMY_VY          = 2        // the old ingressTopStraightShort dive
 .const ENEMY_SPAWN_PERIOD = 48      // frames between spawns; see the note below
 
@@ -218,13 +221,16 @@ enemyColoursEnd:
 // ===========================================================================
 // State.
 // ===========================================================================
-* = $c5e0 "enemy state"
+// Moved out of $c5e0 in Slice D so the object pool's per-object arrays can grow
+// contiguously. Six bytes in the hole between the P5 ring's state and the
+// player's, rather than a second gap further up the page.
+* = $c517 "enemy state"
 enySpawnTimer: .byte 0                  // frames until the next spawn attempt
 enySpawnNext:  .byte 0                  // which spawn entry is next, 0..N-1
 enySpawned:    .byte 0, 0               // 16-bit, saturating: total spawned
 enyDespawned:  .byte 0, 0               // 16-bit, saturating: total despawned
 enyStateEnd:
-.if (enyStateEnd > $c600) { .error "the enemy state has grown into the P3 fixture data at $c600" }
+.if (enyStateEnd > $c520) { .error "the enemy state has grown into the player state at $c520" }
 
 * = $4900 "enemy code"
 
@@ -301,6 +307,8 @@ enemySpawn:
     lda enemyColours,y
     sta logCol,x
 
+    lda #ENEMY_MAX_HP                   // type data, not per-object storage:
+    sta objHP,x                         // every enemy of this type starts here
     lda #TYPE_ENEMY
     sta objType,x
 
@@ -333,6 +341,21 @@ enemySpawn:
 // Entry/exit: X = the object's slot, PRESERVED across the free.
 // ---------------------------------------------------------------------------
 enemyTick:
+    // ---- dying enemies run their death out and do not move ----------------
+    // "A dying enemy remains renderable but no longer follows its path"
+    // -- shooter_test/src/main.asm:2331. Kept: an explosion that keeps flying
+    // reads as a live enemy the player cannot kill.
+    lda objHP,x
+    bne !alive+
+    jmp enemyDeathTick
+!alive:
+
+    // ---- the hit flash, if one is running ---------------------------------
+    lda objTimer,x
+    beq !noFlash+
+    jsr enemyFlashTick
+!noFlash:
+
     // ---- vertical: whole pixels, as the old game ---------------------------
     lda logY,x
     clc
@@ -373,6 +396,104 @@ enemyTick:
     rts
 
 // ---------------------------------------------------------------------------
+// enemyFlashTick — one frame of the hit flash. Entry/exit: X = slot, preserved.
+//
+// The colour ladder is the old updateEnemyHitEffects (2770-2790) exactly: the
+// timer is decremented FIRST and the remaining value chooses the colour, so a
+// four-frame flash shows white, white, white, yellow and then restores.
+// ---------------------------------------------------------------------------
+enemyFlashTick:
+    dec objTimer,x
+    lda objTimer,x
+    cmp #2
+    bcs !white+
+    cmp #1
+    beq !yellow+
+    jsr enemyBaseColour                 // expired: back to the spawn colour
+    rts
+!white:
+    lda #HIT_COL_WHITE
+    sta logCol,x
+    rts
+!yellow:
+    lda #HIT_COL_YELLOW
+    sta logCol,x
+    rts
+
+// ---------------------------------------------------------------------------
+// enemyDeathTick — one frame of dying. Entry/exit: X = slot, preserved.
+//
+// Reached only with objHP zero. The timer runs DEATH_TIME frames and the slot
+// is freed on the frame it reaches zero -- which is the single place in the
+// game an enemy is released, so publication safety has one path to reason
+// about rather than two.
+//
+// The old game swapped in three explosion bitmaps here. This slice keeps the
+// TIMING and the COLOUR PROGRESSION and leaves the art alone: migrating
+// playerExplosion1/2/3 is a graphics job, and the graphics slice is next. The
+// enemy therefore dies as a bounded yellow-orange-red flash of its own shape.
+// ---------------------------------------------------------------------------
+enemyDeathTick:
+    dec objTimer,x
+    beq !release+
+
+    lda objTimer,x                      // the old frame thresholds, 2733-2757
+    cmp #8
+    bcs !blast1+
+    cmp #4
+    bcs !blast2+
+    lda #DEATH_COL_3
+    sta logCol,x
+    rts
+!blast2:
+    lda #DEATH_COL_2
+    sta logCol,x
+    rts
+!blast1:
+    lda #DEATH_COL_1
+    sta logCol,x
+    rts
+
+!release:
+    // The death animation is over. This is a NORMAL despawn: the same call, the
+    // same membership update, the same guarantee that CURRENT is not touched.
+    jmp enemyDespawn
+
+// ---------------------------------------------------------------------------
+// enemyBaseColour — the spawn colour for the slot's trajectory.
+// Entry/exit: X = slot, preserved.
+//
+// The old game stored OBJECT_BASE_COLOUR per object so an impact flash could be
+// undone. Here the colour is a property of the spawn ENTRY, and the entry that
+// produced this enemy is recoverable from its velocity pair, so the base colour
+// is looked up rather than stored. One byte of table beats sixteen of state.
+// ---------------------------------------------------------------------------
+enemyBaseColour:
+    ldy #ENEMY_SPAWN_ENTRIES - 1
+!find:
+    lda objVX,x
+    cmp enemySpawnTable + 2,y
+    bne !nextEntry+
+    lda logXHi,x
+    cmp enemySpawnTable + 1,y
+    beq !found+
+!nextEntry:
+    dey
+    dey
+    dey
+    dey
+    bpl !find-
+    ldy #0                              // no match: the first entry's colour is
+!found:                                 // a defined answer rather than a stale
+    tya                                 // one
+    lsr
+    lsr
+    tay
+    lda enemyColours,y
+    sta logCol,x
+    rts
+
+// ---------------------------------------------------------------------------
 // enemyDespawn — this enemy's life ends. Entry/exit: X = slot, preserved.
 //
 // There is nothing to undo in the renderer. The sprite this object was drawn
@@ -393,4 +514,4 @@ enemyDespawn:
 !counted:
     rts
 
-.if (* > $4a00) { .error "the enemy code has outgrown its $4900 segment" }
+.if (* > $4c00) { .error "the enemy code has outgrown its $4900 segment" }

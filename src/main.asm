@@ -211,7 +211,12 @@ BasicUpstart2(entry)
 #import "objects.asm"                   // AFTER renderer.asm (MAX_LOGICAL) and
                                         // motion.asm, whose logical arrays are
                                         // the pool's presentation view
-#import "enemy.asm"                     // AFTER objects.asm and player.asm
+#import "collision.asm"                 // AFTER objects.asm (TYPE_ENEMY,
+                                        // MAX_OBJECTS) and BEFORE enemy.asm,
+                                        // which uses its hit/death colours:
+                                        // KickAssembler resolves labels late
+                                        // but constants strictly in order
+#import "enemy.asm"                     // AFTER objects.asm and collision.asm
 #import "p3_fixtures.asm"
 #import "p4_fixtures.asm"
 #import "fixtures.asm"
@@ -360,6 +365,27 @@ gameFrame:
     // logXHi/logPtr/logCol -- the presentation view -- and membership; the
     // sorter and the builder below decide the rest.
     jsr objectUpdateAll
+
+    // ---- the player's hitscan --------------------------------------------
+    // THE TEMPORAL MODEL, AND IT IS A DECISION RATHER THAN A CALL ORDER.
+    //
+    // Collision runs AFTER all movement, so the rays and their targets are
+    // both END-OF-FRAME state for the SAME frame. playerTick moved the ship,
+    // weaponTick built the ray origins from that new position, and
+    // objectUpdateAll has just moved every enemy. Nothing here compares a
+    // this-frame coordinate against a last-frame one in either direction.
+    //
+    // Running it BEFORE objectUpdateAll would have been equally consistent,
+    // and worse: an enemy would be tested where it was when the trigger was
+    // pulled and drawn a pixel or two further on, which is the kind of
+    // one-frame disagreement that is invisible in a test and infuriating in
+    // play.
+    //
+    // One visible consequence, named so it is not mistaken for a bug: an enemy
+    // that left the world this frame was already freed above, so a shot fired
+    // on that frame misses it.
+    jsr collisionTick
+
     jsr enemySpawnTick
 
     jsr hudDemoTick                     // score, lives and upgrade only: their
@@ -496,6 +522,7 @@ gameInit:
                                         // is empty
     jsr playerInit
     jsr weaponInit
+    jsr collisionInit
     jsr enemyInit
     jsr playerEmit
     jsr sortTick

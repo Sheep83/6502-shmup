@@ -131,6 +131,35 @@ def weapon(mon):
     }
 
 
+SPAWNER_BYTE = [None]
+
+def quiet_mux(mon):
+    """Switch the production spawner off and empty the pool.
+
+    This file measures the WEAPON. Slice C gave production enemies that spawn on
+    a timer and Slice D gave them a death state, so the number of live objects
+    -- and therefore the cost of a frame and whether one is ever missed -- now
+    varies underneath any measurement that does not say otherwise. Patched to
+    RTS rather than delayed by its timer, because a timer poked to its maximum
+    expires many times over inside one warp second.
+    """
+    if SPAWNER_BYTE[0] is None:
+        SPAWNER_BYTE[0] = rd(mon, sym["enemySpawnTick"])[0]
+    poke(mon, sym["enemySpawnTick"], 0x60)
+    for i in range(16):
+        mon.cmd("> 01ff c0"); mon.cmd("> 01fe fd")
+        mon.cmd(f"r sp=fd, pc={sym['objectFree']:04x}, x={i:02x}")
+        bb = set_bp(mon, 0xc0fe); mon.cmd("x"); mon.cmd(f"delete {bb}")
+        mon.cmd(f"r pc={sym['mainLoop']:04x}")
+    mon.cmd("delete")
+
+
+def busy_mux(mon):
+    """Hand production back its enemies."""
+    if SPAWNER_BYTE[0] is not None:
+        poke(mon, sym["enemySpawnTick"], SPAWNER_BYTE[0])
+
+
 def arm(mon, joy=JOY_IDLE, heat=0, locked=0, cd=0, phase=0):
     """Put the weapon in a named state and hold the stick there."""
     poke(mon, sym["joyHold"], 1)
@@ -216,6 +245,8 @@ def idle(mon):
 
 def firing(mon):
     print("\n=== 3. held fire: cadence, rays and heat, frame by frame ===")
+    quiet_mux(mon)                      # a long contiguous run needs a frame
+                                        # the game is not also busy filling
     arm(mon, JOY_FIRE)
     t = steps(mon, 26)
     print(f"  {len(t)} contiguous frames")
@@ -434,6 +465,9 @@ def hud_scale(mon):
 
 def unchanged(mon):
     print("\n=== 8. everything Slices A and A' established is unchanged ===")
+    quiet_mux(mon)                      # BEFORE the idle sample, not between it
+                                        # and the other two: three spans are only
+                                        # comparable if all three saw one world
     arm(mon, JOY_IDLE, heat=0, cd=0)
     mon.cmd("delete")
     for n in ("hudEntryMin", "handoffEntryMin", "topSplitMin", "botSplitMin",
@@ -487,14 +521,32 @@ def unchanged(mon):
               f"span {sp} overrun {g('gameOverrun')[0]} skips {g('publishSkip')[0]}")
         return sp
 
+    # ALL THREE SAMPLES MUST SEE THE SAME WORLD. With enemies spawning and
+    # dying underneath them, idle/moving/firing are three different populations
+    # and their difference measures the game rather than the weapon -- which is
+    # how an earlier run produced a "moving" frame cheaper than an idle one.
     move_span = span_of("moving", JOY_IDLE & ~0b00000100)
     fire_span = span_of("firing", JOY_FIRE)
     print(f"  ..  main-thread span: idle {idle_span}, moving {move_span}, "
           f"firing {fire_span} raster lines (~{fire_span * 63} cycles of 19656)")
-    check("the weapon itself costs the frame almost nothing",
-          abs(fire_span - move_span) <= 4,
-          f"firing {fire_span} vs moving {move_span}: the difference is the "
-          f"weapon; the gap to idle {idle_span} is republication")
+    # SLICE D WIDENED WHAT "FIRING" MEANS. A firing frame now also resolves the
+    # hitscan: collisionTick walks all sixteen pool slots once per cannon, with
+    # no early exit, whether or not anything is there to hit. That work is real,
+    # it is the point of that slice, and it lands on exactly the frames this
+    # comparison calls "firing" -- so the bound covers weapon AND collision
+    # rather than pretending the gun still fires into nothing.
+    #
+    # Measured with an empty pool: about twenty raster lines, some 1300 cycles,
+    # for two sixteen-slot scans. tests/test_slice_d.py attributes the collision
+    # half of it directly, by switching collisionTick off and re-measuring.
+    weapon_and_collision = fire_span - move_span
+    check("firing plus its hitscan costs a bounded amount over moving",
+          weapon_and_collision <= 28,
+          f"firing {fire_span} vs moving {move_span}: {weapon_and_collision} "
+          f"raster lines for the volley and both cannon scans")
+    check("and moving and idle sit close together, both being republication",
+          abs(move_span - idle_span) <= 20,
+          f"idle {idle_span} moving {move_span}")
 
     # The player is still the player. Stepped from a known position: a
     # free-run under warp is thousands of frames and simply parks the ship
@@ -519,9 +571,26 @@ def unchanged(mon):
           t[-1]["plyX"] == t[0]["plyX"] - span and t[-1]["heat"] > t[0]["heat"]
           and any(s["fired"] for s in t),
           f"X {t[0]['plyX']} -> {t[-1]['plyX']}, heat {t[0]['heat']} -> {t[-1]['heat']}")
-    d015 = None
-    b = set_bp(mon, sym["exBottom"]); mon.cmd("x")
-    d015 = rd(mon, 0xd015)[0]; mon.cmd(f"delete {b}"); mon.cmd("delete")
+    # VERIFY WHERE THE SAMPLE WAS TAKEN. `mon.cmd("x")` returns on a prompt
+    # echo rather than on the stop, so a read can come from a machine that never
+    # stopped -- and a $d015 read at raster 0 is legitimately $00, because the
+    # frame transaction disables every sprite through the ghost window. That
+    # reads exactly like the player having vanished. It is the same trap Slices
+    # A and A' were bitten by, in the one place this file left unguarded.
+    d015, raster = None, None
+    b = set_bp(mon, sym["exBottom"])
+    for _ in range(8):
+        mon.cmd("x")
+        raster = rd(mon, 0xd012)[0]
+        if 243 <= raster <= 248:
+            d015 = rd(mon, 0xd015)[0]
+            break
+    mon.cmd(f"delete {b}"); mon.cmd("delete")
+    check("the $d015 sample was taken where gameplay owns the register",
+          d015 is not None, f"last raster {raster}")
+    if d015 is None:
+        d015 = 0
+    busy_mux(mon)
     check("the player is still enabled on both reserved slots",
           (d015 & PLAYER_SLOT_MASK) == PLAYER_SLOT_MASK, f"${d015:02x} at raster 243")
     # "No fixture" used to be the same statement as "logCount is zero", because

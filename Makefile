@@ -173,8 +173,11 @@ test-p5: build
 #   test_slice_c.py       the dynamic object pool: lifecycle, slot reuse, the
 #                         stale sorted-ID hazard, one real enemy, and the
 #                         production population ladder
+#   test_slice_d.py       the player's hitscan: cannon geometry, target
+#                         selection, damage, hit feedback, death and the safe
+#                         removal of a killed object
 #
-# The last four are what break while a game is being built on an engine that
+# The last five are what break while a game is being built on an engine that
 # is already qualified, so they belong in the target that gets run constantly
 # rather than in a slower gate.
 #
@@ -188,6 +191,7 @@ test: build
 	python3 tests/test_slice_a_prime.py
 	python3 tests/test_slice_b.py
 	python3 tests/test_slice_c.py
+	python3 tests/test_slice_d.py
 
 test-slice-a: build
 	python3 tests/test_slice_a.py
@@ -200,6 +204,9 @@ test-slice-b: build
 
 test-slice-c: build
 	python3 tests/test_slice_c.py
+
+test-slice-d: build
+	python3 tests/test_slice_d.py
 
 test-fast: build
 	python3 tests/test_engine.py

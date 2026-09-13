@@ -100,6 +100,28 @@ objType:     .fill MAX_OBJECTS, 0
 objVX:       .fill MAX_OBJECTS, 0        // signed, whole pixels per frame
 objVY:       .fill MAX_OBJECTS, 0        // signed, whole pixels per frame
 
+// ---------------------------------------------------------------------------
+// COMBAT. Slice D.
+//
+// Two arrays carry three states, and the rule that makes that safe is written
+// here rather than inferred at each use site:
+//
+//     objHP > 0,  objTimer == 0    alive, undamaged this moment
+//     objHP > 0,  objTimer  > 0    alive, running the HIT FLASH
+//     objHP == 0, objTimer  > 0    DYING; the timer is the death animation
+//     objHP == 0, objTimer == 0    cannot exist while active -- the frame that
+//                                  brings the death timer to zero frees the slot
+//
+// HP ZERO IS THE DEATH FLAG. The old game carried a separate
+// OBJECT_DEATH_TIMER beside OBJECT_HIT_TIMER, but the two could never both be
+// running: damageEnemy clears the hit timer when it begins a death, and it
+// returns early on an already-zero health so a dying enemy can never take a
+// second hit. Deriving the state from health rather than storing it again
+// removes the possibility of the two disagreeing, and the suite asserts the
+// impossible fourth row never occurs.
+objHP:       .fill MAX_OBJECTS, 0        // 0 = dying. See the table above.
+objTimer:    .fill MAX_OBJECTS, 0        // hit flash while alive, death when not
+
 // Diagnostics. Saturating where a count could run away.
 objPeak:     .byte 0                     // high-water mark of logCount
 objAllocFail: .byte 0                    // allocations refused: the pool was full
@@ -153,6 +175,8 @@ objectZeroSlot:
     sta objType,x
     sta objVX,x
     sta objVY,x
+    sta objHP,x                         // a reused slot must not inherit the
+    sta objTimer,x                      // previous occupant's health or flash
     sta logY,x
     sta logX,x
     sta logXHi,x
