@@ -348,8 +348,16 @@ def engine_unchanged(mon):
     mon.cmd("delete")
     check("the player is still enabled with no gameplay sprites",
           (d015 & PLAYER_SLOT_MASK) == PLAYER_SLOT_MASK, f"${d015:02x} at raster 243")
+    # "No fixture" used to be the same statement as "logCount is zero", because
+    # nothing else could put a logical sprite in the pool. Slice C's enemies can,
+    # so the check now says what it always meant: no fixture is loaded, and
+    # anything that IS in the pool got there through the production object pool.
+    live = [i for i in range(32) if rd(mon, sym["logActive"], 32)[i]]
+    types = rd(mon, sym["objType"], 16)
     check("production startup still presents no fixture",
-          rd(mon, sym["logCount"])[0] == 0 and rd(mon, sym["fixtureMoves"])[0] == 0)
+          rd(mon, sym["fixtureMoves"])[0] == 0
+          and all(i < 16 and types[i] == 1 for i in live),
+          f"fixtureMoves {rd(mon, sym['fixtureMoves'])[0]}, live {live}")
 
     span, over, run = (g("gameSpanMax")[0], g("gameSpanOver")[0],
                        g("gameOverrun")[0])

@@ -85,12 +85,17 @@
 sortedIDs:   .fill MAX_LOGICAL, 0
 sortedCount: .byte 0
 
-// VISIBILITY. P4 has none: every logical sprite is sorted and offered to the
-// builder, so sortedCount is always logCount. If culling is ever added it
-// belongs BETWEEN motion and sorting -- select the visible set, sort that --
-// and sortedCount becomes the size of the selected set rather than of the
-// pool. Nothing downstream needs to change for that, which is why the contract
-// is written in terms of sortedCount and not logCount.
+// MEMBERSHIP. sortedIDs[0 .. sortedCount-1] holds exactly the logical IDs whose
+// logActive is 1 -- no more and no less. P4 had no such concept: every logical
+// sprite was sorted, sortedCount was always logCount, and membership was the
+// implicit prefix "ID < logCount". Slice C replaced that prefix with an explicit
+// bit, because a dynamic pool frees slots out of the middle and a prefix cannot
+// describe that. See sortRebuild for the failure the prefix model produced.
+//
+// VISIBILITY is still a separate question and still has no implementation:
+// every ACTIVE sprite is offered to the builder, and the builder alone decides
+// what is renderable. If culling is ever added it belongs between the update and
+// the sort, and only sortRebuild changes.
 
 // Diagnostics. Main thread only; none of this is on the executor's path.
 sortWork:    .byte 0, 0                 // shifts performed this frame, 16-bit.
@@ -102,6 +107,16 @@ st_i:     .byte 0                       // outer index: the element being placed
 st_key:   .byte 0                       // its logical ID
 st_keyY:  .byte 0                       // its Y, held so the inner loop need
                                         // not re-read it through two indexes
+
+// ---------------------------------------------------------------------------
+// sortDirty — MEMBERSHIP has changed since the last rebuild.
+//
+// Set by objectActivate and objectFree, and by sortReset for a fixture load.
+// It is NOT set when an object merely MOVES: a move changes the ORDER, which
+// the persistent insertion sort handles for free, and rebuilding for that
+// would throw away the whole reason the sort is persistent.
+// ---------------------------------------------------------------------------
+sortDirty: .byte 0
 
 * = $1e00 "sorter"
 
@@ -124,6 +139,17 @@ sortReset:
 !loop:
     txa
     sta sortedIDs,x
+    // MEMBERSHIP FOR A FIXTURE IS THE PREFIX "ID < logCount", and this is the
+    // one place that is still true. Writing it into logActive rather than
+    // leaving it implicit is what lets the sorter ask ONE question about
+    // membership regardless of whether a fixture or the object pool populated
+    // the arrays.
+    cpx logCount
+    lda #0                              // A = (X < logCount), written plainly:
+    bcs !store+                         // a BIT-skip would save one byte here
+    lda #1                              // and cost every future reader a pause
+!store:
+    sta logActive,x
     inx
     cpx #MAX_LOGICAL
     bcc !loop-
@@ -131,6 +157,76 @@ sortReset:
     sta sortFault
     sta sortWork
     sta sortWork + 1
+    sta sortDirty                       // sortedIDs above IS the rebuild: the
+    rts                                 // identity permutation over an active
+                                        // prefix is exactly what sortRebuild
+                                        // would produce for it
+
+// ===========================================================================
+// sortRebuild — make sortedIDs name exactly the active logical IDs.
+// ===========================================================================
+// THE BUG THIS EXISTS TO KILL, stated exactly, because it was reproduced on
+// the running machine before it was fixed:
+//
+//   sortedIDs is a permutation of ALL logical IDs and sortedCount is a WINDOW
+//   over its front. sortTick used to set that window from logCount every frame
+//   while sorting only what the window already contained. Order and membership
+//   are different things, and resizing a window does not change what is inside
+//   it.
+//
+//   Four objects at Y 200/100/150/120 sort to sortedIDs = [1,3,2,0]. Object 3
+//   despawns, so the population is three. The window shrinks to three and the
+//   builder now walks [1,3,2]:
+//
+//       ID 3 is DESPAWNED and still rendered -- a ghost;
+//       ID 0 is ALIVE and outside the window -- it vanishes.
+//
+//   One despawn, both failure modes, no fault counter raised anywhere. That is
+//   measured output, not a hypothesis: /tmp/prove_stale.py reproduced it.
+//
+// THE FIX IS TO REBUILD THE CONTENTS, not to resize a window. Active IDs are
+// compacted to the front in ascending order and sortedCount is the count of
+// them -- so an ID that is not active cannot be in the window at all, and an
+// ID that is active cannot be outside it. The property is now structural
+// rather than something a caller must maintain.
+//
+// The inactive IDs are appended behind the window rather than abandoned, which
+// keeps sortedIDs a permutation of 0..MAX_LOGICAL-1 at all times. The sort
+// never looks past sortedCount, so this costs nothing it needs -- but a
+// permutation is far easier to assert about from a test than an array with
+// arbitrary residue in its tail, and P4's tests already assert exactly that.
+//
+// Cost: two passes over MAX_LOGICAL, on membership-change frames only. A frame
+// in which objects merely move does not come here at all, which is what
+// preserves the persistent sort's whole reason for existing.
+// ===========================================================================
+sortRebuild:
+    ldx #0                              // X = source ID
+    ldy #0                              // Y = write cursor, front of sortedIDs
+!active:
+    lda logActive,x
+    beq !skip+
+    txa
+    sta sortedIDs,y
+    iny
+!skip:
+    inx
+    cpx #MAX_LOGICAL
+    bne !active-
+
+    sty sortedCount                     // THE window is the count of actives
+
+    ldx #0                              // second pass: the inactive tail, so
+!inactive:                              // sortedIDs stays a permutation
+    lda logActive,x
+    bne !skipInactive+
+    txa
+    sta sortedIDs,y
+    iny
+!skipInactive:
+    inx
+    cpx #MAX_LOGICAL
+    bne !inactive-
     rts
 
 // ===========================================================================
@@ -141,11 +237,20 @@ sortTick:
     sta sortWork
     sta sortWork + 1
 
-    // P4 sorts the whole logical pool: no visibility filtering. Restated every
-    // frame rather than assumed, so a fixture that changed logCount without
-    // reloading cannot leave a stale count behind.
-    lda logCount
-    sta sortedCount
+    // MEMBERSHIP FIRST, ORDER SECOND.
+    //
+    // This used to read `lda logCount / sta sortedCount`, and that single line
+    // was the stale-ID bug: it resized the window over sortedIDs without
+    // rebuilding its CONTENTS, so a shrink left despawned IDs inside the window
+    // and pushed live ones out of it. See sortRebuild.
+    lda sortDirty
+    beq !ordered+
+    jsr sortRebuild
+    lda #0
+    sta sortDirty
+!ordered:
+
+    lda sortedCount
     cmp #2
     bcs st_go
     rts                                 // 0 or 1 elements are already ordered
@@ -214,6 +319,10 @@ st_done:
     // spend main-thread budget -- the scarce resource after P3 -- on
     // reassurance. tests/test_p4.py reads sortedIDs and verifies all of it
     // exhaustively instead, which costs the engine nothing.
+    // sortedCount came from logActive; logCount came from the alloc/free calls.
+    // They are two independent representations of the same fact, so comparing
+    // them is a real integrity check rather than a tautology -- it catches a
+    // spawner that set a membership bit without going through objectActivate.
     lda sortedCount
     cmp logCount
     beq !ok+

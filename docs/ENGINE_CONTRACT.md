@@ -222,6 +222,53 @@ seam while the window straddles the join. A finite stage will end by comparing
 deliberately not made here. `worldProgress` never wraps; nothing should ever
 infer progression from an unsigned underflow of `stageTopRow`.
 
+## 8b. The logical object pool and membership
+
+Added in Slice C. `src/objects.asm` owns it; `src/sorter.asm` reads it.
+
+**Gameplay owns "active". The renderer owns "renderable this frame."** An object
+the builder rejects — for Y range, for schedule capacity, or for reuse spacing —
+is still perfectly alive. It simply is not drawn this frame. Nothing in gameplay
+may know that hardware sprites exist.
+
+```
+objectAlloc     -> a zeroed free slot, INACTIVE       carry set = pool full
+objectActivate  -> the slot joins the active set      sets sortDirty
+objectFree      -> the slot returns to the pool       sets sortDirty
+objectUpdateAll -> one frame of every active object
+```
+
+| value | meaning |
+|---|---|
+| `logActive[id]` | **which** logical IDs exist. The sorter's only source of truth. |
+| `logCount` | **how many**. Maintained independently, and cross-checked against `logActive` by `sortTick`; a disagreement raises `sortFault`. |
+| `sortDirty` | membership changed. Set by activate, free and `sortReset` — **never** by an object merely moving. |
+
+**Allocate and activate are two calls, deliberately.** The caller fills every
+field between them, so a half-built object can never be named by `sortedIDs`.
+`objectAlloc` zeroes the whole slot, so a reused slot inherits nothing.
+
+**The sorter's membership rule.** `sortedIDs[0 .. sortedCount-1]` holds exactly
+the IDs whose `logActive` is 1 — no more and no less. `sortRebuild` compacts the
+active IDs to the front and sets the count from them, so an inactive ID cannot be
+inside the window and an active one cannot be outside it. `sortedIDs` stays a
+permutation of `0..MAX_LOGICAL-1` at all times.
+
+Before Slice C, membership was the implicit prefix `ID < logCount` and `sortTick`
+resized that window from `logCount` every frame without rebuilding its contents.
+A shrink therefore left despawned IDs inside the window and pushed live ones out
+of it — a ghost and a vanishing sprite from one despawn, with no fault raised.
+**Never infer membership from a count.**
+
+**Populations are mutually exclusive.** A production boot loads no fixture; a
+fixture run spawns no object. `sortReset` is the one place the prefix model still
+holds, and it exists to give fixtures their membership.
+
+**Despawn touches no VIC register, and needs to.** The sprite is not turned off:
+the next schedule simply does not contain it, and `$d015` is composed from the
+schedule rather than edited. Freeing gameplay state cannot disturb an already
+adopted CURRENT schedule, which stays immutable for its frame.
+
 ## 9. Direct VIC access — who owns what
 
 | register | owner | who may write it |

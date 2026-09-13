@@ -208,6 +208,10 @@ BasicUpstart2(entry)
 #import "renderer.asm"
 #import "motion.asm"
 #import "sorter.asm"
+#import "objects.asm"                   // AFTER renderer.asm (MAX_LOGICAL) and
+                                        // motion.asm, whose logical arrays are
+                                        // the pool's presentation view
+#import "enemy.asm"                     // AFTER objects.asm and player.asm
 #import "p3_fixtures.asm"
 #import "p4_fixtures.asm"
 #import "fixtures.asm"
@@ -346,6 +350,18 @@ gameFrame:
     // than one frame late.
     jsr playerEmit                      // -> plyPres, and plyDirty if it changed
 
+    // ---- the logical object pool -----------------------------------------
+    // Every active object moves, and may remove itself. objectUpdateAll runs
+    // BEFORE enemySpawnTick so that an enemy spawned this frame is rendered at
+    // exactly its spawn position for one frame rather than being moved before
+    // it has ever been seen.
+    //
+    // Neither call knows that hardware sprites exist. They write logY/logX/
+    // logXHi/logPtr/logCol -- the presentation view -- and membership; the
+    // sorter and the builder below decide the rest.
+    jsr objectUpdateAll
+    jsr enemySpawnTick
+
     jsr hudDemoTick                     // score, lives and upgrade only: their
                                         // systems do not exist yet. Heat left
                                         // this routine in Slice B and is fed
@@ -375,8 +391,22 @@ gameFrame:
     // every frame is a measurable load that P4 specifically measured skips
     // against. With no joystick attached the player never moves, so a fixture
     // run is byte-for-byte the frame it always was.
+    // WHAT MAKES THE SCHEDULE STALE, all four sources.
+    //
+    //   plyDirty     the player's published block changed
+    //   fixtureMoves a qualification fixture is animating
+    //   logCount     at least one object is alive, and every object moves
+    //   sortDirty    membership changed THIS frame
+    //
+    // sortDirty is not redundant with logCount: the frame on which the LAST
+    // enemy despawns leaves logCount zero, and that is precisely the frame
+    // whose schedule must be rebuilt to stop drawing it. Dropping that term
+    // would leave the final enemy of every group frozen on screen until the
+    // player next moved.
     lda plyDirty
     ora fixtureMoves
+    ora logCount
+    ora sortDirty
     beq !noPublish+
     lda #0
     sta plyDirty
@@ -458,13 +488,15 @@ gameInit:
                                         // fixtureMoves = 0: a production boot
                                         // must not inherit a fixture's motion
                                         // state from the .fill that set it up
-    lda #0
-    sta logCount
+    jsr objectInit                      // every pool slot free, logCount zero,
+                                        // and the sorter told that membership
+                                        // changed
     jsr sortReset                       // sortedIDs must be a permutation of
-                                        // 0..logCount-1, which for zero is the
-                                        // empty one
+                                        // 0..MAX_LOGICAL-1 whose active prefix
+                                        // is empty
     jsr playerInit
     jsr weaponInit
+    jsr enemyInit
     jsr playerEmit
     jsr sortTick
     jsr buildSchedule

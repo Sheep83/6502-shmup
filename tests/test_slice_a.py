@@ -234,11 +234,39 @@ def put_player(mon, x, y):
 
 
 # ===========================================================================
+def quiet_mux(mon):
+    """Empty the object pool and stop it refilling.
+
+    Slice C gave production a real enemy that spawns on a timer, so "no
+    gameplay sprites" stopped being something a production boot just IS and
+    became something a test must ASK for. This file is about the player on its
+    two reserved slots and about the zero-batch handoff path, both of which
+    need an empty mux, so it says so explicitly rather than relying on the game
+    having nothing else to draw.
+    """
+    # The spawner is switched OFF, not merely delayed. Every settle in this file
+    # free-runs under warp for hundreds of frames, so a spawn timer poked to its
+    # maximum expires several times over before the next read -- which is
+    # exactly what the first version of this did, and it duly found two enemies
+    # in a mux it had just emptied.
+    poke(mon, sym["enemySpawnTick"], 0x60)      # RTS
+    for i in range(16):
+        mon.cmd("> 01ff c0"); mon.cmd("> 01fe fd")
+        mon.cmd(f"r sp=fd, pc={sym['objectFree']:04x}, x={i:02x}")
+        bb = set_bp(mon, 0xc0fe); mon.cmd("x"); mon.cmd(f"delete {bb}")
+        mon.cmd(f"r pc={sym['mainLoop']:04x}")
+    mon.cmd("delete")
+    settle(mon, 0.2)
+
+
+# ===========================================================================
 def production_boot(mon):
     print("\n=== 2. production boot: no fixture, no gameplay sprites ===")
     m = machine(mon)
     g = lambda n: rd(mon, sym[n])[0]
     check("the mux pool is empty (logCount 0)", g("logCount") == 0, f"{g('logCount')}")
+    check("and the object pool holds no live membership bit",
+          not any(rd(mon, sym["logActive"], 32)), "")
     check("nothing was accepted and no batch exists",
           m["entries"] == 0 and m["batches"] == 0,
           f"entries {m['entries']} batches {m['batches']}")
@@ -491,6 +519,7 @@ if __name__ == "__main__":
         hold_stick(mon)
         free_run(mon, sym["frameCounter"], 1)
 
+        quiet_mux(mon)                          # this file is about the PLAYER
         production_boot(mon)
         ownership_boundaries(mon)
         x_msb(mon)

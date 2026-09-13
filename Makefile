@@ -18,8 +18,31 @@ D64   := $(ROOT)/build/shmup.d64
 # carried its own hand-written x64sc invocation, that copy had no -default, and
 # the user's saved vicerc bound the host SPACE key to an emulated joystick.
 #
-#   -default    ignore ~/.config/vice/vicerc entirely
-#   +saveres    ...and never write our settings back over the user's own
+#   +saveres    never write our settings back over the user's own
+#
+#               `-default` IS DELIBERATELY ABSENT HERE, and that is a fix rather
+#               than an omission. It means "ignore the user's vicerc and use
+#               factory defaults", and in combination with ANY save it does not
+#               merely ignore the file -- it OVERWRITES it with those defaults.
+#               Measured, on a throwaway config under /tmp:
+#
+#                   no -default, -saveres   KeySet1Fire and all four
+#                                           directions survive
+#                   -default,    -saveres   KeySet1Fire, all four directions
+#                                           and JoyDevice2 ALL DESTROYED
+#                   -default,   +saveres    config untouched
+#
+#               A manual session opens a real window, and a real window can save
+#               settings from its own menu no matter what the command line said.
+#               So a manual run must not start from factory defaults: it would
+#               be one menu click away from erasing the player's control
+#               bindings. It also could not honour JOY2=2 in the first place,
+#               because the keyset bindings it needs live in the very file
+#               -default discards.
+#
+#               THE AUTOMATED SUITES STILL PASS -default, and must: they need a
+#               known machine, and they pair it with +saveres, which the table
+#               above shows is harmless. See tests/test_p0.py.
 #   -joydev1 0  Control port 1 stays detached. It is CIA1 $DC01, which is the
 #               keyboard ROW drive; a device on it can pull matrix lines and
 #               make the keyboard read keys nobody pressed.
@@ -28,16 +51,25 @@ D64   := $(ROOT)/build/shmup.d64
 #               Override it per run rather than editing this file:
 #
 #                   make run JOY2=1     numpad          (the default)
-#                   make run JOY2=2     keyset A        (needs a saved vicerc,
-#                                                        which -default ignores)
+#                   make run JOY2=2     keyset A        (your own vicerc bindings)
+#                   make run JOY2=3     keyset B
 #                   make run JOY2=4     the first real joystick or gamepad
 #
 #               A MacBook keyboard has no numpad, so a laptop without a
 #               controller wants JOY2=4 with something plugged in. If the ship
 #               does not move, this is the first thing to change -- the C64 side
 #               cannot tell the difference between "no stick" and "no device".
-#   +keyset     no keyset joystick unless one is explicitly selected above, so
-#               nothing silently eats a host key.
+#   -keyset     keysets are ENABLED only when JOY2 actually selects one (2 or
+#                3), and disabled otherwise so nothing silently eats a host key.
+#               Passing +keyset while also selecting keyset A, as this line used
+#               to, asks for a control method and then switches it off.
+#
+#               A KEYSET NEEDS A FIRE BINDING, AND FIRE IS NOT FIRE2.
+#               KeySet1Fire drives the C64's single fire line, CIA1 $DC00 bit 4,
+#               which is the only fire the hardware has. KeySet1Fire2 and Fire3
+#               are extra buttons on multi-button host controllers and reach no
+#               C64 register at all. A vicerc with directions and Fire2 but no
+#               Fire therefore moves the ship and never shoots.
 #
 # The automated suites build their OWN command line in tests/test_p0.py and
 # detach both ports there. A test must never depend on a host device.
@@ -45,7 +77,9 @@ D64   := $(ROOT)/build/shmup.d64
 # Normal speed, no monitor, no warp: the only configuration in which what you
 # see is what the machine really does.
 JOY2      ?= 1
-VICE_OPTS := -default +saveres -pal -joydev1 0 -joydev2 $(JOY2) +keyset
+# Keysets on only when one is actually selected.
+KEYSET    := $(if $(filter 2 3,$(JOY2)),-keyset,+keyset)
+VICE_OPTS := +saveres -pal -joydev1 0 -joydev2 $(JOY2) $(KEYSET)
 
 
 .PHONY: p3-fixtures p4-fixtures
@@ -136,8 +170,11 @@ test-p5: build
 #                         stage row it should
 #   test_slice_b.py       the weapon: fire cadence, heat, overheat, the shot
 #                         event, and the HUD heat feed
+#   test_slice_c.py       the dynamic object pool: lifecycle, slot reuse, the
+#                         stale sorted-ID hazard, one real enemy, and the
+#                         production population ladder
 #
-# The last three are what break while a game is being built on an engine that
+# The last four are what break while a game is being built on an engine that
 # is already qualified, so they belong in the target that gets run constantly
 # rather than in a slower gate.
 #
@@ -150,6 +187,7 @@ test: build
 	python3 tests/test_slice_a.py
 	python3 tests/test_slice_a_prime.py
 	python3 tests/test_slice_b.py
+	python3 tests/test_slice_c.py
 
 test-slice-a: build
 	python3 tests/test_slice_a.py
@@ -159,6 +197,9 @@ test-slice-a-prime: build
 
 test-slice-b: build
 	python3 tests/test_slice_b.py
+
+test-slice-c: build
+	python3 tests/test_slice_c.py
 
 test-fast: build
 	python3 tests/test_engine.py

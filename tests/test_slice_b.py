@@ -524,8 +524,16 @@ def unchanged(mon):
     d015 = rd(mon, 0xd015)[0]; mon.cmd(f"delete {b}"); mon.cmd("delete")
     check("the player is still enabled on both reserved slots",
           (d015 & PLAYER_SLOT_MASK) == PLAYER_SLOT_MASK, f"${d015:02x} at raster 243")
+    # "No fixture" used to be the same statement as "logCount is zero", because
+    # nothing else could put a logical sprite in the pool. Slice C's enemies can,
+    # so the check now says what it always meant: no fixture is loaded, and
+    # anything in the pool got there through the production object pool.
+    live = [i for i in range(32) if rd(mon, sym["logActive"], 32)[i]]
+    types = rd(mon, sym["objType"], 16)
     check("production startup still presents no fixture",
-          rd(mon, sym["logCount"])[0] == 0 and rd(mon, sym["fixtureMoves"])[0] == 0)
+          rd(mon, sym["fixtureMoves"])[0] == 0
+          and all(i < 16 and types[i] == 1 for i in live),
+          f"fixtureMoves {rd(mon, sym['fixtureMoves'])[0]}, live {live}")
 
 
 def muzzle_art(mon):
