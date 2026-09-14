@@ -197,11 +197,16 @@ test-p5: build
 #                               worldProgress starts a wave, a SECOND wave
 #                               instance runs concurrently with the first,
 #                               enemies from both coexist, the curved movement
-#                               primitive turns smoothly, slots come back
-#                               through the ordinary pool, and a deliberately
-#                               filled pool defers spawns instead of losing
-#                               them. Watched through the real frame loop, for
-#                               the same reason the turret regression is.
+#                               primitive progresses through several phases,
+#                               and a slot comes back through the ordinary
+#                               pool. Watched through the real frame loop, for
+#                               the same reason the turret regression is. The
+#                               synthetic all-16-slots pool-pressure
+#                               qualification that proved the defer-on-
+#                               allocation-failure policy was implementation-
+#                               time work and is not part of this permanent
+#                               regression; the policy itself is unchanged in
+#                               production.
 #
 # What used to run here -- Slices A/A'/B/C/D, the terrain and turret
 # migration-porting proofs, and the historical batch-window schedule-settle

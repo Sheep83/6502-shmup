@@ -92,43 +92,68 @@ LAUNCHED_PIDS = []
 
 
 class Vice:
-    """Owns exactly one x64sc PID and guarantees cleanup."""
+    """Owns exactly one x64sc PID and guarantees cleanup.
+
+    Settings isolation: +saveres ("do not save settings on exit") is the one
+    flag in this VICE build empirically proven to stop a session from ever
+    writing ~/.config/vice/vicerc -- verified against a decoy $HOME, on both
+    a clean monitor "quit" and the SIGTERM this class actually sends in
+    close(), before being trusted here (see
+    reports/vice-harness-settings-isolation.md). -config, which looked like
+    the more structural fix, is NOT used: a session launched with
+    `-config <fresh /tmp file>` still loaded the real vicerc's bindings and,
+    on a graceful exit, saved back to the REAL vicerc regardless of the
+    -config path given -- so it provides no isolation in this build despite
+    what its help text implies.
+
+    -default is dropped: this suite no longer needs to blank the loaded
+    settings to something safe-to-discard, because +saveres alone already
+    guarantees nothing is ever written back, loaded or not. The joystick
+    port / keyset overrides (-joydev1 0 -joydev2 0 +keyset) are dropped for
+    the same reason -- with saving disabled and -console meaning no window
+    is ever mapped to receive host key events, there is nothing left for
+    detaching them to protect against, so the user's own bindings are simply
+    left loaded in memory for the session's lifetime and never touched on
+    disk.
+    """
     def __init__(self, port, prg, warp=True):
         self.port, self.proc, self.mon = port, None, None
-        # +saveres so a -default run can never write factory settings back
-        # over the user's own vicerc, and both joystick devices detached so
-        # nothing steals host keys. -console: an automated suite must never
-        # open a window (it steals macOS keyboard focus the instant it maps).
-        args = [X64, "-console", "-default", "+saveres", "-pal", "+sound",
-                "-joydev1", "0", "-joydev2", "0", "+keyset", "-remotemonitor",
-                "-remotemonitoraddress", f"ip4://127.0.0.1:{port}",
-                "-autostartprgmode", "1", "-autostart", str(prg)]
-        if warp: args.insert(1, "-warp")
-        squatter = port_owner(port)
-        if squatter is not None:
-            raise RuntimeError(
-                f"port {port} is already served by pid {squatter}; refusing "
-                f"to attach to a VICE this suite did not launch")
-        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL)
-        LAUNCHED_PIDS.append(self.proc.pid)
-        print(f"  [vice] launched pid {self.proc.pid} on port {port}")
-        time.sleep(4)
-        for _ in range(10):
-            owner = port_owner(port)
-            if owner == self.proc.pid:
-                break
-            time.sleep(0.5)
-        else:
-            raise RuntimeError(
-                f"port {port} is served by pid {owner}, not by the pid "
-                f"{self.proc.pid} this suite launched")
-        self.mon = Monitor(port)
-        for _ in range(25):
-            if "(C:$" in self.mon.cmd("r"): break
-            time.sleep(0.3)
-        else:
-            raise RuntimeError("VICE monitor never became responsive")
+        try:
+            # -console: an automated suite must never open a window (it
+            # steals macOS keyboard focus the instant it maps).
+            args = [X64, "-console", "+saveres", "-pal", "+sound",
+                    "-remotemonitor",
+                    "-remotemonitoraddress", f"ip4://127.0.0.1:{port}",
+                    "-autostartprgmode", "1", "-autostart", str(prg)]
+            if warp: args.insert(1, "-warp")
+            squatter = port_owner(port)
+            if squatter is not None:
+                raise RuntimeError(
+                    f"port {port} is already served by pid {squatter}; refusing "
+                    f"to attach to a VICE this suite did not launch")
+            self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+            LAUNCHED_PIDS.append(self.proc.pid)
+            print(f"  [vice] launched pid {self.proc.pid} on port {port}")
+            time.sleep(4)
+            for _ in range(10):
+                owner = port_owner(port)
+                if owner == self.proc.pid:
+                    break
+                time.sleep(0.5)
+            else:
+                raise RuntimeError(
+                    f"port {port} is served by pid {owner}, not by the pid "
+                    f"{self.proc.pid} this suite launched")
+            self.mon = Monitor(port)
+            for _ in range(25):
+                if "(C:$" in self.mon.cmd("r"): break
+                time.sleep(0.3)
+            else:
+                raise RuntimeError("VICE monitor never became responsive")
+        except Exception:
+            self.close()
+            raise
     def close(self):
         if self.mon: self.mon.close(); self.mon = None
         if self.proc:
