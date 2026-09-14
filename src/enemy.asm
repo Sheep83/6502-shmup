@@ -1,73 +1,29 @@
 // ===========================================================================
-// enemy.asm — the first production enemy: the straight diver
+// enemy.asm — the enemy: its art, its lifecycle, its damage and its death
 // ===========================================================================
 // MAIN THREAD ONLY. Not one VIC register is written from this file, and the
 // word "slot" never appears in it in the hardware sense. An enemy knows its
 // logical position and its velocity; whether it is drawn, and through which
 // hardware sprite, is entirely the renderer's business.
 //
-// ---------------------------------------------------------------------------
-// WHAT THE OLD GAME ACTUALLY DID
-// ---------------------------------------------------------------------------
-// Read out of shooter_test/src/main.asm. The relevant pieces are the ingress
-// fragment table (5918), spawnEnemy (4860), moveEnemyPath (3055) and the art
-// and colour tables at 5561 and 5808.
+// One TYPE_ENEMY with many trajectories: an enemy's path is handed to it at
+// spawn by src/waves.asm and run by src/movement.asm, so a new flight pattern
+// never needs a new type. What lives here is what makes an enemy an ENEMY --
+// the art, the six HP, the hit flash, the death animation, the lifecycle
+// bounds and the pool discipline -- and none of it cares who created it.
 //
-//   THE SIMPLEST ENEMY IS A STRAIGHT DIVE. The first ingress fragment in the
-//   old table is ingressTopStraightShort:
+// AN ENEMY IS SCREEN-SPACE, deliberately. logY is a raster line, not a stage
+// row: the enemy never reads the scroller or worldProgress and does not move
+// with the terrain. The wave system asks worldProgress WHEN to spawn and then
+// hands the object a screen position and a vector; that is the whole coupling.
 //
-//       .byte 48,  0,  2     // duration 48 frames, vx 0, vy 2
-//
-//   "Straight dive from common top entry Y", in the old file's own words. Two
-//   pixels per frame downward, no horizontal component. That is the whole
-//   behaviour, and it is the one this slice migrates.
-//
-//   VELOCITIES ARE WHOLE PIXELS PER FRAME. There is no sub-pixel accumulator
-//   anywhere in the old movement code: moveEnemyPath adds OBJECT_VEL_Y to
-//   OBJECT_Y directly. Kept, because inventing a fractional representation here
-//   would silently change every speed the old content was authored against.
-//
-//   VELOCITY IS SUPPLIED AT SPAWN, NOT BAKED INTO THE TYPE. One TYPE_ENEMY,
-//   many trajectories. Kept exactly: the spawn table below carries (vx, vy) per
-//   entry, which is why a diagonal entry needs no new type.
-//
-//   REMOVAL IS A BOUNDS TEST. The old bullet path frees the moment Y passes the
-//   bottom of the screen (3040). Kept as the single despawn rule.
-//
-// DELIBERATELY NOT TAKEN:
-//   * the segmented ingress/manoeuvre/egress path machine, easeVelocityToward-
-//     Target, and the whole fragment table. That IS the wave system, and it is
-//     the next slice's subject rather than this one's.
-//   * OBJECT_HEALTH and the impact flash. Nothing can shoot an enemy yet: the
-//     Slice B shot event is still emitted every volley and still expires
-//     unconsumed, exactly as it did before this file existed.
-//   * the multicolour art path. This engine forces $d01c to zero -- every
-//     hardware sprite is hires -- so the old bitmap is converted at ASSEMBLY
-//     time, below, rather than at run time.
-//
-// ---------------------------------------------------------------------------
-// WORLD SEMANTICS: THIS ENEMY IS SCREEN-SPACE, AND THAT IS A DECISION
-// ---------------------------------------------------------------------------
-// logY is a raster line, not a stage row. The enemy does not read the scroller,
-// does not read worldProgress, and does not move with the terrain.
-//
-// That is what the old game did -- its enemies were screen-space objects with
-// velocities, and only the DECISION TO SPAWN came from wave state -- and it is
-// what keeps this compatible with the wave migration: a wave system asks
-// worldProgress when to spawn, then hands the object a screen position and a
-// vector. Nothing in this file has to change for that to work, which is the
-// test of whether the boundary was drawn in the right place.
-//
-// The scroll direction settled in Slice A' is why vy is POSITIVE. The terrain
-// moves down and the player flies up, so an enemy that approaches the player
-// comes from the top of the aperture and descends. See docs/ENGINE_CONTRACT.md
-// section 8a.
+// vy is POSITIVE for an approaching enemy because the terrain scrolls down and
+// the player flies up, so an attacker enters at the top of the aperture and
+// descends. See docs/ENGINE_CONTRACT.md section 8a.
 // ===========================================================================
 
-// --- the numbers, from shooter_test/src/main.asm:5921 and 991-994 ----------
-.const ENEMY_MAX_HP      = 6        // ENEMY_START_HEALTH, main.asm:995. TYPE
-                                   // data: every enemy of this type starts
-                                   // here, so no per-object maximum is stored
+.const ENEMY_MAX_HP      = 6        // TYPE data: every enemy starts here, so
+                                   // no per-object maximum is stored
 
 // The enemy bitmap goes in the last free 64-byte block of VIC bank 0, between
 // the player's art and the blank charset the aperture depends on.
@@ -78,32 +34,26 @@
 // ===========================================================================
 // LIFECYCLE BOUNDS — WHERE AN ENEMY MAY EXIST, NOT WHERE IT MAY BE SEEN
 // ===========================================================================
-// These are DERIVED from the aperture and the sprite's own size, because the
-// two are different questions and v1.1 answered them with one number.
+// WHERE AN ENEMY MAY EXIST IS A WIDER QUESTION THAN WHERE IT MAY BE SEEN, and
+// these bounds answer the first. They are DERIVED from the aperture and the
+// sprite's size, never borrowed from the renderer's admission band.
 //
 // THE ANCHOR. logY is the VIC sprite Y: the raster line of the sprite's TOP
-// row. A sprite therefore covers logY .. logY + SPRITE_HEIGHT - 1. logX is the
-// VIC sprite X, nine bits across logX/logXHi, and the sprite covers
-// logX .. logX + 23; the visible display window starts at sprite X 24 and ends
-// at 343.
+// row, so a sprite covers logY .. logY + SPRITE_HEIGHT - 1. logX is the VIC
+// sprite X, nine bits across logX/logXHi, covering logX .. logX + 23; the
+// visible display window runs from sprite X 24 to 343.
 //
 // THE APERTURE is rasters APERTURE_TOP_RASTER..APERTURE_BOT_RASTER (55..247),
 // the terrain playfield between the two raster splits.
 //
-// WHAT WENT WRONG IN v1.1. It despawned at 226 -- MAX_SPRITE_Y, the renderer's
-// ADMISSION ceiling -- and treated that as the edge of the world. But the
-// renderer's band is "the whole sprite is inside the aperture": it REJECTS a
-// sprite outside it rather than clipping it, so 226 is where an enemy stops
-// being DRAWN, not where it has left. Using it as the despawn line meant the
-// object died at the instant it went invisible, and the authored spawn lines
-// (56..132) put the other end of the same mistake well inside the playfield:
-// enemies materialised a third of the way down the screen instead of arriving
-// through an edge.
-//
-// SO THE LIFECYCLE IS NOW WIDER THAN THE VISIBILITY, on purpose. An enemy is
-// alive and moving for as long as any part of it could still matter, and the
-// renderer independently decides whether it can be drawn this frame. That
-// separation is what lets an enemy fly in from off-screen.
+// DO NOT COLLAPSE THE TWO. MAX_SPRITE_Y (226) is where an enemy stops being
+// DRAWN -- the builder's band means "the whole sprite is inside the aperture"
+// and rejects rather than clips. Despawning there would kill the object at the
+// instant it went invisible, and the mirror of that mistake at the top makes
+// enemies materialise a third of the way down the screen instead of arriving
+// through an edge. An enemy is alive and moving for as long as any part of it
+// could still matter; the renderer independently decides whether it can be
+// drawn this frame, and that separation is what lets one fly in off-screen.
 .const ENEMY_HIDDEN_Y = APERTURE_TOP_RASTER - SPRITE_HEIGHT   // 34
                                     // the LAST Y at which a sprite is still
                                     // entirely above the aperture. Spawn here
@@ -156,45 +106,16 @@
 // resolves constants strictly in import order.
 
 // ===========================================================================
-// THE SPAWN TABLE IS GONE, AND THAT IS THIS SLICE'S POINT
+// Art. Authored as multicolour, flattened to hires at ASSEMBLY time.
 // ===========================================================================
-// There used to be four spawn entries here, cycled on a 48-frame timer, and
-// the comment above them said exactly what they were: "This is NOT a wave
-// system and is not the seed of one. It exists so that the lifecycle runs
-// continuously on a normal boot." It did that job for three slices.
+// The engine forces $d01c to zero, so every hardware sprite is hires including
+// the mux slots. Each two-bit pair of the source becomes two lit pixels if it
+// named any of the three colours and two blank pixels if it was background.
 //
-// src/waves.asm is the wave system, and it took the whole job over rather
-// than wrapping it. A spawner still running underneath a director would be a
-// second author of the same screen, and the two would fight over a pool that
-// is already shared with hostile projectiles.
-//
-// WHAT MOVED, AND WHERE TO LOOK FOR IT:
-//
-//   the cadence            -> waveRunInstance's per-instance timer
-//   which enemy is next    -> wvIndex, per wave instance
-//   the spawn positions    -> the authored wave definitions in waves.asm
-//   the colours            -> the same, one per wave rather than per entry
-//   the velocities         -> the movement primitives in src/movement.asm
-//   "carry set = pool full" -> unchanged, and still the allocation contract
-//
-// WHAT DID NOT MOVE: everything below. The art, the six HP, the hit flash,
-// the death animation, the single vertical despawn rule and the pool
-// discipline are what make this an ENEMY, and none of them cares who decided
-// to create it. The player's hitscan, the turrets and the projectiles do not
-// know src/waves.asm exists.
-
-// ===========================================================================
-// Art. The old multicolour bitmap, flattened to hires at assembly time.
-// ===========================================================================
-// The engine forces $d01c to zero: every hardware sprite is hires, including
-// the mux slots. The old enemy was multicolour, so each two-bit pair becomes
-// two hires pixels if it was set to ANY of the three colours and two blank
-// pixels if it was background.
-//
-// That is a silhouette, not a recolour: the old art's internal shading is lost
-// and the shape is kept. It is the honest conversion for a one-layer sprite --
-// the player affords two layers because it owns two reserved hardware sprites,
-// and a mux enemy owns one.
+// That is a silhouette, not a recolour: the shading is lost and the shape is
+// kept. It is the honest conversion for a one-layer sprite -- the player
+// affords two layers because it owns two reserved hardware sprites, and a mux
+// enemy owns one.
 
 // One multicolour byte to one hires byte: every non-background pair lit.
 .function enemyHires(b) {
@@ -244,17 +165,13 @@ enemyBitmapEnd:
 .if (enemyBitmapEnd > BLANK_CHARSET) { .error "the enemy bitmap has run into the blank charset" }
 
 // ===========================================================================
-// State.
+// State. MAIN THREAD ONLY, three bytes in a hole below the player's state.
 // ===========================================================================
-// Moved out of $c5e0 in Slice D so the object pool's per-object arrays can grow
-// contiguously. Six bytes in the hole between the P5 ring's state and the
-// player's, rather than a second gap further up the page.
 * = $c517 "enemy state"
-// The spawn cursor and its timer left with the spawn table: src/waves.asm
-// owns when an enemy is created. What stays is the count of enemies that
-// reached the end of their own lives, which is this file's business and
-// nobody else's -- enemyDespawn is still the ONLY place a slot is released.
-enyDespawned:  .byte 0, 0               // 16-bit, saturating: total despawned
+enyDespawned:  .byte 0, 0               // 16-bit, saturating: total despawned.
+                                        // enemyDespawn is the ONLY place an
+                                        // enemy's slot is released, so this
+                                        // counts every enemy life that ended
 enyScratch:    .byte 0                  // enemyTick's one spare byte: the clip
                                         // arithmetic needs logY back after the
                                         // compare that classified it
@@ -264,7 +181,7 @@ enyStateEnd:
 * = $4900 "enemy code"
 
 // ---------------------------------------------------------------------------
-// enemyInit — no enemies, and the first spawn one period away.
+// enemyInit — clear the despawn tally. The pool itself is objectInit's job.
 // ---------------------------------------------------------------------------
 enemyInit:
     lda #0
@@ -278,9 +195,8 @@ enemyInit:
 // ---------------------------------------------------------------------------
 enemyTick:
     // ---- dying enemies run their death out and do not move ----------------
-    // "A dying enemy remains renderable but no longer follows its path"
-    // -- shooter_test/src/main.asm:2331. Kept: an explosion that keeps flying
-    // reads as a live enemy the player cannot kill.
+    // A dying enemy stays renderable but stops following its path: an explosion
+    // that keeps flying reads as a live enemy the player cannot kill.
     lda objHP,x
     bne !alive+
     jmp enemyDeathTick
@@ -293,12 +209,11 @@ enemyTick:
 !noFlash:
 
     // ---- WHERE IT IS THIS FRAME -------------------------------------------
-    // The whole of movement now lives in src/movement.asm: the enemy runs
-    // whichever primitive its wave handed it, at quarter-pixel resolution,
-    // and this file does not know or care whether that is a straight vector
-    // or a phase of an arc. Two enemies from two different waves can be at
-    // completely different points of completely different primitives in the
-    // same call to objectUpdateAll, which is the property the encounter
+    // All movement lives in src/movement.asm: the enemy runs whichever
+    // primitive its wave handed it, at quarter-pixel resolution, and this file
+    // does not know whether that is a straight vector or a phase of an arc.
+    // Two enemies from two waves can be at different points of different
+    // primitives in one call to objectUpdateAll -- the property the encounter
     // director is built on.
     jsr wmTick
 
@@ -310,17 +225,15 @@ enemyTick:
     // by a side border on its way out, is alive and moving and simply not
     // drawn this frame. See the lifecycle bounds at the top of this file.
     //
-    // TERMINATION still holds, and it is still proved rather than hoped:
-    // src/waves.asm flies every authored pattern at assembly time and rejects
-    // one that does not reach one of these three edges.
+    // TERMINATION IS PROVED, NOT HOPED: src/waves.asm flies every authored
+    // pattern at assembly time and rejects one that never reaches an edge.
     //
-    // THE SIDE TESTS ASK WHICH WAY THE ENEMY IS GOING, and they have to.
-    // Position alone cannot tell ARRIVING from LEAVING: the echelon sweep
-    // spawns at X=0 precisely so that it slides in through the left border,
-    // and a rule that freed anything behind that border would kill it on its
-    // first frame -- which is exactly what the first draft of this did. An
-    // enemy behind a border on its way IN is alive; the same enemy behind the
-    // same border on its way OUT is gone.
+    // THE SIDE TESTS ASK WHICH WAY THE ENEMY IS GOING, and they must. Position
+    // alone cannot tell ARRIVING from LEAVING: the echelon sweep spawns at X=0
+    // precisely so that it slides in through the left border, and a rule that
+    // freed anything behind a border would kill it on its first frame. An enemy
+    // behind a border on its way IN is alive; the same enemy behind the same
+    // border on its way OUT is gone.
     lda logXHi,x
     beq !checkLeft+
 
@@ -362,10 +275,9 @@ enemyTick:
 //
 // A count of SPRITE_HEIGHT or more means nothing of the sprite is inside the
 // aperture at all. Those are left at zero DELIBERATELY: logY is then outside
-// the production band, so the builder's existing admission test refuses the
-// entry, and a fully invisible enemy costs no scratch block, no mux slot and
-// no schedule entry -- while remaining perfectly alive. Culling is the rule
-// that was already there, not a new one.
+// the admission band, so the builder's ordinary Y test refuses the entry and a
+// fully invisible enemy costs no scratch block, no mux slot and no schedule
+// entry -- while remaining perfectly alive.
     lda logY,x
     cmp #MIN_SPRITE_Y
     bcc !above+
@@ -403,9 +315,8 @@ enemyTick:
 // ---------------------------------------------------------------------------
 // enemyFlashTick — one frame of the hit flash. Entry/exit: X = slot, preserved.
 //
-// The colour ladder is the old updateEnemyHitEffects (2770-2790) exactly: the
-// timer is decremented FIRST and the remaining value chooses the colour, so a
-// four-frame flash shows white, white, white, yellow and then restores.
+// The timer is decremented FIRST and the remaining value chooses the colour,
+// so a four-frame flash shows white, white, white, yellow and then restores.
 // ---------------------------------------------------------------------------
 enemyFlashTick:
     dec objTimer,x
@@ -429,20 +340,17 @@ enemyFlashTick:
 // enemyDeathTick — one frame of dying. Entry/exit: X = slot, preserved.
 //
 // Reached only with objHP zero. The timer runs DEATH_TIME frames and the slot
-// is freed on the frame it reaches zero -- which is the single place in the
-// game an enemy is released, so publication safety has one path to reason
-// about rather than two.
+// is freed on the frame it reaches zero -- routed through enemyDespawn, so an
+// enemy is released from exactly one place however it died.
 //
-// The old game swapped in three explosion bitmaps here. This slice keeps the
-// TIMING and the COLOUR PROGRESSION and leaves the art alone: migrating
-// playerExplosion1/2/3 is a graphics job, and the graphics slice is next. The
-// enemy therefore dies as a bounded yellow-orange-red flash of its own shape.
+// The explosion is a colour progression over the enemy's own shape rather than
+// a bitmap swap: a bounded yellow-orange-red flash, costing no extra art.
 // ---------------------------------------------------------------------------
 enemyDeathTick:
     dec objTimer,x
     beq !release+
 
-    lda objTimer,x                      // the old frame thresholds, 2733-2757
+    lda objTimer,x                      // three equal thirds of DEATH_TIME
     cmp #8
     bcs !blast1+
     cmp #4
@@ -460,24 +368,17 @@ enemyDeathTick:
     rts
 
 !release:
-    // The death animation is over. This is a NORMAL despawn: the same call, the
-    // same membership update, the same guarantee that CURRENT is not touched.
+    // The death animation is over. A NORMAL despawn: the same call, the same
+    // membership update, the same guarantee that CURRENT is not touched.
     jmp enemyDespawn
 
 // ---------------------------------------------------------------------------
 // enemyBaseColour — the colour a hit flash returns to.
 // Entry/exit: X = slot, preserved.
 //
-// This used to DERIVE the answer, searching the spawn table for the entry
-// whose velocity pair matched the object's -- one byte of table instead of
-// sixteen of state, which was a good trade while a velocity pair identified a
-// trajectory for life.
-//
-// It does not any more. An enemy's velocity now changes every few frames as
-// it turns, so by the time it is hit its velocity says nothing about where it
-// came from. The colour is therefore STORED, once, at spawn: src/waves.asm
-// writes wmBaseCol beside the movement state it is already writing, and the
-// derivation is gone rather than patched.
+// The colour is STORED at spawn, in wmBaseCol, rather than derived from the
+// enemy's velocity or wave: a composed path turns every few frames, so by the
+// time an enemy is hit nothing about its current motion identifies it.
 // ---------------------------------------------------------------------------
 enemyBaseColour:
     lda wmBaseCol,x

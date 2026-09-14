@@ -1,83 +1,57 @@
 // ===========================================================================
-// clip.asm — runtime vertical sprite clipping, into schedule-owned scratch
+// clip.asm — renders vertically clipped sprite bitmaps into scratch blocks
 // ===========================================================================
-// MAIN THREAD ONLY. Nothing here runs in an IRQ, and nothing here writes a VIC
-// register. It produces SPRITE BITMAP BYTES, and the only thing that ever
-// reads them is the VIC, through a pointer the schedule builder wrote.
+// MAIN THREAD ONLY. Writes no VIC register; it produces sprite bitmap bytes,
+// and the only reader is the VIC, through a pointer the schedule builder
+// published.
 //
-// ---------------------------------------------------------------------------
-// THE PROBLEM, AND WHY IT IS NOT THE RENDERER'S
-// ---------------------------------------------------------------------------
-// The vertical border is held open so the HUD can live above the playfield, so
-// the VIC clips NOTHING at the top and bottom aperture edges -- unlike the
-// left and right, where the closed horizontal border clips sprites in hardware
-// and always has. A gameplay sprite may therefore only be admitted when its
-// whole 21-row body fits inside MIN_SPRITE_Y..MAX_SPRITE_Y, and an enemy
-// crossing either vertical edge appears or vanishes whole.
+// WHY IT EXISTS. The vertical border is held open so the HUD can live above
+// the playfield, so the VIC clips nothing at the top and bottom aperture edges
+// -- unlike the left and right, where the closed horizontal border clips in
+// hardware. A gameplay sprite is therefore admitted only when its whole 21-row
+// body fits inside MIN_SPRITE_Y..MAX_SPRITE_Y. To let an enemy cross an edge
+// smoothly, its PHYSICAL Y is pinned at the boundary and its PIXELS are
+// shifted instead, so every visible row still lands on the raster the enemy's
+// true position demands. Logical Y is never touched: movement, collision,
+// paths, lifecycle and diagnostics all keep reading the truth.
 //
-// The fix is to keep the sprite's PHYSICAL Y inside that band and change its
-// PIXELS instead: hold the sprite at the boundary and feed it a bitmap whose
-// rows have been shifted so that every visible row lands on exactly the raster
-// the enemy's true position says it should. The enemy's logical Y is not
-// touched, so movement, collision, paths, lifecycle and diagnostics all go on
-// reading the truth.
+// THE SAFETY INVARIANT. A clipped sprite's bitmap is part of a frame's plan
+// exactly as its Y and slot are -- the VIC reads those 63 bytes for 21 rasters
+// long after the build finished. So the scratch pool is INDEXED BY schedNext,
+// the same byte the schedule buffers are. The builder may only write blocks in
+// the pool it owns; on the atomic swap the block travels with its schedule and
+// the main thread moves to the other pool. There is consequently no handover,
+// no raster-progress test and no safe-to-overwrite window, because the main
+// thread and the VIC are never looking at the same block.
 //
-// ---------------------------------------------------------------------------
-// WHY THE BITMAP IS SCHEDULE-OWNED STATE
-// ---------------------------------------------------------------------------
-// This is the whole safety argument and it is short.
-//
-// The renderer already double-buffers: the main thread builds schedNext while
-// the IRQ executes schedCurrent, and exFrame swaps them atomically. A clipped
-// sprite's bitmap is exactly as much a part of that frame's plan as its Y or
-// its slot -- the VIC will be reading those 63 bytes for 21 rasters, some time
-// after the build that produced them has finished.
-//
-// So the scratch pool is INDEXED BY schedNext, the same byte the schedule
-// buffers are indexed by. The pointer the builder stores in schedPtr names a
-// block in the pool the builder is allowed to write; when that schedule is
-// promoted to CURRENT, the block travels with it and the main thread moves on
-// to the OTHER pool. There is no handover, no raster-progress test and no
-// "safe to overwrite now" window, because there is never a moment when the
-// main thread and the VIC are looking at the same block.
-//
-// ---------------------------------------------------------------------------
-// POOL SIZE, AND THE STRUCTURAL CEILING ABOVE IT
-// ---------------------------------------------------------------------------
-// The builder caps clipped entries per edge at MUX_SLOTS, and it does so by
-// construction rather than by policy. Every top-clipped entry presents at
-// MIN_SPRITE_Y and every bottom-clipped one at MAX_SPRITE_Y, so within an edge
-// they are all at the SAME schedule Y: the first MUX_SLOTS accepted entries
-// fit with no slot to reuse, and the next one compares against the entry six
-// places back, finds a gap of zero, and is refused as unsafe. Six per edge,
-// and the two edges are geometrically disjoint -- so a legal schedule can ask
-// for TWELVE distinct clipped bitmaps.
-//
-// CLIP_POOL_SLOTS is SIX, not twelve, and that is a memory decision taken with
-// its consequence understood: twelve blocks double-buffered is 1536 bytes and
-// VIC bank 0 has 832 to give without relocating something major. Six covers
-// every population the authored content can currently produce -- peak enemy
-// count is seven, spread across the whole aperture -- and the overflow path is
-// explicit rather than silent: see clipPoolFull.
+// POOL SIZE. Per edge the builder caps clipped entries at MUX_SLOTS by
+// construction: every top-clipped entry presents at MIN_SPRITE_Y and every
+// bottom-clipped one at MAX_SPRITE_Y, so within an edge all share a schedule
+// Y -- the first MUX_SLOTS fit with no slot to reuse, and the next compares
+// against the entry six places back, finds a gap of zero and is refused as
+// unsafe. The two edges are disjoint, so a legal schedule can demand TWELVE
+// distinct bitmaps. CLIP_POOL_SLOTS is SIX: twelve double-buffered would cost
+// 1536 bytes and VIC bank 0 has 832 spare without moving something major. Six
+// covers every population the authored content produces, and overflow is
+// explicit rather than silent -- the entry is dropped and clipPoolFull counts
+// it.
 // ===========================================================================
 
 // --- the pool blocks --------------------------------------------------------
-// Twelve 64-byte blocks, VIC-visible, laid out as two pools of
-// CLIP_POOL_SLOTS. Flat index = page * CLIP_POOL_SLOTS + slot, so schedNext
-// selects a pool with one compare.
+// Twelve 64-byte VIC-visible blocks, two pools of CLIP_POOL_SLOTS. Flat index
+// = page * CLIP_POOL_SLOTS + slot, so schedNext selects a pool with one
+// compare.
 //
-// THREE OF THEM LIVE AT $0340. That is the tail of the cassette buffer and the
-// unused bytes above it, and this engine can have them because it banks the
-// KERNAL out and takes the hardware vector at $fffe directly (see exInstall) --
-// no tape, no RS232, and nothing in src/ references $0300..$03ff at all. They
-// are NOT emitted into the PRG: the file starts at $0801 and reaching down to
-// $0340 would drag screen page A and the stack into it. Every block is fully
-// written before it is ever pointed at, so there is nothing to initialise.
+// Three live at $0340, the cassette buffer's tail: this engine banks the
+// KERNAL out and takes the hardware vector at $fffe directly (see exInstall),
+// so there is no tape or RS232 to collide with and nothing else in src/
+// touches $0300-$03ff. They are NOT emitted into the PRG -- the file starts at
+// $0801 and reaching down would drag screen page A and the stack in -- and
+// they need no initialising because every block is written in full before it
+// is ever pointed at.
 //
-// The other nine sit in gaps the map already had: four in the raster
-// executor's headroom, one above the enemy bitmap, four above the projectile.
-// Those ARE emitted, so the assembler maps them and a future segment that
-// grows into one is a build error rather than a corrupted sprite.
+// The other nine sit in existing gaps and ARE emitted, so the assembler maps
+// them and a segment growing into one is a build error, not a corrupt sprite.
 .var clipBlocks = List()
     .eval clipBlocks.add($0340, $0380, $03c0, $3100, $3140, $3180)   // pool 0
     .eval clipBlocks.add($31c0, $3680, $3700, $3740, $3780, $37c0)   // pool 1
@@ -97,11 +71,10 @@
 // ===========================================================================
 // State. MAIN THREAD ONLY.
 // ===========================================================================
-// logClip goes in the forty bytes between the sorter's state and the motion
-// block. It is indexed by LOGICAL ID, not by pool slot, because that is what
-// the builder has in hand -- and it must therefore be MAX_LOGICAL long, so
-// that a qualification fixture driving a logical sprite the pool never issues
-// still reads a defined zero.
+// logClip sits directly above the sorter's state, in the forty bytes below the
+// $c400 ceiling. It is indexed by LOGICAL ID, not by pool slot, because that is
+// what the builder has in hand; it is therefore MAX_LOGICAL long, so every
+// logical sprite reads a defined value whether or not it is ever clipped.
 * = $c3d8 "clip state"
 
 // Per logical sprite: 0 = present normally. Otherwise the number of rows the
@@ -112,7 +85,7 @@
 logClip:    .fill MAX_LOGICAL, 0
 
 clipStateEnd:
-.if (clipStateEnd > $c400) { .error "the clip state has grown into the motion state at $c400" }
+.if (clipStateEnd > $c400) { .error "the clip state has grown past its $c400 ceiling" }
 
 // ===========================================================================
 * = $8000 "clip"

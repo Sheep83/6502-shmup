@@ -1,9 +1,8 @@
 // ===========================================================================
-// scroll.asm — P1 deterministic vertical scroller
+// scroll.asm — the vertical scroller: fine scroll, coarse step, page flip
 // ===========================================================================
-// The smallest scroller that genuinely exercises C64 vertical scrolling:
-// every fine-scroll phase, a coarse row step, and a real screen-page flip.
-// It is a diagnostic surface, not artwork.
+// MAIN THREAD ONLY. It decides what the next frame looks like and regenerates
+// the back screen page; the raster executor writes the registers.
 //
 // SHAPE
 //   main thread          decides the NEXT frame and writes a frame record
@@ -21,11 +20,9 @@
 // GEOMETRY AND DIRECTION
 //
 // THE PLAYFIELD SCROLLS DOWNWARD. The player flies UP through the stage, the
-// terrain moves DOWN past them, and new terrain enters at the TOP. That is the
-// original game's forward-play direction (c64Shooter's SCROLL_FINE counts up
-// and its SCROLL_ROW counts down; see reports/migration-slice-a-prime-scroll-
-// direction.md §1), and every piece of authored content -- wave trigger rows,
-// turret rows, the editor's top-to-bottom row order -- is written against it.
+// terrain moves DOWN past them, and new terrain enters at the TOP. Every piece
+// of authored content -- wave trigger rows, turret rows, the editor's
+// top-to-bottom row order -- is written against that direction.
 //
 // Page P displays stage rows [stageTopRow .. stageTopRow+24], one row per
 // matrix row, top to bottom. The fine scroll counts UP 0..7, moving the
@@ -56,10 +53,9 @@
 //     stageTopRow == (STAGE_START_ROW - worldProgress) mod STAGE_ROWS
 //
 // Keeping both costs ten instructions once every eight frames and means no
-// future subsystem has to encode "forward means subtract" -- which is the
-// mistake that would otherwise be copied into waves, turrets, triggers and
-// stage completion one at a time. tests/test_slice_a_prime.py checks the
-// invariant on the running machine rather than trusting it.
+// other subsystem has to encode "forward means subtract" -- a mistake that
+// would otherwise be copied into waves, turrets, triggers and stage completion
+// one at a time.
 //
 // WHY THE BACK PAGE IS REGENERATED, NOT COPIED
 // Every row is written from its own world row number, so a stale row, a
@@ -68,22 +64,15 @@
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// THE STAGE. Placeholder values until a level package owns them (Slice H).
+// THE STAGE, DERIVED FROM THE LEVEL rather than restated here.
+// src/level1/stage_config.asm authors STAGE_METATILE_ROWS and the metatiles are
+// four character rows tall; the guard in src/terrain.asm fails the build if a
+// future level disagrees with the scroller that walks it.
 //
-// 420 rows is level1's real height -- 105 metatile rows of 4 -- chosen over a
-// convenient power of two so the 16-bit row arithmetic and the modulo wrap are
-// genuinely exercised rather than degenerating into a byte.
-//
-// START AT THE BOTTOM OF THE MAP. The editor stores rows top-to-bottom in
+// PLAY STARTS AT THE BOTTOM OF THE MAP. The editor stores rows top-to-bottom in
 // visual order and the authored BOTTOM is the beginning of play, so the first
-// page shows the last 25 rows, [STAGE_ROWS-25 .. STAGE_ROWS-1], with no wrap in
-// it. stageTopRow then walks down to 0 over the whole stage.
-// DERIVED FROM THE LEVEL, not restated. src/level1/stage_config.asm authors
-// STAGE_METATILE_ROWS = 105 and the metatiles are four rows tall, so the stage
-// is 420 character rows -- which is exactly the number this scroller has been
-// walking since Slice A' chose it as a placeholder height. That it matches is
-// luck; that it is now DERIVED is not, and the guard in src/terrain.asm fails
-// the build if a future level disagrees with the scroller that walks it.
+// page shows the last SCREEN_ROWS rows with no wrap in it and stageTopRow then
+// walks down to 0 over the whole stage.
 .const STAGE_ROWS      = TERRAIN_STAGE_ROWS
 .const STAGE_START_ROW = STAGE_ROWS - SCREEN_ROWS
 
@@ -91,60 +80,14 @@
 .if (STAGE_START_ROW < 0)          { .error "STAGE_START_ROW is negative" }
 
 
-.const ROWS_PER_TICK = 4                // 25 rows over the 8 frames between
-                                        // coarse steps, with margin. Spread on
-                                        // purpose: a single 25-row burst is
-                                        // ~12,000 cycles of the 19,656 in a
-                                        // frame, which leaves no room for
-                                        // anything else the main thread grows.
-                                        //
-                                        // STILL FIVE. P3 flagged this as spare
-                                        // headroom -- 25/8 = 3.125 rows a frame,
-                                        // so four would do -- and said not to
-                                        // spend it without evidence.
-                                        //
-                                        // P4 thought it had evidence: adding the
-                                        // sorter produced publication skips. Four
-                                        // rows was applied and the scroller
-                                        // requalified. Then the evidence fell
-                                        // apart twice over. Most of the skips
-                                        // were the TEST HARNESS hijacking the PC
-                                        // mid-frame to select a fixture; on a
-                                        // fresh machine left to run, the
-                                        // 12-sprite crossing fixture does 20,000+
-                                        // frames clean at FIVE rows. And the one
-                                        // fixture that really did fault -- 26
-                                        // sprites re-sorted and rebuilt every
-                                        // frame -- faulted at four rows too
-                                        // (62 skips in 19,601 frames), because
-                                        // its problem is main-thread cost, not
-                                        // back-page regeneration.
-                                        //
-                                        // So the lever was reverted. The headroom
-                                        // is real and still available; P4 simply
-                                        // has no measurement that needs it, and a
-                                        // qualified scroller is not worth
-                                        // changing on evidence that dissolved.
-                                        //
-                                        // NOW FOUR, AND THIS TIME THE EVIDENCE IS
-                                        // A MEASUREMENT. The terrain slice replaced
-                                        // the diagnostic pattern with real metatile
-                                        // decoding: a row went from roughly 800
-                                        // cycles to 1,158, so a five-row frame went
-                                        // from ~4,000 to ~6,285. That is not a
-                                        // burst -- it is still spread -- but it is
-                                        // a 50% higher PEAK, and the peak is what
-                                        // collides with a dense sprite frame.
-                                        //
-                                        // Four rows a frame finishes 25 rows in
-                                        // seven of the eight frames between coarse
-                                        // steps, one frame of margin instead of
-                                        // three, and drops the peak to ~4,630 --
-                                        // back to roughly what the placeholder
-                                        // cost. scrollLate is the counter that
-                                        // says whether the margin is enough, and
-                                        // it is measured at zero over free runs
-                                        // with enemies live and the gun firing.
+// Back-page regeneration is SPREAD, not burst: 25 rows in one go would be
+// ~12,000 cycles of the 19,656 in a frame, leaving nothing for anything else
+// the main thread does. Four rows a frame finishes 25 rows in seven of the
+// eight frames between coarse steps -- one frame of margin -- at a peak of
+// ~4,630 cycles. A row of real metatile decoding costs about 1,158 cycles, so
+// raising this raises the PEAK, and the peak is what collides with a dense
+// sprite frame. scrollLate is the counter that says whether the margin holds.
+.const ROWS_PER_TICK = 4
 
 // ---------------------------------------------------------------------------
 // ONE FRAME IN EIGHT IS IDLE HERE, AND SOMETHING ELSE NOW RELIES ON IT.
@@ -156,12 +99,11 @@
 // the one on which scrollFine reads 7.
 //
 // src/turrets.asm derives the NEXT coarse step's page geometry on exactly that
-// frame (TURRET_PREPARE_FINE), which is what keeps the derivation off the frame
-// where this routine restarts the page -- measured as the difference between
-// eight well-separated enemies being sustainable and not. If ROWS_PER_TICK ever
-// drops far enough that regeneration fills all eight frames, that quiet frame
-// is gone and the turret preparation has nowhere to go, so this is a build
-// error rather than a silent performance regression.
+// frame (TURRET_PREPARE_FINE), which keeps that work off the frame where this
+// routine restarts the page. If ROWS_PER_TICK ever drops far enough that
+// regeneration fills all eight frames, the quiet frame is gone and the turret
+// preparation has nowhere to go -- a build error here rather than a silent
+// performance regression there.
 .if (floor((SCREEN_ROWS + ROWS_PER_TICK - 1) / ROWS_PER_TICK) >= 8) {
     .error "regeneration now fills every frame: TURRET_PREPARE_FINE has no idle frame to run on"
 }
@@ -173,12 +115,8 @@
 // Scroll state. MAIN THREAD ONLY, and OUTSIDE VIC BANK 0 with everything else
 // the main thread owns.
 // ===========================================================================
-// It used to live at the head of the $1a00 code segment, which made it the one
-// module state still competing for bank-0 space -- the schedule, the logical
-// sprites, the sorter, the motion tables, the HUD and the player all keep
-// theirs at $c000 and above. Moving it is what bought the room this slice's
-// sixteen-bit row arithmetic needed, and it should have been here anyway: the
-// VIC never reads a byte of it.
+// The VIC never reads a byte of it, so it lives above $c000 with the schedule,
+// the logical sprites, the sorter, the HUD's state and the player's.
 * = $c540 "scroll state"
 
 
@@ -223,27 +161,24 @@ scrollLate:   .byte 0                   // coarse step arrived with the back
 publishSkip:  .byte 0                   // publication found the previous one
                                         // still unadopted: a real fault
 
-// --- P2 pinned fine phase: a DIAGNOSTIC MODE, not a second scroller --------
-// For automated qualification only. With pinFine non-zero the fine scroll is
-// HELD at pinFineValue instead of counting down, so the same sprite geometry
-// can be measured against each of the eight badline alignments in turn.
+// --- pinned fine phase: a DIAGNOSTIC MODE, not a second scroller -----------
+// With pinFine non-zero the fine scroll is HELD at pinFineValue instead of
+// advancing, so the same sprite geometry can be measured against each of the
+// eight badline alignments in turn.
 //
 // Holding the phase necessarily suspends the coarse step and the page flip:
-// they ARE the fine-scroll wrap (see GEOMETRY above), so there is nothing left
-// to trigger them. That is the whole reason natural scrolling has to be
-// restored and the geometry re-proven across real coarse steps and page flips
-// before any phase result is believed.
+// they ARE the fine-scroll wrap (see GEOMETRY above), so nothing is left to
+// trigger them. Any result obtained under a pinned phase therefore has to be
+// re-proven under natural scrolling across real coarse steps and page flips.
 //
-// Nothing else changes. publishFrame still builds and hands over the frame
-// record exactly as it always does, so $d011 carries the pinned phase through
-// the ordinary published channel and the executor cannot tell the difference.
-// A test therefore verifies the phase from $d011 on the running machine, never
-// from this variable.
+// Nothing else changes: publishFrame still builds and hands over the frame
+// record as always, so $d011 carries the pinned phase through the ordinary
+// published channel and the executor cannot tell the difference.
 pinFine:      .byte 0                   // 0 = natural scrolling, 1 = held
 pinFineValue: .byte 0                   // the YSCROLL to hold, 0..7
 
 scrollStateEnd:
-.if (scrollStateEnd > $c600) { .error "the scroll state has grown into the P3 fixture data at $c600" }
+.if (scrollStateEnd > $c600) { .error "the scroll state has grown past its $c600 ceiling" }
 
 // ===========================================================================
 // Code. MAIN THREAD ONLY -- the executor never calls one routine in this file
@@ -331,29 +266,20 @@ regenAll:
 // $ffff as a special case and the first cannot go wrong: the value is only ever
 // zero or positive on entry, and the fold happens before any arithmetic.
 //
-// A STAGE THAT WRAPS IS THE DEMONSTRATION STAGE'S BEHAVIOUR, NOT THE GAME'S.
+// END OF STAGE IS NOT DECIDED HERE. At stage row 0 the window steps back to
+// STAGE_ROWS-1 and the stage plays again from its authored bottom; for 25
+// coarse steps either side of that the displayed window straddles the join, so
+// the map's top rows sit above its bottom rows and there is a content seam.
 //
-// END OF STAGE, and what is deliberately NOT decided yet.
-//
-// At stage row 0 the window steps back to STAGE_ROWS-1 and the stage plays
-// again from its authored bottom. For 25 coarse steps either side of that the
-// displayed window straddles the join, so the map's top rows sit above its
-// bottom rows and there is a content seam. The original game did exactly this
-// and called it looping back to the start (c64Shooter's prepareBackgroundCoarse
-// wraps SCROLL_ROW and re-arms the authored wave triggers and turret stream at
-// the same moment), so the behaviour is inherited rather than invented.
-//
-// It is a DEMONSTRATION STAGE'S behaviour. A finite stage ends by comparing
-// worldProgress -- which never wraps -- against the stage length, and that is a
-// game-state decision, not a scroller one: something has to decide what a
-// finished stage DOES. stageLoops is here so the wrap is observable rather than
-// invisible while that decision is still open, and so a test can assert the
-// wrap happened exactly when the row arithmetic says it should.
+// That is a looping DEMONSTRATION stage's behaviour. A finite stage ends by
+// comparing worldProgress -- which never wraps -- against the stage length, and
+// what a finished stage DOES is a game-state decision, not a scroller one.
+// stageLoops exists so the wrap is observable rather than invisible while that
+// decision is open.
 //
 // What must NOT happen is an unsigned underflow quietly becoming the contract.
-// It cannot here: the fold below is explicit, the value is reduced on every
-// path, and tests/test_slice_a_prime.py checks the modulo relationship between
-// the two counters on every frame of a trace.
+// It cannot here: the fold below is explicit and the value is reduced on every
+// path.
 rowBack:
     lda rbLo
     ora rbHi
@@ -377,7 +303,7 @@ rowBack:
 // the frame record the NEXT frame IRQ will adopt.
 // ===========================================================================
 scrollTick:
-    lda pinFine                         // P2 diagnostic mode: hold the phase
+    lda pinFine                         // diagnostic mode: hold the phase
     beq !natural+
     lda pinFineValue
     and #7
@@ -459,12 +385,12 @@ scrollTick:
     // was regenerated with exactly that value during the last cycle. Stamp it
     // now, while that is a statement about content rather than intent.
     //
-    // NOT the back page, which was the first attempt. pageTopRow[back] would
-    // then be the row the page is ABOUT to be regenerated with, and for the one
-    // frame between the software flip and the IRQ adopting it at raster 250 the
-    // still-displayed page carried a stamp two coarse steps ahead of its own
-    // content. The invariant that matters is the narrow one: pageTopRow[p] is
-    // correct whenever p is the page being displayed.
+    // STAMP THE DISPLAYED PAGE, NEVER THE BACK ONE. pageTopRow[back] would be
+    // the row that page is ABOUT to be regenerated with, so for the one frame
+    // between the software flip and the IRQ adopting it at raster 250 the
+    // still-displayed page would carry a stamp two coarse steps ahead of its
+    // own content. The invariant is the narrow one: pageTopRow[p] is correct
+    // whenever p is the page being displayed.
     ldx dispPage
     lda stageTopRowLo
     sta pageTopRowLo,x
@@ -495,19 +421,15 @@ scrollPublish:
     inc finePhase + 1,x
 !counted:
 scrollPublishFallsInto:
-    // FALL THROUGH INTO publishFrame. There is no jsr and no jmp here, and the
-    // assertion after publishFrame's body is what makes that safe to rely on.
+    // FALL THROUGH INTO publishFrame. There is no jsr and no jmp here: the
+    // adjacency IS the call, and the assertion after publishFrame's body is
+    // what keeps it true.
     //
-    // This slice broke it. rowBack was written into the gap between these two
-    // routines, so scrollPublish fell into rowBack instead, publishFrame was
-    // never called again after scrollInit, and the frame record froze at the
-    // boot value. Everything downstream still looked alive -- the fine scroll
-    // counter cycled, finePhase filled evenly, coarse steps counted, stage rows
-    // advanced, the back page regenerated -- because all of that is main-thread
-    // bookkeeping. The only thing that stopped was the one byte that carries it
-    // to the screen, and the screen simply held still.
-    //
-    // An invisible adjacency was doing real work. Now it is stated.
+    // ANYTHING INSERTED BETWEEN THESE TWO LABELS BREAKS THE SCREEN SILENTLY.
+    // publishFrame would stop being reached while every main-thread counter --
+    // the fine phase, the coarse steps, the stage rows, the back page -- went
+    // on looking perfectly healthy. The only thing that stops is the one byte
+    // that carries the frame to the display, and the picture simply holds still.
 
 // ===========================================================================
 // publishFrame — write the NEXT frame record and hand it over with one byte.
@@ -593,43 +515,25 @@ renderRow:
     adc regenPageHi
     sta scrPtr + 1
 
-    // EVERY ROW IS TERRAIN NOW.
+    // EVERY ROW IS TERRAIN, INCLUDING 0 AND 24.
     //
-    // Rows 0 and 24 used to be forced blank by renderGuardRow to hide the
-    // coarse seam, and rows 1, 2 and 20-23 used to be reserved for the
-    // diagnostic HUD. Both reservations are gone: the aperture is clipped by
-    // the blank character set at fixed rasters 55 and 248 (see BLANK_CHARSET
-    // in main.asm), so the slack rows carry ordinary world content and are
-    // simply revealed one pixel at a time. There is deliberately no second
-    // masking mechanism left anywhere -- if a row looks blank on screen it is
-    // because the charset clipped it, and for no other reason.
+    // Neither the coarse seam nor the diagnostic rows are masked by blanking
+    // content: the aperture is clipped by the blank character set at fixed
+    // rasters 55 and 248 (see BLANK_CHARSET in main.asm), so the slack rows
+    // carry ordinary world content and are revealed one pixel at a time. There
+    // is deliberately no second masking mechanism anywhere -- if a row looks
+    // blank on screen it is because the charset clipped it, and for no other
+    // reason.
     jmp renderBackgroundRow
 
 // ---------------------------------------------------------------------------
-// renderBackgroundRow — the diagnostic pattern for one stage row.
+// renderBackgroundRow — one screen row of the back page, from its stage row.
 //
-//   cols 0-1   stage row number, low byte, in hex   <- row identity
-//   cols 2-4   space
-//
-// COLUMN 3 USED TO BE THE PAGE LETTER, 'A' or 'B', and it is gone from the
-// screen. Every row carries it, so at every page flip all 23 visible rows
-// changed one character at once -- a whole column blinking 6.25 times a second,
-// in the middle of the picture a human is being asked to judge for smoothness.
-// The A/B forensic measured it as 88 of the 96 lines that differ across a
-// flip: the largest single visual event on screen, and pure scaffolding.
-//
-// The observability is not lost, it is moved off the display: pageTopRow
-// records the stage row each page's row 0 was regenerated with, which is a
-// STRONGER statement than the letter ever was. The letter said only "these
-// rows came from the same pass"; pageTopRow lets a test predict the exact
-// stage row of every row of the displayed page and check all 25.
-//   cols 5-39  solid bar every 4th stage row, blank otherwise
-//   col  6+(W and 31)   a '*' marker, so each row is distinguishable even
-//                       inside a run of blank rows
-//
-// A duplicated row, a stale row, a skipped row or a torn page flip all show up
-// immediately: the hex column must count by one, every row on screen must
-// carry the SAME page letter, and the marker must walk a clean diagonal.
+// Nothing about the row's IDENTITY is drawn into it. pageTopRow records the
+// stage row each page's row 0 was regenerated with, which is a stronger
+// statement than any on-screen marker: it lets the exact stage row of all 25
+// rows of a page be predicted and checked, off the display, where it cannot
+// blink at whoever is judging the picture for smoothness.
 // ---------------------------------------------------------------------------
 renderBackgroundRow:
     // rrStage = (regenTopRow + regenRow) mod STAGE_ROWS, sixteen bits.
@@ -667,51 +571,34 @@ renderBackgroundRow:
     // from the metatile map; nothing about the schedule that got us here has
     // changed, and this routine still writes exactly one row per call.
     //
-    // The diagnostic pattern that used to live here -- a solid bar every
-    // fourth row, a walking '*' and the row number in hex -- is gone rather
-    // than disabled. It existed to make the scroll direction and the coarse
-    // cadence visible before there was any real content to judge them by, and
-    // Slice A' qualified both. pageTopRow still reports the same information
-    // off-screen for the tests that want it.
-    //
     // THEN THE TURRET OVERLAY, ON THE SAME ROW, BEFORE THE PAGE IS PUBLISHED.
-    // The old game's static background-character turrets are composed HERE,
-    // during hidden-page generation, rather than poked into the visible screen
-    // from gameplay code later: a page is then coherent the moment it flips,
-    // and "base terrain + turret overlay = generated page" is a statement
-    // about how the page was built rather than a convention to be maintained.
-    // The authored terrain underneath is never modified. See src/turrets.asm
-    // for the restoration contract that rests on exactly that.
+    // Turrets are background characters and are composed HERE, during
+    // hidden-page generation, rather than poked into the visible screen from
+    // gameplay code later: a page is then coherent the moment it flips, and
+    // "base terrain + turret overlay = generated page" is a statement about how
+    // the page was built rather than a convention to be maintained. The
+    // authored terrain underneath is never modified -- see src/turrets.asm for
+    // the restoration contract that rests on exactly that.
     jsr renderTerrainRow
     jmp turretOverlayRow
 
 
 // --- the playfield aperture -------------------------------------------------
 //
-// There is no code here any more, and that is the point.
+// NO ROW IS MASKED HERE, deliberately. Hiding the coarse seam by blanking
+// matrix rows 0 and 24 would put the visible top edge at raster 56 + YSCROLL,
+// so it would climb seven pixels over seven frames and snap back a character
+// row on the coarse step -- a 6.25 Hz pop along the top of the playfield.
 //
-// The aperture used to be a CONTENT mask: renderGuardRow filled matrix rows 0
-// and 24 with spaces. It did hide the coarse seam, and it was measured to do
-// so -- but it moved the visible top edge to raster 56 + YSCROLL, so the edge
-// climbed seven pixels over seven frames and then jumped back a whole
-// character row when the world stepped. That 6.25 Hz pop is the artefact the
-// MAXCAP A/B forensic isolated (reports/maxcap-top-sprite-band-glitch-ab.md):
-// 88 of its 96 differing lines were the page letter below, and the remaining
-// 7-8 were exactly this, at rasters 56..63.
-//
-// Clipping is now the VIC's own g-access, through a blank character set
+// Clipping is the VIC's own g-access instead, through a blank character set
 // selected at fixed rasters 55 and 248. The boundary cannot move, because it
 // is a raster and not a row.
 
 // ---------------------------------------------------------------------------
-// SEGMENT GROWTH GUARD.
-//
-// KickAssembler places explicit `* =` segments exactly where told and does not
-// complain when one grows into the next -- it simply overwrites, silently, and
-// the failure looks like corrupted code rather than a build error. The P5
-// forensic measured only FIVE bytes of headroom when this module sat at $1a00;
-// this slice went through that headroom and the guard is what said so, which is
-// the whole reason it is written down rather than left to luck.
+// SEGMENT GROWTH GUARD. KickAssembler places explicit `* =` segments exactly
+// where told and does not complain when one grows into the next -- it simply
+// overwrites, and the failure looks like corrupted code rather than a build
+// error.
 // ---------------------------------------------------------------------------
 .if (* > $4600) {
     .error "the scroller has outgrown its $4200 segment"

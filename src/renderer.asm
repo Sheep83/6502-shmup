@@ -1,5 +1,5 @@
 // ===========================================================================
-// renderer.asm — P0 sprite multiplexer
+// renderer.asm — the sprite multiplexer and the raster executor
 // ===========================================================================
 // THE ONE SUBSYSTEM THAT OWNS GAMEPLAY SPRITE VIC STATE.
 //
@@ -7,26 +7,26 @@
 // the sprite pointer table during the display. That is the whole point.
 //
 // Shape:
-//     logical sprites (pre-sorted by Y in P0)
+//     logical sprites, ordered by Y by sortTick
 //         -> buildSchedule (main thread)  writes the NEXT buffer
 //         -> publishSchedule              sets a one-byte pending flag
 //         -> frame IRQ swaps CURRENT      once, at a frame boundary
 //         -> executor consumes CURRENT    immutable for the whole frame
 //
-// The architectural test: if the main thread stopped dead immediately after
+// THE ARCHITECTURAL TEST: if the main thread stopped dead immediately after
 // publishSchedule, the executor would still render the whole frame correctly.
 // It reads nothing but the CURRENT schedule.
 //
-// P1 adds a SECOND published record with the same shape and the same handover
-// rule — the frame record: fine scroll, $d018, the sprite-pointer-table
-// destination and the page id. Both records are adopted at ONE point, exFrame,
-// in the lower border. After that the executor is still reading nothing but
-// immutable per-frame state; it never asks the scroller which page is live.
+// A SECOND PUBLISHED RECORD has the same shape and the same handover rule --
+// the frame record: fine scroll, $d018, the sprite-pointer-table destination
+// and the page id. Both records are adopted at ONE point, exFrame, in the
+// lower border, after which the executor is still reading nothing but
+// immutable per-frame state and never asks the scroller which page is live.
 // ===========================================================================
 
 // --- physical sprite pool ---------------------------------------------------
-// Hardware sprites 0 and 1 are RESERVED (player base + overlay in the eventual
-// game) and are simply disabled in P0. The gameplay mux pool is 2..7.
+// Hardware sprites 0 and 1 are RESERVED for the player's two co-located layers
+// and never enter the mux. The gameplay mux pool is 2..7.
 .const MUX_FIRST_SLOT = 2
 .const MUX_SLOTS      = 6
 .const MUX_LAST_SLOT  = MUX_FIRST_SLOT + MUX_SLOTS - 1     // 7
@@ -34,10 +34,10 @@
 // --- what the player's two reserved slots require of everybody else ---------
 // HW0/HW1 are programmed once per frame by exHud and then left alone, so the
 // MODE registers the other phases write must leave the player's bits in the
-// state it needs. They already do -- every one of the values below has bits 0
-// and 1 clear -- but that is currently true by accident of what the HUD wanted,
-// and a future HUD that X-expanded its lives counter differently, or put its
-// sprites in front of the playfield, would silently take the player with it.
+// state it needs. They do -- every value below has bits 0 and 1 clear -- but
+// only because of what the HUD happens to want, and a HUD that X-expanded its
+// lives counter differently, or put its sprites in front of the playfield,
+// would silently take the player with it.
 //
 // So it is asserted rather than relied upon. What the player needs:
 //   $d017 = 0 in bits 0/1   no Y expand      (both phases write $00 outright)
@@ -65,22 +65,17 @@
 //     Y_i - REUSE_LEAD  >=  Y_(i-6) + SPRITE_HEIGHT
 //     Y_i - Y_(i-6)     >=  SPRITE_HEIGHT + REUSE_LEAD  =  MIN_REUSE_GAP
 //
-// REUSE_LEAD is MEASURED, not assumed. tests/test_p0.py traces the executor and
-// reports its real cost; the first draft of this file guessed 3 lines and the
-// test rejected it. Measured on the P0 fixtures:
+// REUSE_LEAD IS MEASURED, NOT COUNTED FROM A LISTING. The executor itself is
+// only ~90 cycles of 6502; the rest is VIC cycle theft -- badline plus sprite
+// DMA on a line with six sprites active -- so the real cost is:
 //
 //     single-entry mid-screen batch   277 cycles   (4.4 raster lines)
 //     six-entry batch                 666 cycles  (10.6 raster lines)
 //
-// The executor itself is ~90 cycles of 6502; the rest is VIC cycle theft
-// (badline plus sprite DMA on a line with six sprites active). That is exactly
-// why this number has to be measured on hardware timing rather than counted
-// from a listing.
-//
-// The builder may merge up to MUX_SLOTS entries into one batch (it happens when
-// several accepted sprites share a Y), so the lead must cover the SIX-entry
-// case even though the P0 fixtures only produce one-entry batches mid-screen.
-// 12 lines = 756 cycles gives 666 plus ~90 cycles of headroom.
+// The builder may merge up to MUX_SLOTS entries into one batch when several
+// accepted sprites share a Y, so the lead must cover the SIX-entry case even
+// though most batches are far smaller. 12 lines = 756 cycles gives 666 plus
+// ~90 cycles of headroom.
 //
 // NOTE this is deliberately NOT "21 is a magic number". 21 is the hardware
 // sprite height; REUSE_LEAD is OUR safety margin and is the only tunable here.
@@ -119,19 +114,17 @@
 // its DMA is fetched in cycles 57..62 of the PREVIOUS line rather than 0..9 of
 // its own, so the bottom split's margin is a different calculation, and
 // MIN_REUSE_GAP does not apply to it at all. src/player.asm deliberately does
-// NOT take that room, because this slice has no measurement that would justify
-// it. Asserted here, where both pairs are visible, so the day somebody widens
-// one they are told to widen or re-derive the other.
+// NOT take that room without the measurement that would justify it. Asserted
+// here, where both pairs are visible, so the day somebody widens one they are
+// told to widen or re-derive the other.
 .if (PLAYER_MIN_Y != MIN_SPRITE_Y) { .error "the player's Y floor no longer matches the mux admission floor" }
 .if (PLAYER_MAX_Y != MAX_SPRITE_Y) { .error "the player's Y ceiling no longer matches the mux admission ceiling" }
 
 // --- capacities -------------------------------------------------------------
-// MAX_LOGICAL is deliberately LARGER than MAX_SCHED. P2 left the builder
-// silently stopping at the schedule cap, and noted that as something to fix
-// before moving geometry could change accepted counts. A cap that cannot be
+// MAX_LOGICAL IS DELIBERATELY LARGER THAN MAX_SCHED. A cap that cannot be
 // exceeded cannot be tested, so the logical input pool is bigger than the
-// schedule it feeds: a fixture can now offer more sprites than the schedule can
-// hold, and the overflow path is exercised rather than argued about.
+// schedule it feeds: more sprites can be offered than the schedule can hold,
+// and the overflow path is exercised rather than argued about.
 //
 // MAX_SCHED is NOT raised to avoid the fault. See statOverflow.
 .const MAX_LOGICAL = 32
@@ -187,15 +180,13 @@
 //     handoff is the one phase in the frame guaranteed to run at full speed;
 //   * it leaves twelve lines before TOP_ARM_LINE and fifteen before the first
 //     legal sprite Y, against a six-entry batch 0 costing about five.
-// Measured margins are in the slice report.
 .const HANDOFF_LINE     = 40
 
 // Where the TOP aperture split arms.
 //
-// 53, not 52. The handoff exits at raster 51 in the worst case measured across
-// every fixture, so 52 left exactly one raster of margin -- and the handoff is
-// the phase most likely to grow, because the HUD's own register restores will
-// eventually be added to it. 53 gives two, and still leaves the poll running
+// 53, not 52. The handoff exits at raster 51 in the worst measured case, so 52
+// would leave exactly one raster of margin -- and the handoff is the phase most
+// likely to grow. 53 gives two, and still leaves the poll running
 // well before its target: exactly one of lines 48..55 is a badline, and at
 // YSCROLL=5 (the only phase where line 53 is one) the target is 55, two lines
 // further on, which the poll reaches with the whole of line 54 in hand.
@@ -210,24 +201,21 @@
 // per-entry arrays, [buffer][entry]
 schedY:      .fill 2 * MAX_SCHED, 0     // sprite Y
 schedX:      .fill 2 * MAX_SCHED, 0     // sprite X low byte
-schedXHi:    .fill 2 * MAX_SCHED, 0     // sprite X bit 8 (0 or 1). P3: carried
-                                        // per ENTRY so the builder can compute
-                                        // the complete $D010 for every batch.
-                                        // P0-P2 were all X < 256 and this was
-                                        // hardcoded to clear.
+schedXHi:    .fill 2 * MAX_SCHED, 0     // sprite X bit 8 (0 or 1), carried per
+                                        // ENTRY so the builder can compute the
+                                        // complete $D010 for every batch
 schedPtr:    .fill 2 * MAX_SCHED, 0     // sprite pointer value
 schedCol:    .fill 2 * MAX_SCHED, 0     // sprite colour
 schedSlot:   .fill 2 * MAX_SCHED, 0     // hardware slot 2..7 (explicit: inspectable)
 schedSlot2:  .fill 2 * MAX_SCHED, 0     // slot*2, the $D000/$D001 index (no IRQ arithmetic)
-schedId:     .fill 2 * MAX_SCHED, 0     // P4: the LOGICAL SPRITE ID this entry
-                                        // is. Once a sorter exists, accepted
-                                        // index is a position and not an
-                                        // identity: the same sprite can be
+schedId:     .fill 2 * MAX_SCHED, 0     // the LOGICAL SPRITE ID this entry is.
+                                        // Accepted index is a POSITION, not an
+                                        // identity -- the same sprite can be
                                         // entry 3 this frame and entry 8 the
-                                        // next. Recorded so a test can ask
-                                        // "which sprite is entry i's same-slot
-                                        // predecessor" and get an identity
-                                        // back rather than an array offset.
+                                        // next -- so this is what lets anything
+                                        // ask "which sprite is entry i's
+                                        // same-slot predecessor" and get an
+                                        // identity back rather than an offset.
                                         // The executor never reads it.
 
 // per-batch arrays, [buffer][batch]
@@ -270,38 +258,34 @@ schedCurrent:  .byte 0                  // buffer the EXECUTOR reads
 schedNext:     .byte 1                  // buffer the BUILDER writes
 schedPending:  .byte 0                  // 1 = swap at the next frame IRQ
 
-// THE FRAME IRQ MUST NOT PROMOTE A BUFFER THAT IS BEING WRITTEN.
+// THE FRAME IRQ MUST NOT PROMOTE A BUFFER THAT IS BEING WRITTEN, and the double
+// buffer alone does not guarantee that.
 //
-// The double buffer was always meant to guarantee this and did not. The
-// builder latches its destination from schedNext ONCE, at entry, and then
-// writes that buffer for several thousand cycles; the frame IRQ swaps
+// The builder latches its destination from schedNext ONCE, at entry, then
+// writes that buffer for several thousand cycles, while the frame IRQ swaps
 // schedCurrent and schedNext whenever schedPending is set. So a build that
 // STARTS while a publication is still pending has its destination promoted to
 // CURRENT underneath it, and the executor renders a half-written schedule.
 //
-// That is not hypothetical. Measured on RING-SLOW, 11.7% of builds begin with
-// schedPending already set -- it happens whenever the frame IRQ lands between
-// buildSchedule and publishSchedule, because the publication then misses that
-// frame's swap and is still pending when the next pass starts building.
+// That is a COMMON condition, not a rare one: it happens whenever the frame IRQ
+// lands between buildSchedule and publishSchedule, because the publication then
+// misses that frame's swap and is still pending when the next pass begins.
+// Measured at over a tenth of all builds under load. A frame that rebuilds
+// again immediately papers over the damage; a schedule published once and left
+// standing stays corrupted for as long as it is displayed.
 //
-// A fixture that rebuilds every frame survives it: the next frame overwrites
-// the damage. MAXCAP does not rebuild -- it is static and publishes exactly
-// once -- so a schedule corrupted during its activation stays corrupted for as
-// long as the fixture is displayed. Forcing the condition reproduced a CURRENT
-// with schedEntries = 0 while the build itself completed correctly.
-//
-// Deferring the swap costs at most one frame of latency and cannot starve:
-// the build occupies well under a whole frame, so raster 250 eventually falls
-// outside it. schedBuildDefer counts the deferrals so the cost is visible
-// rather than silent.
+// So the swap is DEFERRED while a build is in progress. It costs at most one
+// frame of latency and cannot starve -- a build occupies well under a whole
+// frame, so raster 250 eventually falls outside it -- and schedBuildDefer
+// counts the deferrals so the cost is visible rather than silent.
 schedBuildDefer:  .byte 0               // saturating: builds that began with a
                                         // publication still pending
 
 // WHICH PHASE THE NEXT RASTER EVENT IS.
 //
-// Four now, where P1 had two and the border work made three. Every arm sets it
-// and every phase is entered from exactly one value, so it cannot latch stuck
-// the way a lock can: exBottom always hands back to PH_FRAME.
+// Every arm sets it and every phase is entered from exactly one value, so it
+// cannot latch stuck the way a lock can: exBottom always hands back to
+// PH_FRAME.
 //
 //   PH_BATCH     *  a mid-screen mux batch (curBatch says which)
 //   PH_FRAME   250  adopt the frame + schedule records. Nothing else.
@@ -311,8 +295,8 @@ schedBuildDefer:  .byte 0               // saturating: builds that began with a
 //   PH_BOTTOM  243  hold the border open, poll to 248, switch to BLANK
 //
 // PH_BATCH IS ZERO, and that is a timing decision rather than a tidy one.
-// Batches are much the commonest phase -- MAXCAP runs nineteen a frame against
-// four structural ones -- and they are the only phase with a hard deadline:
+// Batches are much the commonest phase -- a busy frame runs many against four
+// structural ones -- and they are the only phase with a hard deadline:
 // REUSE_LEAD gives a mid-screen batch twelve raster lines to reprogram a slot
 // before the beam reaches the sprite it is reprogramming. Making the batch the
 // zero case lets the dispatch reach it in `lda / bne / jmp`, the same eight
@@ -334,6 +318,7 @@ exPhase:          .byte 0
 // that drifts by even one line tears a character row, and this is the cheapest
 // statement that it never did. Deliberately NOT a "was it late" flag -- a flag
 // says it happened, a min/max says it never happened.
+
 // The raster the HUD phase entered on, and the raster it finished on. The
 // second is the one the margin to the HUD's first sprite fetch is made of.
 hudEntryMin:      .byte $ff
@@ -346,10 +331,10 @@ hudExitMax:       .byte 0
 handoffEntryMin:  .byte $ff
 handoffEntryMax:  .byte 0
 // The raster at which the handoff FINISHED -- batch 0 programmed, $d015 set.
-// This is the number the margin to the top aperture split is made of, and it
-// is measured rather than derived from a trace: the monitor's trace log
-// truncates under a dense fixture and then mis-pairs entries, which inflates
-// exactly this figure.
+// This is the number the margin to the top aperture split is made of, and the
+// engine measures it itself rather than leaving it to an external trace: a
+// monitor trace log truncates under load and then mis-pairs entries, which
+// inflates exactly this figure.
 handoffExitMax:   .byte 0
 
 topSplitMin:      .byte $ff               // 55 normally, 54 at YSCROLL=7:
@@ -371,12 +356,12 @@ botSplitMax:      .byte 0
 edgeLate:         .byte 0
 
 // ===========================================================================
-// The P1 frame record — the second published channel.
+// The frame record — the second published channel.
 // ===========================================================================
 // Double buffered for exactly the reason the schedule is: the frame IRQ must
 // never observe a half-updated set in which $d018 names one page and the
-// pointer destination names the other. That single-frame inconsistency is the
-// historical bug class this whole checkpoint exists to rule out.
+// pointer destination names the other. A single frame of that inconsistency is
+// a whole screen of sprites fetched from the wrong pointer table.
 frameD011:    .byte 0, 0                // complete $d011 (D011_BASE | yscroll)
 frameD018:    .byte 0, 0                // complete $d018, REAL charset
 frameD018B:   .byte 0, 0                // the same page with the BLANK charset.
@@ -392,7 +377,7 @@ frameCurrent: .byte 0                   // record the EXECUTOR reads
 frameNext:    .byte 1                   // record the MAIN THREAD writes
 framePending: .byte 0                   // 1 = adopt at the next frame IRQ
 
-// --- P1 frame diagnostics (written by the frame IRQ, read by tests) --------
+// --- frame diagnostics, written by the frame IRQ ---------------------------
 frameCounter:   .byte 0, 0              // displayed frames, 16-bit lo/hi. Also
                                         // the main thread's frame tick.
 curPage:        .byte 0                 // page adopted for this frame
@@ -420,9 +405,9 @@ frameEntryLine: .byte 0                 // raster at frame-IRQ ENTRY
 batchCounter:   .byte 0, 0, 0           // raster batches executed, 24-bit.
                                         // Incremented AFTER the sprite writes,
                                         // so it delays no register programming.
-                                        // 16 bits wrapped after ~7,300 frames
-                                        // of the nine-batch fixture and the
-                                        // stress report understated by 4x.
+                                        // 24 bits because 16 wrap in a couple
+                                        // of minutes of busy play and a wrapped
+                                        // total silently understates the load.
 statLate:       .byte 0                 // exLate taken: a batch was chased
 lateRun:        .byte 0                 // consecutive late batches this frame
 maxLateRun:     .byte 0                 // worst such run seen
@@ -433,22 +418,21 @@ statRejUnsafe: .byte 0                  // gap < SPRITE_HEIGHT: genuinely imposs
 statRejMargin: .byte 0                  // SPRITE_HEIGHT <= gap < MIN_REUSE_GAP
 statReuse:     .byte 0                  // number of slot-reuse events
 statBatches:   .byte 0
-// P2. The largest MID-SCREEN batch this schedule contains (batch 0, the frame
-// batch, is excluded: it is always min(6, accepted) and says nothing about
-// merged reuse). This is what REUSE_LEAD is sized for, and until P2 no fixture
-// ever made it greater than 1.
+// The largest MID-SCREEN batch this schedule contains. Batch 0, the frame
+// batch, is excluded: it is always min(MUX_SLOTS, accepted) and says nothing
+// about merged reuse. This is the figure REUSE_LEAD is sized against.
 statMaxBatch:  .byte 0
-// P3 fault counters. Saturating, like the page/pointer counters: any non-zero
-// value is a failure of the CALLER's geometry, not of the renderer, and the
-// exact count past 255 is not interesting.
+// Saturating, like the page/pointer counters: any non-zero value is a failure
+// of the CALLER's geometry, not of the renderer, and the exact count past 255
+// is not interesting.
 statOverflow:      .byte 0              // logical sprites that could not be
                                         // scheduled because MAX_SCHED was full
 statRejRange:      .byte 0              // logical sprites refused because their Y
                                         // is outside MIN_SPRITE_Y..MAX_SPRITE_Y.
-                                        // Saturating. NOT a fault: it is the
-                                        // production contract being enforced,
-                                        // and the qualification fixtures that
-                                        // trip it do so deliberately.
+                                        // Saturating, and NOT a fault: every
+                                        // enemy approaching from off-screen
+                                        // trips it, which is the admission rule
+                                        // working as intended.
 statBatchOverflow: .byte 0              // batches that did not fit MAX_BATCH
 
 // --- executor working state -------------------------------------------------
@@ -459,8 +443,8 @@ curBatchBase:  .byte 0                  // schedCurrent * MAX_BATCH
 // ===========================================================================
 // buildSchedule — MAIN THREAD ONLY. Writes the NEXT buffer.
 // ===========================================================================
-// Input: logical sprite arrays (see fixtures.asm), pre-sorted by ascending Y.
-//        logCount = number of logical sprites.
+// Input: the logical sprite arrays in src/motion.asm, walked in the order
+//        sortTick put into sortedIDs -- ascending Y.
 // Output: a complete schedule in buffer schedNext, plus the stat counters.
 //
 // Every decision — acceptance, physical slot, batch line, $D010, $D015 — is
@@ -477,22 +461,22 @@ buildSchedule:
     // pending therefore has its destination promoted underneath it, and the
     // executor renders a half-written schedule.
     //
-    // Measured before this: 11.7% of RING-SLOW builds began in that state. It
-    // happens whenever the frame IRQ lands between buildSchedule and
-    // publishSchedule, because the publication then misses that frame's swap
-    // and is still waiting when the next pass starts building.
+    // It is a common state, not a rare one -- it arises whenever the frame IRQ
+    // lands between buildSchedule and publishSchedule, since the publication
+    // then misses that frame's swap and is still waiting when the next pass
+    // begins.
     //
     // Clearing it here loses nothing. The schedule being withdrawn is the one
     // sitting in schedNext -- the very buffer this build is overwriting -- so
     // it was already superseded. publishSchedule re-sets the flag once the
     // buffer is complete, and the next frame boundary adopts it.
     //
-    // A FLAG SAYING "A BUILD IS IN PROGRESS" WAS TRIED FIRST AND IS WORSE. It
-    // is a lock released only on the normal exit, so a build abandoned part way
-    // leaves it set and the frame IRQ never swaps again: CURRENT freezes on the
-    // previous fixture permanently. This form has no such state -- an abandoned
-    // build simply leaves schedPending clear, CURRENT keeps the last complete
-    // schedule, and the next successful build repairs everything.
+    // WITHDRAWAL, NOT A "BUILD IN PROGRESS" LOCK, and the difference matters. A
+    // lock is released only on the normal exit, so a build abandoned part way
+    // leaves it set and the frame IRQ never swaps again -- CURRENT freezes
+    // permanently. This form has no such state: an abandoned build simply
+    // leaves schedPending clear, CURRENT keeps the last complete schedule, and
+    // the next successful build repairs everything.
     lda schedPending
     beq !notPending+
     lda #0
@@ -576,13 +560,10 @@ buildSchedule:
     sta bs_d010
 
 // ---- acceptance pass -------------------------------------------------------
-// P4: the scan walks SORTED POSITIONS and dereferences each to a logical ID.
-// It used to walk logical storage order directly, which was only correct while
-// every fixture happened to be stored pre-sorted by Y -- P0's deliberate
-// simplification. The acceptance rule below is unchanged and still compares
-// against accepted entry i-6; what changed is that the order those accepted
-// entries arrive in is now decided by the sorter rather than by the order
-// someone typed the fixture table in.
+// THE SCAN WALKS SORTED POSITIONS AND DEREFERENCES EACH TO A LOGICAL ID. It
+// must never walk logical storage order directly: the reuse rule below compares
+// an entry against accepted entry i-6 and is only sound on a list in ascending
+// Y, which is what sortedIDs -- and nothing else -- guarantees.
 bs_loop:
     lda bs_pos
     cmp sortedCount
@@ -613,8 +594,8 @@ bs_loop:
     // refuse.
     //
     // logClip is zero for everything that is not a clipped enemy -- ordinary
-    // enemies, projectiles and every qualification fixture -- so this costs
-    // them a load and a branch, and changes nothing they do.
+    // enemies, projectiles, all of it -- so this costs them a load and a
+    // branch and changes nothing they do.
     lda logClip,y
     sta bs_clip
     beq !presented+
@@ -633,7 +614,7 @@ bs_loop:
     // is, not of what its predecessor is doing -- so it is decided first and
     // the outcome is unambiguous. Checking it after the capacity test would
     // make a sprite's verdict depend on how many sprites happened to precede
-    // it, and the independent model would have to reproduce that accident.
+    // it, which is not a property of the sprite at all.
     lda bs_y
     cmp #MIN_SPRITE_Y
     bcc !reject+
@@ -643,11 +624,10 @@ bs_loop:
     jmp bs_outOfRange                   // what a relative branch can reach
 !inRange:
 
-    // P3: schedule capacity is a HARD limit and is checked FIRST, before the
-    // reuse rule, so the outcome is unambiguous: a sprite that does not fit is
-    // counted as an overflow and nothing else. Deciding "rejected for spacing"
-    // about a sprite there was no room for would be a lie, and the independent
-    // model would have to reproduce the lie.
+    // SCHEDULE CAPACITY IS A HARD LIMIT and is checked BEFORE the reuse rule,
+    // so the outcome is unambiguous: a sprite that does not fit is counted as
+    // an overflow and nothing else. Calling it "rejected for spacing" when
+    // there was no room for it at all would misreport the reason.
     //
     // The scan CONTINUES rather than stopping, so statOverflow reports how many
     // sprites were dropped, not merely that some were. Nothing is written to
@@ -744,23 +724,19 @@ bs_accept:
     lda bs_y
     sta schedY,y
     lda bs_id
-    sta schedId,y                       // P4: remember WHICH sprite this is
+    sta schedId,y                       // remember WHICH sprite this is
     ldx bs_id
     lda logX,x
     sta schedX,y
     lda logXHi,x
-    sta schedXHi,y                      // P3: bit 8 of X, per entry
+    sta schedXHi,y                      // bit 8 of X, per entry
 
     // ---- $D010 and the enable mask, accumulated HERE --------------------
-    // Both used to be separate full walks over the accepted entries after the
-    // acceptance pass finished. Every value they needed -- the slot and the X
-    // MSB -- is already in hand at this point, so walking the entries a second
-    // and third time was paying to rediscover it.
-    //
-    // P4 measured what that cost on a twelve-sprite frame: the enable pass 659
-    // cycles and the $D010 pass 1058, against 2532 for the acceptance pass
-    // itself. Folding both in is the main-thread saving that matters, because
-    // after P4 the main thread is the constraint, not the raster executor.
+    // Folded into the acceptance pass rather than done as two further walks
+    // over the accepted entries afterwards. Everything they need -- the slot
+    // and the X MSB -- is already in hand here, and on a twelve-sprite frame
+    // the separate passes cost 659 and 1058 cycles against 2532 for acceptance
+    // itself. The MAIN THREAD is this engine's constraint, not the executor.
     //
     // The running $D010 is ALSO recorded per entry, in bs_d010cum. A batch's
     // complete value is the running value after its LAST entry, so the batch
@@ -834,7 +810,7 @@ bs_enDone:
 // After that, entries are grouped by their LEGAL PROGRAMMING WINDOW.
 //
 // ---------------------------------------------------------------------------
-// THE WINDOW, AND WHY IT WAS ALREADY SITTING HERE UNUSED
+// THE LEGALITY WINDOW
 // ---------------------------------------------------------------------------
 // The acceptance rule at the top of this file is written as one inequality:
 //
@@ -850,15 +826,15 @@ bs_enDone:
 //                                            the measured lead before the VIC
 //                                            fetches this sprite
 //
-// and acceptance is exactly the statement that the window is non-empty. The
-// builder used to take `latest_i` for every entry and then merge two entries
-// only if those two numbers happened to be EQUAL. At the minimum accepted gap
-// of 33 the window is one raster wide and that is all there is; at a gap of 60
-// it is 27 rasters wide, and every one of those rasters was being thrown away.
+// and acceptance is exactly the statement that the window is non-empty. At the
+// minimum accepted gap of 33 the window is one raster wide; at a gap of 60 it
+// is 27 rasters wide.
 //
-// Sixteen sprites ten rasters apart therefore cost ELEVEN raster interrupts,
-// where the same sixteen in four rows cost four. The sprites were never the
-// problem; the batch count was.
+// THAT WIDTH IS WHAT MAKES SPREAD SPRITES AFFORDABLE. Merging only entries
+// whose `latest` values happen to be EQUAL throws the width away, and sixteen
+// sprites ten rasters apart then cost eleven raster interrupts where the same
+// sixteen in four rows cost four. It is never the sprite count that hurts; it
+// is the batch count.
 //
 // ---------------------------------------------------------------------------
 // THE GROUPING RULE
@@ -880,17 +856,16 @@ bs_enDone:
 // that overlap in pairs need not share a common raster: [0,10], [5,15], [12,20]
 // overlap pairwise around the chain but have no line in all three. Testing each
 // candidate against the single chosen L makes the common intersection the only
-// thing that can ever be true, so that shape cannot be mis-grouped. It is in
-// tests/test_p2.py under the name the model gives it.
+// thing that can ever be true, so that shape cannot be mis-grouped.
 //
-// WHY THE DEADLINES ARE UNCHANGED. The leader keeps exactly the line it had
-// before, so the critical path P2 measured -- batch line to the leader's own
-// fetch -- is the same number against the same 756-cycle budget, and the leader
-// has the smallest Y in the batch so it is the binding one. Every follower is
-// moved EARLIER than the line it used to get, which can only increase its own
-// lead, and is checked against its predecessor's last displayed raster before
-// it is allowed to move at all. Nothing is programmed later than it was, and
-// nothing is programmed before its slot is free.
+// WHY MERGING NEVER COSTS A DEADLINE. The critical path is the batch line to
+// the LEADER's own fetch, and the leader has the smallest Y in the batch, so
+// the leader is the binding member -- and it keeps exactly the line it would
+// have had alone, against the same 756-cycle budget. Every follower is placed
+// EARLIER than it would otherwise be, which only increases its own lead, and is
+// checked against its predecessor's last displayed raster before it may move at
+// all. Nothing is programmed later than it would have been, and nothing is
+// programmed before its slot is free.
 //
 // WHY A BATCH CANNOT EXCEED SIX. Entry j+6's predecessor is entry j itself, so
 // earliest_(j+6) = Y_j + SPRITE_HEIGHT, while the batch line is Y_j -
@@ -916,10 +891,10 @@ bs_enDone:
 !haveEntries:                           // below pushed bs_batchDone out of
                                         // branch range
 
-    // Batch 0's line is the HANDOFF, not the frame transaction. It is the only
-    // batch whose line is not derived from a sprite Y, and moving it is the
-    // whole of this slice's change to the schedule: same accepted entries, same
-    // slots, same batch membership, one different number in one field.
+    // BATCH 0'S LINE IS THE HANDOFF, not the frame transaction: it is the only
+    // batch whose line is not derived from a sprite Y. Its slots have to be
+    // programmed after the HUD has finished with them and before the first
+    // legal sprite Y, and HANDOFF_LINE is the point that satisfies both.
     ldy bs_bbase
     lda #HANDOFF_LINE
     sta batchLine,y
@@ -1010,8 +985,8 @@ bs_absorb:
 
 bs_batchOverflow:
     // Unreachable while MAX_SCHED is 24 (batch 0 holds six, so at most 19
-    // batches can exist), but counted rather than assumed: the same silent
-    // truncation on the entry path was a real gap P2 flagged.
+    // batches can exist), but counted rather than assumed: silent truncation
+    // is exactly the failure this whole file is built to make impossible.
     lda statBatchOverflow
     cmp #$ff
     beq bs_batchDone
@@ -1023,7 +998,7 @@ bs_batchDone:
     ldx schedNext
     sta schedBatches,x
 
-// ---- widest MID-SCREEN batch (P2) -----------------------------------------
+// ---- widest MID-SCREEN batch ----------------------------------------------
 // Batch 0 is skipped on purpose: see statMaxBatch.
     lda #0
     sta statMaxBatch
@@ -1049,14 +1024,12 @@ bs_mbDone:
 // One store per batch in the executor, no read-modify-write, no shared-register
 // race. The VALUE is no longer accumulated here: bs_d010cum already holds the
 // complete register contents after every accepted entry, so a batch's value is
-// simply the one belonging to its LAST entry. What used to be a walk over every
-// entry of every batch is now one lookup per batch.
+// simply the one belonging to its LAST entry -- one lookup per batch rather
+// than a walk over every entry of every batch.
 //
-// P3 made this real -- up to P2 every fixture was X < 256, so it only ever
-// cleared bits. It sets a bit for an entry whose X >= 256 and clears it for one
-// below, which is what makes physical slot reuse safe across an MSB change: the
-// slot's bit is rewritten from the NEW owner every time, so a stale bit from the
-// previous logical owner cannot survive.
+// IT BOTH SETS AND CLEARS. A slot's bit is rewritten from the NEW owner every
+// time, so reusing a physical slot across an MSB change is safe: a stale bit
+// from the previous logical owner cannot survive into the next one.
     lda #0
     sta bs_b
 bs_dLoop:
@@ -1103,9 +1076,9 @@ bs_line:      .byte 0                  // the open batch's chosen raster
 bs_bcur:      .byte 0                  // the open batch's record index
 bs_enable:    .byte 0
 bs_d010:      .byte 0
-bs_slot:      .byte 0                  // P4: the slot just assigned, so the
-                                       // enable/$D010 accumulators can index by
-                                       // it without re-reading schedSlot
+bs_slot:      .byte 0                  // the slot just assigned, so the enable
+                                       // and $D010 accumulators can index by it
+                                       // without re-reading schedSlot
 // The complete $D010 after each accepted entry, indexed by ACCEPTED index.
 // Builder scratch: written and read within one build, so it needs no double
 // buffering.
@@ -1118,21 +1091,14 @@ bitMaskInv:   .byte $fe,$fd,$fb,$f7,$ef,$df,$bf,$7f
 // ===========================================================================
 // The executor. Consumes CURRENT only.
 // ===========================================================================
-// MOVED OUT OF VIC BANK 0. It was at $2c00, and before that $1500; both are
-// inside the 16 KB the VIC can address, and this is code -- the VIC never
-// fetches a byte of it. It was costing 1172 bytes of the scarcest memory in
-// the machine to sit somewhere convenient.
+// OUTSIDE VIC BANK 0, like all code: the VIC never fetches a byte of this, so
+// placing it in the bank would spend 1172 bytes of the scarcest memory in the
+// machine on nothing.
 //
-// $8600 is ordinary RAM: $01 is $35 while the game runs, so BASIC and KERNAL
-// are both banked out and everything from $8000 to $bfff is plain RAM that
-// only the CPU can see. The interrupt vector at $fffe is written from a label,
-// so it follows the code here without being told.
-//
-// RELOCATION IS AN ADDRESS CHANGE, NOT A LOGIC CHANGE, but this is the most
-// timing-critical code in the engine, so it is not assumed to be free: the
-// aperture splits' own instrumentation -- edgeLate, topSplitMax, botSplitMax --
-// was re-measured after the move and is recorded in
-// reports/vic-bank-0-reclamation.md.
+// $8600 is ordinary RAM. $01 is $35 while the game runs, so BASIC and KERNAL
+// are both banked out and everything from $8000 to $bfff is plain RAM only the
+// CPU can see. The hardware interrupt vector at $fffe is taken directly and is
+// written from a label, so it follows this code without being told.
 * = $8600 "raster executor"
 
 irqHandler:
@@ -1144,10 +1110,9 @@ irqHandler:
     lda #$01
     sta $d019                           // acknowledge the raster IRQ
 
-    // Four phases share this entry. Every far target goes through an absolute
-    // jmp: the old `bne exBatch` was already three bytes past a relative
-    // branch's reach with three phases, and KickAssembler was right to refuse
-    // it. Ordered by frequency -- batches are much the commonest.
+    // Every phase shares this entry, and every far target goes through an
+    // absolute jmp -- the dispatch chain is long past a relative branch's reach.
+    //
     // ORDER MATTERS, AND NOT FOR SPEED. Every compare adds five cycles before
     // the handler can read $d012, and interrupt entry already costs up to 14
     // plus 19 of prologue -- so a phase far enough down this chain samples its
@@ -1155,10 +1120,9 @@ irqHandler:
     // than a late interrupt, but it makes the instrumentation ambiguous, and
     // "the handoff entered at 40 or 41" is not a statement worth having.
     //
-    // So the two phases whose entry raster is asserted EXACTLY come first, and
-    // the two that open with a raster poll come last: a poll absorbs entry
-    // jitter by construction, which is what it is there for. PH_HUD was last
-    // and measured [4, 5]; second, it measures [4, 4].
+    // So the phases whose entry raster is asserted EXACTLY come first, and the
+    // ones that open with a raster poll come last: a poll absorbs entry jitter
+    // by construction, which is what it is there for.
     lda exPhase
     bne !structural+                    // PH_BATCH is 0: the hot path is three
     jmp exBatch                         // instructions and eight cycles
@@ -1404,15 +1368,13 @@ plPtr1Store:
 // ===========================================================================
 // exHandoff — the HUD -> gameplay ownership transfer, and batch 0.
 // ===========================================================================
-// THE SOLE OWNER-TRANSFER POINT. Written as though its predecessor were a HUD
-// that had been free to dirty every shared register, because that is exactly
-// what it will be: the HUD phase goes in the top border above this line, and
-// nothing about this code should have to change when it does.
+// THE SOLE OWNER-TRANSFER POINT, written as though the HUD phase above it had
+// been free to dirty every shared register -- which it is.
 //
-// The rule that makes a handoff safe is that it writes every register whose
-// previous owner might have touched it, UNCONDITIONALLY. Nothing is inherited
-// and nothing is written only "if it looks wrong" -- that class of assumption
-// produced the P4 flicker and the FIX 16 corruption.
+// THE RULE THAT MAKES A HANDOFF SAFE: it writes every register whose previous
+// owner might have touched it, UNCONDITIONALLY. Nothing is inherited and
+// nothing is written only "if it looks wrong". An inherited register is a
+// flicker that appears once every few thousand frames and cannot be reproduced.
 //
 // Per-slot state (X, Y, colour, pointer, and the complete $d010) is batch 0's
 // job and is executed below by the ordinary batch executor, so there is one
@@ -1485,12 +1447,11 @@ exBatch:
     ldx schedCurrent
     cmp schedBatches,x
     bcc exBatchRun                      // more batches this frame
-    jmp exEndFrame                      // Inverted, and out of line, purely
-                                        // because the P2 batch-size histogram
-                                        // pushed exEndFrame out of branch
-                                        // range. Costs the common path one
-                                        // cycle per batch (a taken bcc rather
-                                        // than an untaken bcs) and the rare
+    jmp exEndFrame                      // Inverted and out of line because
+                                        // exEndFrame is past branch range.
+                                        // Costs the common path one cycle per
+                                        // batch (a taken bcc rather than an
+                                        // untaken bcs) and the rare
                                         // end-of-frame path three.
 exBatchRun:
 
@@ -1501,7 +1462,7 @@ exBatchRun:
     sta ex_i
     lda batchCount,y
     sta ex_n
-    sta ex_n0                           // P2: kept for the executed-size
+    sta ex_n0                           // kept for the executed-size
                                         // histogram; ex_n is destroyed below
     lda batchD010,y
     sta ex_d010
@@ -1524,11 +1485,12 @@ exEntry:
     sta $d027,x
     lda schedPtr,y
 exPtrStore:
-    sta PTR_A,x                         // P1: the operand HIGH BYTE is patched
-                                        // once per frame by exFrame. PTR_A and
-                                        // PTR_B share the low byte ($f8), so a
-                                        // single byte selects the destination
-                                        // and a batch can never choose one.
+    sta PTR_A,x                         // SELF-MODIFIED: the operand HIGH BYTE
+                                        // is patched once per frame by exFrame.
+                                        // PTR_A and PTR_B share the low byte
+                                        // ($f8), so one byte selects the
+                                        // destination and a batch can never
+                                        // choose the wrong page.
 
     inc ex_i
     dec ex_n
@@ -1538,17 +1500,15 @@ exEntriesDone:
     lda ex_d010
     sta $d010                           // complete value, one store, no RMW
 
-// P2 TIMING PROBE. A label, nothing else: it costs zero cycles and generates
-// no code, and it marks the instant every VIC register this batch owns has
-// been written -- the Y values, X values, colours, pointers and $d010.
+// TIMING PROBE. A label and nothing else: zero cycles, no code. It marks the
+// instant every VIC register this batch owns has been written -- the Y values,
+// X values, colours, pointers and $d010.
 //
-// THIS is the instant the reuse deadline applies to. Everything below is
-// bookkeeping and re-arming; the beam does not care about any of it. Measuring
-// the whole handler (irqHandler -> exDone) and calling that the batch cost
-// overstates it, and that overstatement grows every time a diagnostic counter
-// is added. tests/test_p2.py traces this point and exDone separately and
-// reports both, so the margin against REUSE_LEAD is stated against the write
-// that actually has to beat the raster.
+// THIS IS THE INSTANT THE REUSE DEADLINE APPLIES TO. Everything below is
+// bookkeeping and re-arming, and the beam does not care about any of it.
+// Measuring the whole handler (irqHandler -> exDone) and calling that the batch
+// cost overstates it, and the overstatement grows every time a diagnostic
+// counter is added -- so the margin against REUSE_LEAD is measured to HERE.
 exWritesDone:
 
     inc curBatch
@@ -1559,9 +1519,9 @@ exWritesDone:
     inc batchCounter + 2
 !counted:
 
-    // P2: record the size of the batch just EXECUTED. curBatch has already
-    // been incremented, so the batch that just ran was curBatch-1; a value of
-    // 1 here means that was batch 0, the frame batch, which is excluded.
+    // Record the size of the batch just EXECUTED. curBatch has already been
+    // incremented, so the batch that just ran was curBatch-1; a value of 1 here
+    // means that was batch 0, the frame batch, which is excluded.
     lda curBatch
     cmp #1
     beq !noHist+
@@ -1625,24 +1585,21 @@ exArmNextBatch:
 //    RSEL=0, switch to 1 before 247 so that check looks for 251 and misses,
 //    then back to 0 before 251 so that check looks for 247, which has gone.
 //    The flip-flop is never set, so the border never closes -- which is what
-//    the future top-border HUD needs. UNCHANGED mechanism; the arming line is
-//    still 243, because 246 was tried during the border work and measured NOT
-//    to open reliably.
+//    the top-border sprite HUD needs. The arming line is 243 and must not drift
+//    later: 246 was measured NOT to open reliably.
 //
 // 2. THE APERTURE. At line 248 the charset switches to blank, so the terrain
 //    ends at 247 and everything below is $d021. The write must beat line 248's
 //    first g-access in cycle 15. Line 248 can never be a badline (the range is
 //    48..247), so the only thing that can steal cycles 0..9 is sprite DMA for
-//    slots 3..7, which needs a sprite still active there -- Y >= 228. No
-//    fixture has one; a MAX_SPRITE_Y admission rule belongs to the handoff
-//    slice, and botSplitMin/Max below is what would catch it meanwhile.
+//    slots 3..7, which needs a sprite still active there -- Y >= 228. That is
+//    exactly what MAX_SPRITE_Y = 226 forbids at admission, and botSplitMin/Max
+//    below is the standing proof that it never happens.
 //
-// BOTH $d011 writes take the COMPLETE byte from the CURRENT frame record.
-// The old code did `lda $d011 / ora #$08 / sta $d011`, and bit 7 of a $d011
-// READ is raster bit 8 while bit 7 of a WRITE is the raster-compare high bit:
-// a read-modify-write above raster 255 arms compare line 250+256 and the frame
-// IRQ never fires again. It happened to be harmless at 243. It is not a thing
-// to leave in place.
+// BOTH $d011 WRITES TAKE THE COMPLETE BYTE FROM THE CURRENT FRAME RECORD, never
+// a read-modify-write. Bit 7 of a $d011 READ is raster bit 8, while bit 7 of a
+// WRITE is the raster-compare high bit: `lda $d011 / ora / sta` above raster
+// 255 arms compare line 250+256 and the frame IRQ never fires again.
 exBottom:
     ldx frameCurrent
     lda frameD011,x
@@ -1651,12 +1608,11 @@ exBottom:
 
     // THE VALUE IS LOADED BEFORE THE POLL, and between detecting the line and
     // storing it there is nothing but the untaken branch. That is the whole
-    // trick and it is worth stating: the first draft loaded $d018's value
-    // after the poll, which put `jmp`, `ldx` and `lda abs,x` -- 13 cycles --
-    // in front of the store, and the top split measured as landing on raster
-    // 56 instead of 55. Detection lands in cycles 0..6, `bne` not taken costs
-    // 2 and `sta abs` writes on its 4th cycle, so the write lands in cycles
-    // 6..12, comfortably before the line's first g-access in cycle 15.
+    // trick. Loading it AFTER the poll puts `jmp`, `ldx` and `lda abs,x` -- 13
+    // cycles -- in front of the store, and the split then lands a raster late.
+    // As written: detection lands in cycles 0..6, `bne` not taken costs 2 and
+    // `sta abs` writes on its 4th cycle, so the write lands in cycles 6..12,
+    // comfortably before the line's first g-access in cycle 15.
     lda frameD018B,x                    // blank charset, same page
     ldx #BORDER_D021                    // and the open border's own background,
                                         // loaded before the poll for the same
@@ -1688,9 +1644,7 @@ exBottom:
                                         // main border flip-flop uncovers in
                                         // cycle 17. Detection lands in cycles
                                         // 0..6, so $d018 writes in 6..12 and
-                                        // this writes in 10..16. Measured, and
-                                        // recorded beside the constant it
-                                        // justifies, in the migration report.
+                                        // this writes in 10..16.
 
     ldx frameCurrent                    // X carried the colour through the
                                         // split; the frame record needs it back
@@ -1731,9 +1685,8 @@ exBottom:
 //
 // The store lands in cycles 6..12 of line 55, before the first g-access in
 // cycle 15. Sprite DMA for slots 3..7 owns cycles 0..9 of a line, but only for
-// a sprite already active there, i.e. Y <= 54; MAXCAP's Y=50 sprite is in slot
-// 2, which is fetched at the END of line 54 instead, and every other fixture
-// starts at Y >= 55. topSplitMin/Max is the standing proof.
+// a sprite already active there, i.e. Y <= 54 -- which MIN_SPRITE_Y = 55
+// forbids at admission. topSplitMin/Max is the standing proof.
 //
 // When YSCROLL = 7 none of this matters -- row 0 begins AT 55 and lines 48..54
 // are idle, which the VIC renders from $3fff regardless of the charset -- but
@@ -1764,10 +1717,9 @@ exTop:
     //
     // For every other phase line 55 is not a badline and the poll keeps its
     // full window; the only remaining hazard is a sprite in HW3..HW7 already
-    // active at line 55 (Y <= 54), which would own cycles 0..9. No fixture has
-    // one -- MAXCAP's Y=50 entry is in HW2, fetched at the end of line 54 --
-    // and the MIN_SPRITE_Y admission rule in the handoff slice removes the
-    // possibility by construction. edgeLate is what would catch it meanwhile.
+    // active at line 55 (Y <= 54), which would own cycles 0..9. The
+    // MIN_SPRITE_Y admission rule removes that by construction, and edgeLate is
+    // what would catch it if the rule were ever weakened.
     //
     // ---------------------------------------------------------------------
     // AND $D021 SPLITS HERE TOO, BUT NOT ALWAYS ON THE SAME LINE.
@@ -1776,8 +1728,8 @@ exTop:
     // the level's colour because $d021 is that colour -- so the top edge of
     // the black border is wherever $d021 changes, and that is raster 55 for
     // EVERY fine-scroll phase. It has to be: a boundary that moved with
-    // YSCROLL would climb seven pixels and jump back, which is precisely the
-    // 6.25 Hz edge pop the guard rows were removed to kill.
+    // YSCROLL would climb seven pixels and snap back on the coarse step -- a
+    // 6.25 Hz pop along the top edge of the playfield.
     //
     // At every phase but 7 the two stores are one line apart from nothing --
     // both belong on 55 -- and they go out back to back, $d018 first because
@@ -1895,9 +1847,9 @@ exArm:
     //
     // The handler acknowledges $d019 once, on the way in. Everything armed
     // after that point can raise a raster IRQ while this handler is STILL
-    // RUNNING -- a batch costs about five raster lines, and MAXCAP's batches
-    // are armed six lines apart, so the beam routinely crosses a freshly
-    // armed line before the rti. That latch is never acknowledged, so the rti
+    // RUNNING -- a batch costs about five raster lines, and a dense frame arms
+    // batches six lines apart, so the beam routinely crosses a freshly armed
+    // line before the rti. That latch is never acknowledged, so the rti
     // re-enters the handler immediately.
     //
     // Mid-frame that is merely a batch running a line late. At the END of the
@@ -1909,11 +1861,8 @@ exArm:
     // ago, so they never appear; exLate then chases every batch whose line is
     // behind the beam, and that frame loses every sprite above it.
     //
-    // Measured on FIXTURE 16 before this fix: a raster IRQ was still latched
-    // at the rti on 68.4% of handler exits, the frame IRQ was entered at
-    // raster 182/183 on 1% of frames, and maxLateRun reached 13 -- exactly
-    // the thirteen sprites missing from a corrupted frame. The control
-    // fixture, whose two batches are far apart, never latched once in 500.
+    // This is not a rare condition: under a dense schedule a raster IRQ is
+    // still latched at the rti on roughly two exits in three.
     //
     // Acknowledging here discards anything latched earlier in this handler.
     // It cannot discard a legitimate one: if the beam crossed the armed line
@@ -1931,9 +1880,8 @@ exArm:
     stx $d019
     sta $d012
 
-    // Late-IRQ recovery, the historical pattern: if the beam is already at or
-    // past the line we just armed, the IRQ would not fire until the next frame.
-    // Run the batch immediately instead.
+    // LATE-IRQ RECOVERY: if the beam is already at or past the line just armed,
+    // the IRQ would not fire until the next frame, so run the batch now.
     //
     // EQUALITY COUNTS AS LATE. The VIC raises a raster IRQ when the counter
     // BECOMES equal to $d012, at the start of the line; writing $d012 with the
@@ -1991,34 +1939,25 @@ exDone:
 
 ex_i:    .byte 0
 ex_n:    .byte 0
-ex_n0:   .byte 0                        // P2: the batch's entry count, SAVED,
+ex_n0:   .byte 0                        // the batch's entry count, SAVED,
                                         // because ex_n is counted down to zero
                                         // by the entry loop
 ex_d010: .byte 0
 
-// P2 — proof of what the executor ACTUALLY ran, not what the builder planned.
+// What the executor ACTUALLY RAN, as opposed to what the builder planned.
 // Sixteen bits per size, indexed by entry count 0..MUX_SLOTS, counting
-// MID-SCREEN batches only. A schedule containing a six-entry batch proves
+// MID-SCREEN batches only. A schedule CONTAINING a six-entry batch proves
 // nothing on its own; this counts the times one was really executed, over
 // millions of frames rather than over a sampled trace.
 //
 // Updated with the other per-batch bookkeeping AFTER exEntriesDone, so it
-// cannot delay a single sprite register write. The deadline that matters is
-// "every sprite Y written before the beam reaches Yc", and exEntriesDone is
-// exactly that instant -- which is why the timing harness traces it as its own
-// point rather than using the handler's total cost.
+// cannot delay a single sprite register write.
 batchSizeHist: .fill 2 * (MUX_SLOTS + 1), 0
 
-// The executor must not grow into the HUD sprite bitmaps at $3200, and through
-// them into the blank charset at $3800. The VIC really does fetch from both, so
-// code spilling into either would be DISPLAYED -- as sprites in the first case
-// and as characters in the second.
-//
-// THE GUARD IS AT THE END OF THE SEGMENT, NOT HERE. It used to sit at this
-// point, which is before frameDiagnostics and installRenderer -- roughly 200
-// bytes of the segment it was guarding. The measured end of the executor is
-// only about 500 bytes below $3200, so that is not a rounding error. See the
-// bottom of this file.
+// THE SEGMENT GUARD IS AT THE END OF THIS FILE, NOT HERE, and it must stay
+// there: several hundred bytes of this segment lie below this point, so a guard
+// placed here would pass while the real end of the segment had already run
+// over.
 
 // ===========================================================================
 // frameDiagnostics — frame IRQ only, and deliberately not on the critical path
@@ -2026,9 +1965,8 @@ batchSizeHist: .fill 2 * (MUX_SLOTS + 1), 0
 //
 // The frame batch fires at raster 250 and its sprites are not displayed until
 // raster 55 of the NEXT frame: about 117 raster lines, ~7,370 cycles. THAT is
-// the deadline that applies here. REUSE_LEAD sizes mid-screen slot reuse and
-// nothing else; P0 conflated the two because it only ever measured one batch.
-// tests/test_p1.py asserts them separately and reports both.
+// the deadline that applies here. REUSE_LEAD sizes MID-SCREEN slot reuse and
+// nothing else -- the two are separate budgets and must not be conflated.
 // ===========================================================================
 frameDiagnostics:
     inc frameCounter

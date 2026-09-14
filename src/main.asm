@@ -1,73 +1,63 @@
 // ===========================================================================
-// 6502-shmup — main: boot, the once-per-frame main thread, and the fixture
-// selection that still drives the qualified engine baseline.
+// 6502-shmup — main: boot, the memory map, and the once-per-frame main thread
 // ===========================================================================
 // PAL Commodore 64. 19,656 cycles per frame. Legal NMOS 6502/6510 only.
 // KickAssembler 5.25.
 //
-// P0 proved: a prepared logical sprite set is displayed deterministically
-// through six hardware mux slots from a complete immutable schedule.
-//
-// P1 proves ONE thing more:
-//   that stays true while a real vertically scrolling, double-buffered
-//   playfield runs underneath it — every fine-scroll phase, repeated coarse
-//   steps, repeated screen-page flips, and exactly ONE sprite-pointer-table
-//   destination per displayed frame, always the one $d018 is showing.
-//
-// Still no player, no sorter, no collision, no AI, no HUD raster split, no
-// border opening. All five P0 fixtures remain independently runnable.
-//
-// Controls: SPACE cycles the fixture. VICE must be launched with the joystick
-// devices detached or a keyset will swallow the key — see readNextFixture and
-// VICE_OPTS in the Makefile. The fixture index is also pokeable at
-// `fixtureIndex` so automated tests can select one without keyboard input.
+// A vertically scrolling shooter. The main thread builds a complete schedule
+// for the next frame and publishes it with one byte; a tiny raster executor
+// consumes the immutable current schedule and is the only thing that writes a
+// VIC register. See docs/ENGINE_CONTRACT.md.
 // ===========================================================================
 
 // --- VIC bank 0 memory map --------------------------------------------------
+// THE RULE: NOTHING LIVES IN VIC BANK 0 UNLESS THE VIC READS IT. The bank is
+// 16 KB, it is the scarcest memory in the machine, and everything the CPU alone
+// touches -- main-thread code, every module's state, the terrain map -- lives
+// above $4000 where the VIC cannot reach at all.
+//
+//   $0000-$033f   system: zero page, stack, vectors
+//   $0340-$03ff   clip scratch, 3 of the 12 blocks (src/clip.asm)
 //   $0400-$07ff   screen page A          sprite pointers $07f8-$07ff
 //   $0800-$0fff   THE TERRAIN CHARACTER SET, the window $d018 selects for the
-//                 playfield. $0b00-$0d3f is the level's 72 terrain glyphs
-//                 (codes 96..167) and $0f10-$0f2f the four static turret body
-//                 glyphs (codes 226..229). Everything else in the window is
-//                 zero-filled by the PRG and renders as $d021. See
-//                 src/terrain.asm and src/turrets.asm.
-//   $1000-$1fff   our code               VIC sees the CHARACTER ROM here, so
-//                                        code living there is invisible to it.
-//                                        This is the stock C64 arrangement,
-//                                        not a trick.
-//   $2000-$23ff   sprite bitmaps (16 x 64)
+//                 playfield: the level's terrain glyphs (codes 96..167) and
+//                 the four static turret body glyphs (codes 226..229).
+//                 Everything else in the window is zero-filled by the PRG and
+//                 renders as $d021. See src/terrain.asm and src/turrets.asm.
+//   $1000-$1fff   CPU code only. The VIC sees the CHARACTER ROM here, so code
+//                 living there is invisible to it -- the stock C64
+//                 arrangement, not a trick. This is NOT VIC capacity.
+//   $2000-$27ff   free
 //   $2800-$2bff   screen page B          sprite pointers $2bf8-$2bff
-//   $2c00-$2fff   raster executor code (moved from $1500; it outgrew the hole
-//                 below the fixture tables when the aperture phases were added)
-//   $3000-$31ff   free (headroom for the raster executor above)
+//   $2c00-$30ff   free
+//   $3100-$31ff   clip scratch, 4 blocks
 //   $3200-$357f   HUD sprite bitmaps (14 x 64), pointers $c8-$d5
-//   $3580-$35ff   player bitmaps (2 x 64), pointers $d6-$d7
-//   $3600-$37ff   free
+//   $3580-$363f   player bitmaps (3 x 64), pointers $d6-$d8
+//   $3640-$367f   enemy bitmap
+//   $3680-$36bf   clip scratch, 1 block
+//   $36c0-$36ff   hostile projectile bitmap
+//   $3700-$37ff   clip scratch, 4 blocks
 //   $3800-$3fff   BLANK character set, all zeros; also supplies the VIC idle
 //                 byte at $3fff. Cleared by clearCharset, never by luck.
-//   $4000-...     MAIN-THREAD CODE, outside bank 0 by design: src/player.asm
-//                 at $4000 and src/scroll.asm at $4200. Neither is ever fetched
-//                 by the VIC, so neither competes for the 16 KB above -- which
-//                 is about to be wanted for a character set and a terrain
-//                 tileset. Weapons, enemies and waves belong here too.
-//                 $1a00-$1bff is free again because the scroller left it.
-//   $c000-...     schedule + frame records, OUTSIDE bank 0 by design
+//
+// --- outside the bank -------------------------------------------------------
+//   $4000-$bfff   main-thread code and data. $01 is $35 while the game runs,
+//                 so BASIC and KERNAL are banked out and this is plain RAM.
+//   $c000-...     the schedule, the frame records and every module's state.
 
 // ---------------------------------------------------------------------------
 // THE LEVEL PACKAGE'S CONSTANTS, IMPORTED FIRST.
 //
 // stage_config.asm emits no bytes, no segment and no program-counter change --
-// it is a constants-only include, and its own generated header says it is
-// "imported very early so every level-owned constant exists before the engine
-// constants/code that consume them". It used to be imported from inside
-// src/terrain.asm, which was early enough while terrain was the only consumer.
+// it is a constants-only include, and its own generated header asks to be
+// imported very early so every level-owned constant exists before the engine
+// constants that consume them.
 //
-// It is not any more. APERTURE_D021 below is a RENDERER constant derived from
-// the level's authored background colour, and KickAssembler resolves `.const`
-// strictly in order: renderer.asm is imported before terrain.asm, so the value
-// has to exist up here or the raster splits cannot name it. Honouring the
-// package's own documented contract is the fix; restating 12 in a second place
-// would have been the bug.
+// IT MUST BE HERE AND NOT INSIDE src/terrain.asm. APERTURE_D021 below is a
+// RENDERER constant derived from the level's authored background colour, and
+// KickAssembler resolves `.const` strictly in order: renderer.asm is imported
+// before terrain.asm, so the value has to exist up here or the raster splits
+// cannot name it. Restating the colour in a second place would be the bug.
 // ---------------------------------------------------------------------------
 #import "level1/stage_config.asm"
 
@@ -75,12 +65,9 @@
 .const SCREEN_B       = $2800
 .const PTR_A          = SCREEN_A + $3f8
 .const PTR_B          = SCREEN_B + $3f8
-// CB = $0800, the TERRAIN charset. It was $1000, the character ROM, for as
-// long as the playfield was a diagnostic pattern drawn out of PETSCII. The
-// terrain slice replaces that with the old game's authored tileset, which is
-// RAM the VIC must be able to see -- and the ROM image at $1000 is exactly
-// what it is not. See the charset-window note in src/terrain.asm for why
-// $0800 is the slot that was free.
+// CB = $0800, the TERRAIN charset. It cannot be $1000: the VIC sees the
+// character ROM image there, not RAM, so an authored tileset placed there
+// would be invisible to it. See the charset-window note in src/terrain.asm.
 .const D018_A         = $12             // VM = $0400, CB = $0800 (terrain)
 .const D018_B         = $a2             // VM = $2800, CB = $0800
 
@@ -149,13 +136,13 @@
 // out as bit pair 00, which in multicolour text mode is $d021 and nothing
 // else. So the open top and bottom border are exactly "$d021, whatever it is".
 //
-// The terrain slice authored $d021 = 12 once, at init, because 12 is the
-// level's bit-pair-00 colour -- and the open border went grey with it. There
-// is no second register to separate the two: the playfield's background and
-// the border's background are THE SAME BIT PAIR OF THE SAME REGISTER, and the
-// only thing that can tell them apart is WHERE THE BEAM IS.
+// So setting $d021 ONCE at init to the level's colour would paint the whole
+// open border in it. There is no second register to separate the two: the
+// playfield's background and the border's background are THE SAME BIT PAIR OF
+// THE SAME REGISTER, and the only thing that can tell them apart is WHERE THE
+// BEAM IS.
 //
-// So $d021 now rides the aperture, switched by the same two raster splits that
+// So $d021 rides the aperture, switched by the same two raster splits that
 // already switch $d018, from the same frame record's phase. Two stores a
 // frame, eight cycles, no main-thread involvement and no new phase.
 //
@@ -180,76 +167,43 @@
 .const SCREEN_COLS    = 40
 
 // ---------------------------------------------------------------------------
-// HUD_VISIBLE — the visual qualification switch.
+// HUD_VISIBLE — the character-row diagnostic overlay, off in a normal build.
 //
 // The diagnostic rows below live INSIDE the scrolling matrix, so they ride the
-// fine scroll and wobble by up to 8 pixels every frame. That is harmless, and
-// it is documented in reports/border-handoff-scroll-mask.md §2 — but it makes
-// the screen impossible to judge by eye: a human watching for scroll hitches
-// sees six horizontal bars jumping up and down and cannot separate them from
-// the playfield underneath.
+// fine scroll and wobble by up to 8 pixels every frame. Harmless, but it makes
+// the screen impossible to judge by eye: someone watching for scroll hitches
+// sees horizontal bars jumping up and down and cannot separate them from the
+// playfield underneath.
 //
-// With this false, rows 1, 2 and 20-23 render ordinary world content like every
-// other row, so the aperture between the two blank guard rows contains nothing
-// but scrolling terrain. Nothing else changes: hudTick is simply not called,
-// regeneration stops reserving those six rows, and the HUD drawing code is
-// still assembled and still correct. Set it true to get the diagnostics back.
+// With this false, those rows render ordinary world content like every other
+// row. Nothing else changes: hudTick is simply not called and regeneration
+// stops reserving the rows, while the drawing code stays assembled and correct.
+// Set it true to read the counters on the screen instead of through a monitor.
 //
-// The fixture controls are untouched — SPACE, M, S and R still select, and
-// fixtureIndex is still the live selection; it is just no longer printed.
+// NOTE: this is the CHARACTER-ROW diagnostic overlay, and has nothing to do
+// with the sprite HUD in src/hud.asm, which is always on.
 // ---------------------------------------------------------------------------
 .const HUD_VISIBLE    = false
 
-// ---------------------------------------------------------------------------
-// FIXTURE_KEYS — the qualification fixtures' keyboard selection.
+// The diagnostic rows. With RSEL=0 rows 1..23 are always fully visible whatever
+// the fine scroll is; rows 0 and 24 are the slack and may be clipped.
 //
-// FALSE in a production build, and that is the whole of what "the fixtures are
-// no longer the startup path" means mechanically. The fixtures themselves are
-// NOT deleted: fixtures.asm, the P3/P4/P5 tables and `rebuild` are all still
-// assembled and still reachable, because `make test` selects them the way it
-// always has -- by poking `fixtureIndex` and calling `rebuild` through the
-// monitor, which needs no keyboard at all.
-//
-// What the guard removes from the production path is the SCAN, and the scan is
-// the part that matters: readNextFixture and its three siblings WRITE $dc00 to
-// drive a keyboard column, and $dc00 is the register the joystick is read from.
-// Leaving them in the loop would have the input system and the fixture selector
-// taking turns owning the same port.
-//
-// Set it true for a debug build and SPACE/M/S/R work exactly as they did.
-
-// HUD rows. With RSEL=0 rows 1..23 are always fully visible whatever the fine
-// scroll is; rows 0 and 24 are the slack and may be clipped.
+// EVERY ROW COSTS MORE THAN IT LOOKS. Round robin makes the drawing free per
+// frame, but each row must ALSO be stamped into the back page as it
+// regenerates, and that whole cost lands on ONE frame -- the frame that sets
+// the worst-case preparation span. Adding rows is how a dense sprite frame
+// starts skipping publications.
 .const HUD_ROW_STATS  = 1
 .const HUD_ROW_SCROLL = 2
-// Row 22, NOT row 3. The P2 fixtures put six leader sprites at Y 60-65, which
-// is exactly screen rows 1-4, and sprites are in front of characters: on the
-// torture fixture the P2 readout was sitting underneath the very sprites it
-// exists to describe. Rows 18-22 are below the lowest sprite any P2 fixture
-// places (T6X3 reaches Y 194), so row 22 is readable on every fixture.
 .const HUD_ROW_COUNT  = 2               // rows in hudRowList; hudTick draws one
-                                        // per frame, round robin.
-                                        //
-                                        // FIVE, not six. P4 first gave the
-                                        // sorter its own row. Round robin made
-                                        // that free per frame -- but every HUD
-                                        // row must ALSO be stamped into the back
-                                        // page as it regenerates, and that cost
-                                        // lands on one frame, which is the frame
-                                        // that sets the worst-case preparation
-                                        // span. It pushed P3's heaviest fixture
-                                        // from ~68% of a frame to ~88% and made
-                                        // it skip publications. The sorter's own
-                                        // diagnostics moved onto the P3 row
-                                        // instead, where there were spare
-                                        // columns.
-// Column 30: the bottom bar's text now runs to column 29 ("...M=P3 KEY"), so
-// the live key-down block sits just past it.
+                                        // per frame, round robin
+
 .const FIXLINE_LEN    = 30              // columns of text on the bottom bar
 .const KEY_COL        = 30
 
-// Indirect indexed addressing REQUIRES a zero-page pointer. $fb/$fc belong to
-// loadFixture; $fd/$fe are the other free pair on an unexpanded C64.
+// Indirect indexed addressing REQUIRES a zero-page pointer. $fd/$fe is the free
+// pair on an unexpanded C64; src/terrain.asm takes $f7/$f8 and asserts they
+// differ from this one.
 .const scrPtr         = $fd
 
 BasicUpstart2(entry)
@@ -315,11 +269,9 @@ BasicUpstart2(entry)
                                         // its triggers are authored against)
 
 // OUTSIDE VIC BANK 0, with the player, the scroller, the weapon, the object
-// pool, the enemy and collision. This segment was at $0810 while $0800-$0fff
-// had no other claim on it; the terrain charset needs that window, and every
-// byte in this file is main-thread code or main-thread data -- entry,
-// mainLoop, gameFrame, gameInit and the diagnostic HUD, with no interrupt
-// handler anywhere in it -- so it belongs out here and always did.
+// pool, the enemy and collision. Every byte in this file is main-thread code or
+// main-thread data -- entry, mainLoop, gameFrame, gameInit and the diagnostic
+// rows -- with no interrupt handler anywhere in it.
 * = $5000 "main"
 
 entry:
@@ -336,12 +288,13 @@ entry:
 
     jsr clearCharset                    // MUST precede any display: it is both
                                         // the aperture mask and the idle byte
-    jsr terrainInit                     // colour RAM, $d021/$d022/$d023, the
+    jsr terrainInit                     // colour RAM, $d022/$d023, the
                                         // multicolour bit, and the transposed
-                                        // metatile tables. Replaces initColour:
-                                        // terrain owns the playfield's colour
-                                        // now, and owning it in one place is
-                                        // what stops the two disagreeing.
+                                        // metatile tables. Terrain owns the
+                                        // playfield's colour; owning it in one
+                                        // place is what stops two writers
+                                        // disagreeing. ($d021 is the exception
+                                        // -- it rides the aperture splits.)
     jsr ebulletInit                     // no hostile projectiles at boot
     jsr turretInit                      // mark the authored turrets alive.
                                         // BEFORE scrollInit: that builds both
@@ -363,7 +316,7 @@ entry:
 
 // ---------------------------------------------------------------------------
 // The main loop runs once per DISPLAYED frame, paced by the renderer's own
-// frame counter. Order matters and is the whole of P1's frame ownership:
+// frame counter. THE ORDER IS THE WHOLE OF PAGE OWNERSHIP:
 //
 //   1. hudTick     writes the page that is on screen RIGHT NOW. dispPage still
 //                  names it, because scrollTick has not run yet this frame.
@@ -413,26 +366,20 @@ mainLoop:
 // ---------------------------------------------------------------------------
 // gameFrame — ONE displayed frame of game, in the order the engine requires.
 //
-// This is the production loop, and it is deliberately shaped so the systems
-// still to come have exactly one obvious place each:
+// The shape is: gameplay decides where everything IS, then emits that into the
+// renderer's logical inputs, then the engine sorts, builds, publishes and
+// scrolls. Every ordering below that is load-bearing carries its own note.
 //
-//     input        <- here
-//     player       <- here
-//     weapons         Slice B
-//     enemies         Slice C
-//     collision       Slice D
-//     waves           Slice E/G
-//     HUD feed        Slice B (hudDemoTick is the placeholder it replaces)
+//     input / player / weapons / objects / waves / turrets / collision
 //     ----------------------------------------------------------------
 //     emit         logical state -> the renderer's inputs
-//     sort / build / publish      the engine, untouched
-//     regen / scroll              the engine, untouched
+//     sort / build / publish
+//     regen / scroll
 //
-// The three engine calls at the bottom are in the order docs/ENGINE_CONTRACT.md
-// §1 fixes and the order src/main.asm's frame-ownership note explains: hudTick
-// writes the page that is on screen RIGHT NOW, regenTick rebuilds the page
-// nothing is displaying, and scrollTick is the only thing that may change which
-// page that is. Nothing above them touches a page at all.
+// The engine calls at the bottom follow docs/ENGINE_CONTRACT.md §1 and the
+// frame-ownership note above: hudTick writes the page on screen RIGHT NOW,
+// regenTick rebuilds the page nothing is displaying, and scrollTick is the only
+// thing that may change which page that is. Nothing above them touches a page.
 // ---------------------------------------------------------------------------
 gameFrame:
     // FIRST, AND THE POSITION IS THE WHOLE POINT.
@@ -494,10 +441,11 @@ gameFrame:
     // One visible consequence, named so it is not mistaken for a bug: an enemy
     // that left the world this frame was already freed above, so a shot fired
     // on that frame misses it.
-    // The turrets' world -> screen derivation, and it belongs HERE: after all
-    // movement and before the hitscan, which is exactly where the old game put
-    // positionBackgroundTurrets. scrollTick runs at the END of this routine, so
-    // stageTopRow and scrollFine still describe the picture on screen.
+
+    // The turrets' world -> screen derivation belongs HERE: after all movement
+    // and before the hitscan that reads it. scrollTick runs at the END of this
+    // routine, so stageTopRow and scrollFine still describe the picture on
+    // screen.
     jsr turretWorldTick
 
     jsr collisionTick
@@ -521,35 +469,28 @@ gameFrame:
     // Five cycles unless a turret is actually on the aperture.
     jsr turretFireTick
 
-    // THE ENCOUNTER DIRECTOR, and it sits exactly where the spawner it
-    // replaces did: after every object has moved and after the hitscan, so an
-    // enemy created this frame is drawn where it was created rather than moved
-    // before it has ever been seen. One sixteen-bit compare against the next
-    // authored trigger plus a walk of two wave instances, whatever the stage
-    // is doing.
+    // THE ENCOUNTER DIRECTOR. After every object has moved and after the
+    // hitscan, so an enemy created this frame is drawn where it was created
+    // rather than moved before it has ever been seen. One sixteen-bit compare
+    // against the next authored trigger plus a walk of the wave instances,
+    // whatever the stage is doing.
     jsr waveTick
 
     jsr hudDemoTick                     // score, lives and upgrade only: their
-                                        // systems do not exist yet. Heat left
-                                        // this routine in Slice B and is fed
-                                        // above from the real weapon.
+                                        // systems do not exist yet. Heat is fed
+                                        // above, from the real weapon.
 
     // ---- rebuild and publish, but only when something changed ------------
     //
-    // A frame in which neither the player nor a fixture moved has an identical
-    // schedule to the one already adopted, so building it again would be a few
-    // thousand cycles spent reproducing the bytes CURRENT already holds. The
-    // executor keeps reading that immutable copy, and exHud keeps programming
-    // HW0/HW1 from it, so the picture is unchanged -- including across a page
-    // flip, because the pointer destination is patched per frame by exFrame and
-    // not baked into the schedule.
+    // A frame in which nothing on screen moved has an identical schedule to the
+    // one already adopted, so building it again would be a few thousand cycles
+    // spent reproducing the bytes CURRENT already holds. The executor keeps
+    // reading that immutable copy and exHud keeps programming HW0/HW1 from it,
+    // so the picture is unchanged -- INCLUDING ACROSS A PAGE FLIP, because the
+    // pointer destination is patched per frame by exFrame rather than baked
+    // into the schedule.
     //
-    // This is also what keeps the STATIC regression fixtures costing what they
-    // have always cost: MAXCAP is thirty logical sprites and rebuilding it
-    // every frame is a measurable load that P4 specifically measured skips
-    // against. With no joystick attached the player never moves, so a fixture
-    // run is byte-for-byte the frame it always was.
-    // WHAT MAKES THE SCHEDULE STALE, all four sources.
+    // WHAT MAKES THE SCHEDULE STALE, and it is all three of these:
     //
     //   plyDirty     the player's published block changed
     //   logCount     at least one object is alive, and every object moves
@@ -726,28 +667,23 @@ initColour:
     rts
 
 // ===========================================================================
-// HUD — three fixed screen rows, drawn into whichever page the caller names.
-// One code path, used both for the live update on the displayed page and for
-// stamping a back page as it is rebuilt.
+// THE CHARACTER-ROW DIAGNOSTICS — fixed screen rows, drawn into whichever page
+// the caller names. One code path, used both for the live update on the
+// displayed page and for stamping a back page as it is rebuilt. Built only
+// when HUD_VISIBLE; nothing here is the sprite HUD in src/hud.asm.
 //
-// The HUD sits INSIDE the scrolling matrix, so it rides the fine scroll and
-// wobbles by up to 8 pixels. Holding it still needs a mid-screen $d011 write,
-// which is a raster split — that is P8, and P1 deliberately does not have one.
+// These rows sit INSIDE the scrolling matrix, so they ride the fine scroll and
+// wobble by up to 8 pixels. Holding them still would need a mid-screen $d011
+// write, which is another raster split this engine does not have.
 // ===========================================================================
-// ONE row per frame, round robin, not all five.
+// ONE ROW PER FRAME, ROUND ROBIN, and that is a cost decision. Drawing every
+// row every frame pushed the main thread's per-frame preparation past 74% of a
+// PAL frame, at which point passes start straddling the frame boundary,
+// publishFrame finds the previous record still unadopted, and the publication
+// skip shows as a one-frame scroll stutter.
 //
-// P3 measured this. Drawing all five diagnostic rows every frame cost enough
-// main-thread time that the integrated moving fixture's per-frame preparation
-// reached 74.6% of a PAL frame, and passes began straddling the frame
-// boundary: publishFrame then found the previous record still unadopted and
-// counted a publication skip, which a human sees as a one-frame scroll
-// stutter. 70 skips in 20,000 frames -- rare, real, and entirely avoidable.
-//
-// The HUD is a diagnostic surface, not gameplay. Every row still updates ten
-// times a second, which is faster than a human reads, and the cost drops to a
-// fifth. Nothing else about the frame changes: the row content, the page it is
-// written to, and the stamping of HUD rows into a regenerating back page are
-// all exactly as before.
+// These are a diagnostic surface, not gameplay: a row still updates many times
+// a second, faster than anyone reads it, at a fraction of the cost.
 hudTick:
     lda dispPage
     bne !pageB+
@@ -860,45 +796,6 @@ drawScrollRow:
     jsr putHexY
     rts
 
-// "MOV n  MFRM nnnn  OVF nn  SRT nn  FLT nn" — what P3 and P4 added, on ONE
-// row, and nothing that is already on another.
-//
-// MOV  1 when this fixture has trajectories, so the main loop is re-running
-//      motion and rebuilding the whole schedule every frame. 0 is a static
-//      P0/P1/P2 fixture, untouched between fixture changes.
-// MFRM frames of MOTION, which is what a trajectory is indexed by. On a moving
-//      fixture it must advance continuously; if it stops while the playfield
-//      keeps scrolling, the main thread has stopped preparing frames.
-// OVF  logical sprites that did not fit MAX_SCHED. Must read 00 on every
-//      fixture except MAXCAP, which exists to make it read 06.
-// SRT  sorted count -- how many logical IDs the sorter handed the builder.
-//      Must equal LOG on row 22: P4 has no visibility filtering, so every
-//      logical sprite is offered.
-// FLT  sorter fault, saturating. Must ALWAYS read 00.
-//
-// BOV (batch overflow) was dropped from the display to make room. It is
-// structurally unreachable while MAX_SCHED is 24 -- batch 0 holds six, so at
-// most nineteen batches can exist -- and every suite asserts it is zero. The
-// sorter's shift counter sortWork is likewise a timing diagnostic the tests
-// read directly rather than something a human watches.
-// "RING ORB nnnn  UP nnnn  DN nnnn  FEL nn" — the P5 orbit census.
-//
-// ORB counts completed orbits: the phase accumulator's high byte wrapping
-// through zero. On a ring fixture it must climb steadily; if it stops while the
-// scroller keeps moving, motion has died and everything below it is measuring
-// a still picture.
-//
-// UP and DN count logical X crossings of 255 in each direction, counted by the
-// ENGINE rather than predicted by the model. They must both climb, and on a
-// closed orbit they must stay within one of each other -- every sprite that
-// goes out must come back. A model can believe X crossed 255; this is the
-// machine saying it did.
-//
-// FEL is frameEntryLine, and it is the one number on this screen that must
-// never change. The frame transaction is armed for raster 250 and must execute
-// there; $FA is correct and anything else means the handler was re-entered
-// mid-display, which is the FIX 16 fault. A human can watch this single field
-// and know the invariant still holds.
 // A = value, Y = column. Writes two hex digits at (scrPtr),y and y+1.
 putHexY:
     pha
@@ -920,10 +817,10 @@ putHexY:
 hexDigit:  .byte $30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$01,$02,$03,$04,$05,$06
 
 // --- screen-code text -------------------------------------------------------
-// Five 8-column fields: label in cols 0..2, value in cols 4..5 of each field,
-// so a value can never overwrite a label.
-// FIX = fixture, ACC = accepted, REU = reuse events,
-// MRG = rejected inside our safety margin, UNS = rejected as physically unsafe.
+// 8-column fields: label in cols 0..2, value in cols 4..5 of each field, so a
+// value can never overwrite a label. The stats row reads the schedule builder's
+// own counters: ACC = accepted, REU = reuse events, MRG = rejected inside the
+// safety margin, UNS = rejected as physically unsafe.
 labelText: .byte   1,  3,  3, 32, 32, 32, 32, 32                    // "ACC     "
            .byte  18,  5, 21, 32, 32, 32, 32, 32                    // "REU     "
            .byte  13, 18,  7, 32, 32, 32, 32, 32                    // "MRG     "
@@ -941,16 +838,13 @@ scrollLabelText:
            .byte  32, 32, 32, 32                                    //            27..30
            .byte  32, 32, 32, 32, 32, 32, 32, 32, 32                //            31..39
 
-// "FIXTURE n  SPACE = NEXT   KEY" — column 8 is the digit and column KEY_COL
-// (29) is the live key-down block, so neither is in this string.
-// "FIXTURE nn  SPACE=NEXT  M=P3  KEY #". Two digits now: there are 24 fixtures.
 keyDown:       .byte 0
 lastFrameSeen: .byte 0
 
 // --- production frame diagnostics -------------------------------------------
-// Read by tests/test_slice_a.py; never read by the engine. Min/max and
-// saturating counts, in the style the rest of the engine already uses, because
-// a wrapping counter can read zero after a long run and look clean.
+// Never read by the engine. Min/max and saturating counts, in the style the
+// rest of the engine uses, because a wrapping counter can read zero after a
+// long run and look clean.
 gameSpanMax:   .byte 0                  // worst main-thread span, raster lines
                                         // after the frame transaction
 gameSpanOver:  .byte 0                  // frames whose span exceeded 255 lines:

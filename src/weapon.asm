@@ -1,79 +1,47 @@
 // ===========================================================================
-// weapon.asm — the player's guns: fire cadence, heat, overheat, and the shot
-// event a future collision system will consume.
+// weapon.asm — the player's guns: fire cadence, heat, overheat, shot event
 // ===========================================================================
 // NOT ONE VIC REGISTER IS WRITTEN FROM THIS FILE, and not one byte of HUD
 // bitmap RAM either. The ownership line is the same one src/hud.asm and
-// src/player.asm already draw:
+// src/player.asm draw:
 //
 //     gameplay   owns weapon state          <- here
 //     the HUD    owns presentation          src/hud.asm
 //     the renderer owns VIC writes          src/renderer.asm
 //
 //     joystick fire -> weaponTick -> heat -> weaponHudFeed -> hudHeatLo/Hi
-//                                   `-> shot event -> Slice D's collision
+//                                   `-> shot event -> src/collision.asm
 //
-// ---------------------------------------------------------------------------
-// WHAT THE OLD GAME ACTUALLY DID
-// ---------------------------------------------------------------------------
-// Read out of c64Shooter/src/main.asm before any of this was written. The
-// routines are updatePlayerFire (2418), updatePlayerCombatEffects (2690),
-// updateWeaponHeat (9964) and refreshHeatGaugeIfDirty (10039); the constants
-// are at 941-947 and 991-994.
+// THE BEHAVIOUR, in the terms the tests and the feel both depend on:
 //
-//   FIRE IS LEVEL-TRIGGERED, NOT EDGE-TRIGGERED. updatePlayerFire tests the
-//   joystick bit with no press/release history at all, so holding the button
-//   fires a volley every cadence period for as long as it is held.
+//   FIRE IS LEVEL-TRIGGERED. The joystick bit is read with no press/release
+//   history, so a held button fires a volley every cadence period.
 //
-//   THE CADENCE IS EIGHT FRAMES. A volley arms PLAYER_FIRE_COOLDOWN_TIMER to
-//   PLAYER_FIRE_COOLDOWN = 8; updatePlayerCombatEffects decrements it once per
-//   frame and updatePlayerFire refuses while it is non-zero, so the next volley
-//   lands exactly eight frames later.
+//   THE CADENCE IS WPN_FIRE_PERIOD FRAMES, enforced by refusing while
+//   wpnCooldown is non-zero.
 //
-//   BOTH CANNONS FIRE TOGETHER. One volley traces the left ray and then the
-//   right ray, in the same call, in the same frame. They are not alternated.
-//   Each resolves independently against its own nearest target, which is how a
-//   volley could deal nothing, one hit or two.
+//   BOTH CANNONS FIRE TOGETHER, not alternately: one volley emits two rays in
+//   the same frame at the same Y, and each resolves independently, so a volley
+//   deals nothing, one hit or two.
 //
-//   THE PLAYER'S WEAPON IS TRUE HITSCAN. tracePlayerCannon walks the logical
-//   object list and returns a target; no projectile object is ever allocated
-//   for it. (Enemy bullets ARE objects, but that is the enemies' weapon.)
+//   THE PLAYER'S WEAPON IS HITSCAN. No projectile object is allocated for it.
+//   (Hostile bullets ARE pool objects -- that is the enemies' weapon.)
 //
-//   HEAT IS PER FRAME, NOT PER SHOT. updateWeaponHeat adds HEAT_RISE_PER_FRAME
-//   whenever the cadence timer is non-zero -- and the old file says why in as
-//   many words: "'The weapon is firing' is defined as
-//   PLAYER_FIRE_COOLDOWN_TIMER != 0. That timer is only ever armed by a
-//   SUCCESSFUL volley, so heat tracks actual firing rather than the button."
-//   Held fire keeps the timer non-zero on every frame, so held fire is +2 every
-//   frame: 150 frames, three seconds, from cold to overheated.
+//   HEAT IS PER FRAME, NOT PER SHOT. "Firing" is defined as wpnCooldown != 0,
+//   and only a SUCCESSFUL volley arms that timer, so heat tracks actual firing
+//   rather than the button.
 //
-//   COOLING NEVER OVERLAPS RISING. The accumulator is strictly either/or:
-//   locked -> cooling, not firing -> cooling, otherwise rising.
+//   COOLING NEVER OVERLAPS RISING. Strictly either/or: locked -> cooling, not
+//   firing -> cooling, otherwise rising. That is what makes the timings below
+//   exact rather than approximate.
 //
-//   THE LOCK IS A LATCH WITH TWO DIFFERENT THRESHOLDS. It sets when heat
-//   reaches HEAT_MAX and clears when heat falls back to HEAT_REENABLE, which is
-//   half of it -- so an overheat costs a full second before the gun works again
-//   and two before it is cold. While locked, updatePlayerFire returns before it
-//   arms the cadence, so a held button generates no heat at all during the
-//   lockout and cannot extend it.
-//
-//   NO UPGRADE MACHINERY EXISTED. The constants were centralised "so a later
-//   upgrade screen can change capacity, cooling rate or sustained-fire duration
-//   without touching the fire code. No upgrade machinery is built now." That is
-//   still true here.
-//
-// DELIBERATELY NOT TAKEN:
-//   * tracePlayerCannon / hitCannonTarget / damageEnemy. There are no enemies
-//     yet, and the ray test belongs with the object pool it walks (Slice D).
-//     What survives is the EVENT: where the rays are, and when.
-//   * the gate on PLAYER_STATE == ALIVE. There is no player state machine yet;
-//     Slice F adds one, and adds one branch at the top of weaponFire.
-//   * every line of the old HUD gauge: composeHeatGauge, publishHeatBuffer,
-//     the double-buffered bitmaps and the hudProofPtr publication. src/hud.asm
-//     already does all of that, correctly, and this file only sets values.
+//   THE LOCK IS A LATCH WITH TWO THRESHOLDS -- set at WPN_HEAT_MAX, cleared at
+//   WPN_HEAT_REENABLE. While locked, weaponFire returns BEFORE arming the
+//   cadence, so a held button produces no heat during a lockout and cannot
+//   extend it.
 // ===========================================================================
 
-// --- the numbers, all from c64Shooter/src/main.asm:941-947 -----------------
+// The heat numbers, and the durations they define at 50 Hz:
 //
 //   0 -> HEAT_MAX      at +2/frame  = 150 frames = 3.0 s of continuous fire
 //   HEAT_MAX -> 150    at -3/frame  =  50 frames = 1.0 s to re-enable firing
@@ -110,19 +78,15 @@ wpnFlashPhase: .byte 0              // 0 = not flashing, 1 = bright, 2 = dark.
                                     // confusion is what lets a dec run on a zero
                                     // timer and wrap it to 255.
 
-// --- the shot event ---------------------------------------------------------
-// THE CONTRACT SLICE D WILL CONSUME.
-//
+// --- the shot event, which src/collision.asm consumes -----------------------
 // shotFired is true for exactly the frame a volley resolves: weaponTick clears
 // it at the top of every frame and sets it only on a legal shot. A consumer
 // running after weaponTick in the same frame sees it; nothing has to remember
-// to clear it, and nothing has to look at the joystick to know a shot happened.
+// to clear it, and nothing has to look at the joystick to know a shot fired.
 //
 // The rays are an array with a count rather than two named pairs, because
-// "this volley produced these rays" is what a hitscan test actually needs to
-// walk, and because the old game's two-cannon volley is a fact about the
-// weapon rather than about the mechanism. It is not an upgrade system: there
-// is one weapon and it has two barrels.
+// walking "the rays this volley produced" is what the hitscan needs. It is not
+// an upgrade system: there is one weapon and it has two barrels.
 shotFired:    .byte 0               // 1 = a volley resolved THIS frame
 shotRays:     .byte 0               // valid entries in shotX* below
 shotXLo:      .fill WPN_RAYS, 0     // ray origin X, nine bits
@@ -131,7 +95,7 @@ shotY:        .byte 0               // shared origin Y: both rays leave the ship
                                     // at the same height and travel up
 
 weaponStateEnd:
-.if (weaponStateEnd > $c600) { .error "the weapon state has grown into the P3 fixture data at $c600" }
+.if (weaponStateEnd > $c600) { .error "the weapon state has grown past its $c600 ceiling" }
 
 // ===========================================================================
 // Code. MAIN THREAD ONLY, and outside VIC bank 0 beside the player and the
@@ -154,18 +118,16 @@ weaponInit:
 // ---------------------------------------------------------------------------
 // weaponTick — one frame of weapon. MAIN THREAD.
 //
-// The three steps run in the order the old game ran them across its frame, and
-// the order is load-bearing:
+// THE ORDER OF THE THREE STEPS IS LOAD-BEARING:
 //
-//   1. timers down     (old updatePlayerCombatEffects, before the fire test)
-//   2. try to fire     (old updatePlayerFire)
-//   3. heat            (old updateWeaponHeat, after the fire test)
+//   1. timers down
+//   2. try to fire
+//   3. heat
 //
 // Step 3 after step 2 is what makes a volley heat the gun on its OWN frame.
-// Step 2 reading a latch that step 3 set LAST frame is what stops a ghost
-// volley escaping on the frame the gun overheats -- the old file spells that
-// cross-frame relationship out, and putting both steps in one routine keeps it
-// rather than losing it.
+// Step 2 reading an overheat latch that step 3 set LAST frame is what stops a
+// ghost volley escaping on the frame the gun overheats. Both steps live in one
+// routine so that cross-frame relationship cannot be split apart.
 // ---------------------------------------------------------------------------
 weaponTick:
     lda wpnCooldown                     // 1. the cadence, and the muzzle flash
@@ -185,9 +147,7 @@ weaponTick:
     // fall through to the accumulator  // 3.
 
 // ---------------------------------------------------------------------------
-// weaponHeat — the accumulator. Strictly either/or: rising or cooling, never
-// both, which is what makes the three timings above exact rather than
-// approximate.
+// weaponHeat — the accumulator. Rising or cooling, never both.
 // ---------------------------------------------------------------------------
 weaponHeat:
     lda wpnHeatLo                       // cold and not firing: nothing any
@@ -259,23 +219,21 @@ weaponCool:
 // ---------------------------------------------------------------------------
 // weaponFire — resolve a volley if one is legal this frame.
 //
-// The three refusals, in the old game's order. The lockout comes FIRST and
-// returns before the cadence is armed, which is the whole reason a held button
-// cannot extend an overheat: no cadence means no heat.
+// Three refusals, and the ORDER matters: the lockout is tested first and
+// returns before the cadence is armed, which is why a held button cannot
+// extend an overheat -- no cadence means no heat.
+//
+// A player-state gate ("only an alive ship may fire") belongs at the top of
+// this routine if one is ever added.
 // ---------------------------------------------------------------------------
 weaponFire:
-    // SLICE F ADDS THE PLAYER-STATE GATE HERE. c64Shooter's updatePlayerFire
-    // opens with `PLAYER_STATE == ALIVE`, so an exploding or respawning ship
-    // cannot shoot. There is no player state machine yet; this is where its
-    // one branch goes.
     lda wpnOverheated
     bne !refuse+
     lda wpnCooldown
     bne !refuse+
-    lda joyState                        // ACTIVE LOW, and LEVEL-triggered: the
-    and #JOY_FIRE                       // old game reads the bit with no press
-    bne !refuse+                        // history, so holding fire keeps firing
-                                        // at the cadence
+    lda joyState                        // ACTIVE LOW, and LEVEL-triggered: no
+    and #JOY_FIRE                       // press history, so holding fire keeps
+    bne !refuse+                        // firing at the cadence
 
     lda #WPN_FIRE_PERIOD                // arm the cadence before resolving
     sta wpnCooldown                     // anything: this is what heats the gun
@@ -285,8 +243,8 @@ weaponFire:
 
     // ---- the shot event -------------------------------------------------
     // Both rays leave the ship on the same frame, at the same Y, one per
-    // cannon. Nothing consumes them yet and that is fine: the event expires
-    // unused at the next weaponTick.
+    // cannon. The event expires at the next weaponTick whether or not anything
+    // read it.
     lda plyY
     sta shotY
     lda plyX
@@ -313,15 +271,14 @@ weaponFire:
 // ---------------------------------------------------------------------------
 // weaponHudFeed — logical heat into the HUD's logical heat. MAIN THREAD.
 //
-// This is the whole of the gameplay-to-HUD boundary for this slice: two bytes
-// of value, one dirty bit, and a colour. No bitmap is touched here; hudUpdate
+// The whole of the gameplay-to-HUD boundary for the weapon: two bytes of
+// value, one dirty bit, and a colour. No bitmap is touched here; hudUpdate
 // draws, from the idle spin, inside the raster window it refuses to leave.
 //
 // The dirty bit is set only when the DRAWN PIXEL COUNT would change, not when
 // the value changes. 300 units map onto 48 pixels, so the bar needs redrawing
-// roughly every sixth unit; setting it every frame would make hudUpdate do real
-// work on frames where the picture is identical. That is the HUD's own cost
-// model and hudDemoTick already used it -- this keeps it.
+// roughly every sixth unit, and setting the bit every frame would make
+// hudUpdate do real work on frames where the picture is identical.
 // ---------------------------------------------------------------------------
 weaponHudFeed:
     lda wpnHeatLo
@@ -379,9 +336,9 @@ weaponHudFeed:
     rts
 
 // ---------------------------------------------------------------------------
-// SEGMENT GROWTH GUARD. Stated because an unbounded explicit `* =` segment is
-// how the previous project found its overlaps at run time instead of at build
-// time -- and how this one found its scroller overflow in Slice A'.
+// SEGMENT GROWTH GUARD. Every explicit `* =` segment in this engine carries
+// one: an unbounded segment turns an overlap into a run-time mystery instead
+// of a build error.
 // ---------------------------------------------------------------------------
 .if (* > $4800) {
     .error "the weapon code has outgrown its $4600 segment"

@@ -3,13 +3,11 @@
 // ===========================================================================
 // NOT ONE VIC REGISTER IS WRITTEN FROM THIS FILE.
 //
-// AGENTS.md rule 2: one subsystem owns sprite VIC state, and that subsystem is
-// src/renderer.asm. The HUD time-shares HW2-HW7 with the gameplay multiplexer,
-// so the code that programs the VIC -- exHud -- lives there, beside the handoff
-// that takes those slots back. What lives here is the logical HUD state, the
-// bitmap pool, and the main-thread routines that draw into it.
-//
-// THE DIVISION OF LABOUR IS THE POINT OF THIS SLICE:
+// One subsystem owns sprite VIC state and that subsystem is src/renderer.asm.
+// The HUD time-shares HW2-HW7 with the gameplay multiplexer, so the code that
+// programs the VIC -- exHud -- lives there, beside the handoff that takes those
+// slots back. What lives here is the logical HUD state, the bitmap pool, and
+// the main-thread routines that draw into it.
 //
 //     main thread   decides what the HUD says and draws it into bitmap RAM
 //     exHud         points the VIC at bitmaps that are already finished
@@ -32,15 +30,15 @@
 .const HUD_HEAT_PIXELS  = 48                // 24 + 24, HW3 and HW4 side by side
 
 // --- bitmap pool ------------------------------------------------------------
-// $3200-$357f, in the free region between the raster executor and the blank
-// character set at $3800. Pointers $c8..$d5, DELIBERATELY DISJOINT from the
-// gameplay pool ($2000-$23ff, pointers $80..$8f): the handoff at raster 40 has
-// to overwrite every HUD pointer with a gameplay one, and if the two pools
-// shared a value a test could not tell a correct overwrite from a missing one.
+// $3200-$357f, below the player's bitmaps and above screen page B. The pointer
+// values $c8..$d5 are DELIBERATELY DISJOINT from every gameplay pointer: the
+// handoff at raster 40 overwrites each HUD pointer with a gameplay one, and if
+// the two pools could share a value, a correct overwrite and a missing one
+// would be indistinguishable from outside.
 //
 // Four bitmaps are DRAWN at run time and ten are precomputed at assembly time.
-// Lives has six possible values and upgrade four, so those two components cost
-// nothing to "update" at all -- the pointer is the update.
+// Lives has six possible values and upgrade four, so for those two components
+// the pointer IS the update -- no drawing at all.
 .const HUD_SPRITES      = $3200
 .const HUD_HEAT_L       = HUD_SPRITES + 0 * 64      // ptr $c8
 .const HUD_HEAT_R       = HUD_SPRITES + 1 * 64      // ptr $c9
@@ -61,38 +59,30 @@
 .if ((HUD_SPRITES & 63) != 0) { .error "the HUD sprite block must be 64-byte aligned" }
 .if (HUD_SPRITES_END > BLANK_CHARSET) { .error "HUD bitmaps run into the blank charset at $3800" }
 .if (HUD_SPRITES < SCREEN_B + $400) { .error "HUD bitmaps overlap screen page B" }
-// The P5 ring tables and the raster executor have both LEFT VIC bank 0, so
-// there is nothing of theirs left below to collide with. The
-// executor is guarded from its own side too: renderer.asm asserts that it has
-// not grown past HUD_SPRITES, which is the direction that can actually happen.
-// p5_tables.asm cannot be referenced here -- it is imported after this file,
-// because renderer.asm needs these constants at parse time.
 
 // --- placement --------------------------------------------------------------
-// Y=16, measured in Slice 3: a VIC sprite at Y=n is displayed on rasters
-// n+1..n+21, so Y=16 gives 17..37 and the raster-40 handoff has a clear line in
-// hand. At the historical Y=18 the span is 19..39 and there is none.
+// Y=16. A VIC sprite at Y=n is displayed on rasters n+1..n+21, so Y=16 gives
+// 17..37 and the raster-40 handoff has a clear line in hand. Y=18 would span
+// 19..39 and leave none.
 .const HUD_Y            = 16
 
-// X. The two gauge halves are ADJACENT so each reads as one object: heat spans
-// 96..143 as a continuous 48-pixel bar, score spans 176..223 as six digits.
-// HW7 sits past X=255 so the HUD's $d010 is not zero -- gameplay's is zero on
-// every static fixture, so a handoff that forgot to rewrite it would leave that
-// sprite 256 pixels adrift.
+// X. The two gauge halves are ADJACENT so each pair reads as one object: heat
+// spans 96..143 as a continuous 48-pixel bar, score spans 176..223 as six
+// digits. HW7 sits past X=255, which keeps the HUD's $d010 non-zero so that a
+// handoff failing to rewrite it is visible rather than silent.
 .const HUD_D010         = %10000000                 // HW7 only
 .const HUD_ENABLE       = %11111100                 // HW2..HW7, and nothing else
 
-// Mode registers the HUD deliberately dirties, so the handoff's restoration is
-// tested rather than vacuously satisfied. $d017 is NOT among them: Y expansion
-// doubles a sprite's height AND its DMA span, and a Y-expanded HUD at Y=16
-// would fetch until line 58 -- through the handoff and into the aperture.
+// Mode registers the HUD sets, and which the handoff must therefore restore.
+// $d017 is deliberately NOT among them: Y expansion doubles a sprite's height
+// AND its DMA span, and a Y-expanded HUD at Y=16 would fetch until line 58 --
+// through the handoff and into the aperture.
 .const HUD_D01B         = %11111100                 // all six behind graphics
 .const HUD_D01D         = %00000100                 // HW2 (lives) X-expanded
 
 // --- dirty flags ------------------------------------------------------------
 // One bit per component. hudUpdate does nothing at all when the byte is zero,
-// which is the common case: the demo cadences below are deliberately slow and
-// out of step with each other.
+// which is the common case -- each component changes on its own slow cadence.
 .const HUD_DIRTY_LIVES   = %00000001
 .const HUD_DIRTY_HEAT    = %00000010
 .const HUD_DIRTY_SCORE   = %00000100
@@ -178,7 +168,7 @@ heatPix:   .fill 76, round(i * HUD_HEAT_PIXELS / 75)
 barOfs:    .fill 25, i * 3
 
 hudStateEnd:
-.if (hudStateEnd > $ca00) { .error "the HUD state has grown into the fixture dispatch at $ca00" }
+.if (hudStateEnd > $ca00) { .error "the HUD state has grown past its $ca00 ceiling" }
 
 // ===========================================================================
 // Glyphs and fill patterns. Also outside bank 0.
@@ -356,9 +346,8 @@ hudUpdWork:                             // traced: the cost of a real update is
     //
     // $d012 IS THE LOW BYTE OF A NINE-BIT COUNTER, and bit 7 of a $d011 READ is
     // the ninth. Comparing the low byte alone calls raster 260 "4" and scores a
-    // perfectly ordinary update as a wrap; the first version of this check did
-    // exactly that and reported twelve false alarms on the heaviest fixture.
-    // Reading RST8 first is what makes the comparison mean anything.
+    // perfectly ordinary update as a wrap, so RST8 must be read first or this
+    // counter means nothing.
     lda $d012
     cmp hudUpdEndMax
     bcc !notEnd+
@@ -402,8 +391,8 @@ hudRenderLives:
     lda hudLives
     cmp #HUD_LIVES_MAX + 1
     bcc !ok+
-    lda #HUD_LIVES_MAX                  // CAP, stated in code and not only in
-!ok:                                    // the demo that happens to feed it
+    lda #HUD_LIVES_MAX                  // CAP: an out-of-range value selects a
+!ok:                                    // real bitmap, never one past the table
     clc
     adc #HUD_PTR_LIVES_0
     sta hudPtrLive + 0                  // HW2
@@ -608,31 +597,26 @@ hudScoreBump:
 // ---------------------------------------------------------------------------
 // hudDemoTick — MAIN THREAD, once per displayed frame.
 //
-// A deterministic exercise for the three components gameplay does not feed yet.
-// The cadences are deliberately DIFFERENT and mostly slow: if two components
-// changed together every frame, a tear or a slot-ownership mistake could hide
-// inside the motion. As it is, the score ticks visibly, the bar sweeps, and
-// lives and upgrade change rarely enough to read.
+// A deterministic placeholder for the three components no game system feeds
+// yet. The cadences are deliberately DIFFERENT and mostly slow: components
+// changing together every frame would let a tear or a slot-ownership mistake
+// hide inside the motion.
 //
 //   score     +10 every 8 frames                              (~1.6 per second)
 //   lives     one fewer every 128 frames, 5 -> 0 -> 5         (~2.5s)
 //   upgrade   next state every 192 frames, 0 -> 3 -> 0        (~3.8s)
 //
-// HEAT IS NOT HERE ANY MORE. It is real gameplay state as of Slice B; score,
-// lives and upgrade are still waiting for the systems that own them.
+// HEAT IS NOT DRIVEN HERE. src/weapon.asm feeds hudHeatLo/Hi from the real
+// weapon through weaponHudFeed. Whatever comes to own score, lives or upgrade
+// must likewise REPLACE the block below rather than run alongside it: two
+// writers of one logical value is how a HUD starts disagreeing with the game
+// it is describing.
 // ---------------------------------------------------------------------------
 hudDemoTick:
     inc hudDemoFrame
     bne !noHi+
     inc hudDemoFrame + 1
 !noHi:
-
-    // HEAT IS NO LONGER A DEMONSTRATION. src/weapon.asm feeds hudHeatLo/Hi
-    // from the player's real weapon and marks the component dirty when the
-    // drawn pixel count would change -- see weaponHudFeed, which kept this
-    // block's dirty rule exactly. The ramp that used to live here is gone
-    // rather than disabled: two writers of one logical value is how a HUD
-    // starts disagreeing with the game it is describing.
 
     // ---- score: +10 every 8 frames ---------------------------------------
     lda hudDemoFrame
@@ -681,4 +665,4 @@ hudDemoTick:
 hudDemoFrame:   .byte 0, 0
 hudDemoUpgTick: .byte 0
 
-.if (* > $1800) { .error "the HUD code has grown into the fixture tables at $1800" }
+.if (* > $1800) { .error "the HUD code has grown past its $1800 ceiling" }

@@ -9,49 +9,37 @@
 // the renderer's business.
 //
 // ---------------------------------------------------------------------------
-// WHY THIS EXISTS AT ALL
+// QUARTER-PIXEL VELOCITY, WITH A PER-OBJECT REMAINDER
 // ---------------------------------------------------------------------------
-// src/enemy.asm's first production enemy moved by adding objVX/objVY to its
-// position every frame, in WHOLE PIXELS -- the old game's own model, recovered
-// faithfully and correct for a straight dive. It cannot express a curve.
-//
-// Whole pixels per frame is the problem, not the adding. The slowest non-zero
-// speed is one pixel a frame -- fifty pixels a second -- so a curve built from
-// whole-pixel velocities can only turn in steps of that size, and a turn made
-// of fifty-pixel-per-second steps is a staircase, not an arc.
-//
-// So this file adds a QUARTER-PIXEL velocity with a per-object remainder:
+// Whole pixels a frame cannot express a curve: the slowest non-zero speed
+// would be fifty pixels a second, and a turn made of steps that size is a
+// staircase. So velocities are in QUARTER pixels and each object carries its
+// own remainder:
 //
 //     sum   = accumulator + velocity        (velocity in quarter pixels)
 //     delta = sum >> 2                      (arithmetic: floor, for negatives)
 //     acc   = sum & 3                       (0..3, the remainder carried on)
 //
-// which is exact floor division with no drift, costs a handful of cycles, and
-// gives a speed granularity of 12.5 pixels a second. THE SIGN HANDLING IS THE
-// WHOLE TRICK and it is worth stating why it is correct: for sum = -5,
-// an arithmetic shift right by two gives -2 (floor(-1.25) = -2, not -1), and
-// -5 AND 3 = 3, and -2*4 + 3 = -5. The remainder stays positive and the
-// division floors, which is exactly what a position accumulator needs. A
-// logical shift or a "negate, shift, negate" would drift by a pixel every
-// four frames in one direction only, and the curve would visibly sag.
+// Exact floor division, no drift, a handful of cycles, and a speed granularity
+// of 12.5 pixels a second.
+//
+// THE SIGN HANDLING IS THE WHOLE TRICK. For sum = -5, an ARITHMETIC shift right
+// by two gives -2 (floor(-1.25) = -2, not -1), and -5 AND 3 = 3, and
+// -2*4 + 3 = -5: the remainder stays positive and the division floors, which is
+// what a position accumulator needs. A logical shift, or "negate, shift,
+// negate", would drift a pixel every four frames in one direction only and
+// every curve would visibly sag.
 //
 // ---------------------------------------------------------------------------
-// v1.1: COMPOSABLE STAGES, AND WHY THE ARC TABLE CHANGED SHAPE
+// COMPOSABLE STAGES OVER A HEADING TABLE
 // ---------------------------------------------------------------------------
-// v1 gave each object one primitive and one queued follow-on (wmNext), and its
-// arc was a QUARTER TURN FROM A FIXED HEADING: sixteen phases from "east" to
-// "south", with the mirrored variant running east-to-south with vx negated.
-// That is enough for a sweep and a hook and nothing else, because two arcs
-// cannot be joined -- the second one restarts pointing east whatever the first
-// one left the object doing, so ARC -> ARC is a ninety-degree snap rather than
-// a longer turn.
-//
-// So the table is now a HEADING table: WM_HEAD_LEN directions around the whole
-// circle at a constant speed, and an object carries WHICH DIRECTION IT IS
-// FACING (wmPhase) rather than how far through one particular turn it is. An
-// arc stage then means "rotate the heading N steps", clockwise (WM_ARC) or
-// anticlockwise (WM_ARC_MIRROR), and everything the content wants falls out of
-// composition rather than out of new code:
+// An object carries WHICH DIRECTION IT IS FACING (wmPhase, an index into a
+// table of WM_HEAD_LEN headings around the whole circle at constant speed),
+// not how far through a particular turn it is. An arc stage therefore means
+// "rotate the heading N steps", clockwise (WM_ARC) or anticlockwise
+// (WM_ARC_MIRROR), and a turn leaves the object on its FINAL heading -- which
+// is what lets stages compose instead of each one snapping back to a fixed
+// start direction:
 //
 //     quarter turn   ARC 16
 //     half turn      ARC 32
@@ -59,22 +47,14 @@
 //     S-turn         ARC n -> ARC_MIRROR m
 //     hook and glide ARC n -> STRAIGHT -> ARC m
 //
-// The old quarter arc is exactly the first sixteen entries of this table, so
-// nothing that worked in v1 moves differently: a sweep still launches east and
-// still turns south, it just says so as "heading 0, rotate 16" instead of
-// "phase 0..15 of the only turn there is".
-//
-// WHAT THIS STILL IS NOT. Not a bytecode VM, not a spline evaluator, not a
-// script interpreter, and not target-seeking. A stage record is four bytes
-// read with indexed loads, the interpreter is one compare ladder, and the
-// vocabulary is five primitives. Everything interesting is meant to come from
-// the ORDER the content puts them in, which costs no 6502 cycles at all.
+// WHAT THIS IS NOT. Not a bytecode VM, not a spline evaluator, not a script
+// interpreter, and not target-seeking. A stage record is four bytes read with
+// indexed loads, the interpreter is one compare ladder, and the vocabulary is
+// five primitives. Everything interesting comes from the ORDER the content
+// puts them in, which costs no 6502 cycles at all.
 // ===========================================================================
 
 // --- the primitives ---------------------------------------------------------
-// The v1 numbering is deliberately UNCHANGED. WM_HOLD is appended rather than
-// inserted, so every value a test, a report or a monitor session learned about
-// the movement state still means what it meant.
 .const WM_STRAIGHT   = 0        // constant velocity for wmTimer frames
 .const WM_ARC        = 1        // rotate the heading CLOCKWISE, one step per
                                 // stage-authored frame count
@@ -123,17 +103,13 @@
 //     heading 48   north  ( 0, -6)
 //
 // Sixty-four so that the wrap is AND #63 rather than a compare and a fixup,
-// and because sixty-four is what makes a quarter turn sixteen steps: the same
-// sixteen the v1 arc had, at the same four frames each, so a quarter turn is
-// still 64 frames and still turns at the same rate.
+// and so that a quarter turn is sixteen steps of WM_ARC_STEP frames: 64 frames.
 //
-// GENERATED RATHER THAN WRITTEN OUT, which is a reversal of the v1 table's own
-// reasoning ("the table a human reads is the table the 6502 executes"). That
-// argument was sound for sixteen hand-checkable pairs and is not for a hundred
-// and twenty-eight: nobody verifies the sixty-fourth cosine by eye, and a
-// typo in it would be invisible. What the assembly-time proofs below check is
-// therefore not the arithmetic but the PROPERTIES the movement code depends
-// on -- the quadrant anchors, the smoothness, and that no heading stands still.
+// GENERATED, NOT HAND-WRITTEN: nobody verifies the sixty-fourth cosine by eye,
+// so a typo in a literal table would be invisible. The assembly-time proofs
+// below therefore check not the arithmetic but the PROPERTIES the movement code
+// depends on -- the quadrant anchors, the smoothness, and that no heading
+// stands still.
 .const WM_HEAD_LEN  = 64
 .const WM_HEAD_MASK = WM_HEAD_LEN - 1
 .const WM_ARC_STEP  = 4         // default frames per heading step
@@ -198,24 +174,20 @@
 // ===========================================================================
 // State. MAIN THREAD ONLY. One entry per pool slot.
 // ===========================================================================
-// These are per-OBJECT arrays that happen not to live beside the pool's own:
+// Per-OBJECT arrays that live apart from the pool's own only because
 // src/objects.asm's block at $c580 runs up against the collision state at
-// $c5f3 with nothing to spare. Indexed by the same slot number, cleared by the
-// same objectZeroSlot, and therefore subject to the same invariant -- A
-// REUSED SLOT INHERITS NOTHING. That clearing is in objects.asm rather than
-// here precisely because it is the POOL's invariant, not this file's.
+// $c5f3. Indexed by the same slot number and cleared by the same
+// objectZeroSlot, so they are subject to the same invariant: A REUSED SLOT
+// INHERITS NOTHING.
 * = $7700 "movement state"
 
 wmMode:    .fill MAX_OBJECTS, 0     // WM_*: which primitive is running
 wmStage:   .fill MAX_OBJECTS, 0     // BYTE offset of the current stage record
-                                    // in waveStageTable. v1's wmNext held a
-                                    // single queued primitive and lived here;
-                                    // a cursor into an authored list is the
-                                    // same byte doing a strictly larger job.
-wmPhase:   .fill MAX_OBJECTS, 0     // HEADING, 0..WM_HEAD_LEN-1. v1 counted
-                                    // progress through one fixed turn here;
-                                    // it now says which way the object faces,
-                                    // which is what lets turns compose.
+                                    // in waveStageTable: a cursor into the
+                                    // authored path this object is walking
+wmPhase:   .fill MAX_OBJECTS, 0     // HEADING, 0..WM_HEAD_LEN-1: which way the
+                                    // object faces, NOT progress through a
+                                    // turn. That is what lets turns compose.
 wmTimer:   .fill MAX_OBJECTS, 0     // frames left in this stage (straight,
                                     // hold) or in this heading step (arcs)
 wmSteps:   .fill MAX_OBJECTS, 0     // heading steps left in this arc stage
@@ -237,10 +209,8 @@ movementStateEnd:
 // wmClearSlot — every movement field of slot X. Entry/exit: X = slot.
 //
 // Called by objectZeroSlot, so a slot handed out by objectAlloc carries no
-// trace of its previous occupant's trajectory. The old game hand-zeroed five
-// named fields at each spawn site and this repository already rejected that
-// pattern once: naming fields is how the list goes stale the first time
-// someone adds a tenth.
+// trace of its previous occupant's trajectory. Exhaustive on purpose: clearing
+// only the fields that seem to matter is how such a list goes stale.
 // ---------------------------------------------------------------------------
 wmClearSlot:
     lda #0
@@ -399,10 +369,8 @@ wmArcStep:
 // wmLoadHeading — velocity <- the heading table at this object's heading.
 // X = slot, preserved.
 //
-// There is no mirroring here any more. v1 negated vx to hand the turn over,
-// which worked only because its arc always started east; a heading table has
-// west in it already, so WM_ARC_MIRROR differs from WM_ARC in which way it
-// STEPS and in nothing else.
+// No mirroring or negation: the table already contains every direction, so
+// WM_ARC_MIRROR differs from WM_ARC in which way it STEPS and nothing else.
 // ---------------------------------------------------------------------------
 wmLoadHeading:
     ldy wmPhase,x

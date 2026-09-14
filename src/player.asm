@@ -26,44 +26,18 @@
 // render correctly, because exHud reads the immutable CURRENT block and nothing
 // else.
 //
-// HW0/HW1 ARE NOT IN THE MUX. docs/ENGINE_CONTRACT.md §2 reserves them, and the
-// point of this slice is to honour that literally: the player never enters
-// logY/logX, is never sorted, never occupies a schedule entry and never
-// competes for a slot. MUX_FIRST_SLOT stays 2 and MAX_SCHED stays 24.
+// HW0/HW1 ARE NOT IN THE MUX. docs/ENGINE_CONTRACT.md §2 reserves them, and
+// that is honoured literally: the player never enters logY/logX, is never
+// sorted, never occupies a schedule entry and never competes for a slot.
+// MUX_FIRST_SLOT stays 2 and MAX_SCHED stays 24.
 //
-// ---------------------------------------------------------------------------
-// WHAT WAS TAKEN FROM THE OLD GAME, AND WHAT WAS NOT
-// ---------------------------------------------------------------------------
-// Behaviour reference: c64Shooter/src/main.asm.
+// THE SHIP IS TWO CO-LOCATED HIRES SPRITES, a hull and a trim layer, because
+// $d01c is forced to zero engine-wide and one hires sprite is one colour. Two
+// reserved slots buy the second colour that the mux enemies cannot have.
 //
-//   updatePlayer (2348-2416)   the movement: ONE pixel per frame per axis,
-//                              read from joystick port 2, no acceleration and
-//                              no momentum. The old routine was read in full
-//                              before this was written -- there is no velocity
-//                              state in it, and none is invented here.
-//   PLAYER_START_X/Y (~966)    160 / 220, kept.
-//   X bounds (2380-2416)       the old code refused to move left at X=23 and
-//                              right at X=321. Kept as values; the test is now
-//                              a total clamp rather than a pre-move refusal.
-//   playerSprite (5413)        the ship ART, converted at assembly time -- see
-//                              the bitmap section below.
-//   PLAYER_COLOUR_NORMAL = 14  the hull colour, kept.
-//   $D026 = $0f (setupSprites) the light-grey highlight colour, kept as the
-//                              overlay colour.
-//   PLAYER_LAYER_COUNT = 2     the two-co-located-hires-layers idea, from the
-//                              experimental-three-layer-player work. The IDEA
-//                              is kept; none of its code is.
-//
-// Deliberately NOT taken:
-//   * PLAYER_MAX_Y = 237. It relied on the old open lower border showing
-//     sprites below the aperture. See PLAYER_MAX_Y below.
-//   * the multicolour player ($D025/$D026 shared registers). The contract
-//     forces $d01c = 0 on both sides of the handoff, so every sprite is hires.
-//   * OBJECT_X/OBJECT_Y[0]: the player no longer lives in the object pool.
-//   * OBJECT_SPRITE/OBJECT_COLOUR as a state machine (the old muzzle flash and
-//     respawn blink wrote them directly). Presentation is a block here.
-//   * PLAYER_HW_MASK, the old "which hardware slot is the player in this
-//     frame" mask. The answer is now permanently HW0 and HW1.
+// MOVEMENT IS ONE PIXEL PER FRAME PER AXIS, read from joystick port 2, with no
+// acceleration and no momentum -- there is no velocity state in this file, by
+// design.
 // ===========================================================================
 
 // --- the two reserved hardware slots ---------------------------------------
@@ -85,10 +59,10 @@
 .const PLAYER_PTR_FIRST = PLAYER_SPRITES / 64       // $d6
 .const PLAYER_PTR_BASE  = PLAYER_PTR_FIRST + 0
 .const PLAYER_PTR_TRIM  = PLAYER_PTR_FIRST + 1
-// The muzzle flash is a HULL-ONLY change: the old firing bitmap differs from the
+// The muzzle flash is a HULL-ONLY change: the firing bitmap differs from the
 // resting one on rows 0-2 and nowhere else, and every differing pixel is a hull
-// pixel. So the overlay keeps PLAYER_PTR_TRIM and only the base pointer moves,
-// which costs ONE extra 64-byte block rather than two.
+// pixel. So the trim layer keeps PLAYER_PTR_TRIM and only the base pointer
+// moves, which costs ONE extra 64-byte block rather than two.
 .const PLAYER_PTR_FIRE  = PLAYER_PTR_FIRST + 2
 
 .if ((PLAYER_SPRITES & 63) != 0) { .error "the player sprite block must be 64-byte aligned" }
@@ -101,73 +75,57 @@
 }
 
 // --- colours ----------------------------------------------------------------
-// 14 is the old PLAYER_COLOUR_NORMAL; 15 is the old $D026 the highlight pixels
-// indexed. Two layers carry two colours, so the old dark-grey ($D025) fuselage
-// core and the light-grey ($D026) spine merge into ONE light-grey stripe. That
-// is the whole visual cost of hires, and it is a deliberate trade: the
-// SILHOUETTE is preserved exactly, which is what a player recognises.
+// Two hires layers carry two colours. The silhouette is what a player
+// recognises and it is preserved exactly; the internal shading a multicolour
+// ship would have had is not available at all with $d01c forced to zero.
 .const PLAYER_COL_BASE  = 14                        // light blue hull
 .const PLAYER_COL_TRIM  = 15                        // light grey centre stripe
                                                     // and exhaust
-// The hull flashes red for the muzzle window, exactly as the old game's
-// PLAYER_COLOUR_MUZZLE did. The trim keeps its colour: the old ship had ONE
-// per-sprite colour to flash and this one has two, so flashing both would be
-// inventing a look rather than preserving one.
+// The HULL flashes red for the muzzle window and the trim keeps its colour:
+// flashing both layers reads as the whole ship changing colour rather than as
+// a gun firing.
 .const PLAYER_COL_MUZZLE = 2                        // red
 
 // --- the cannons ------------------------------------------------------------
-// Horizontal ray offsets from the player's sprite X, from c64Shooter's
-// PLAYER_LEFT_CANNON_X / PLAYER_RIGHT_CANNON_X. They are not arbitrary: the
-// firing bitmap's muzzle pixels sit at exactly these two columns, which is how
-// the art and the hitscan stay agreed about where the guns are.
+// Horizontal ray offsets from the player's sprite X. They are not arbitrary:
+// the firing bitmap's muzzle pixels sit at exactly these two columns, which is
+// how the art and the hitscan stay agreed about where the guns are.
 .const PLAYER_CANNON_L  = 4
 .const PLAYER_CANNON_R  = 19
 .const PLAYER_MUZZLE_TIME = 3                       // frames the flash is held
 
 // --- taking a hit -----------------------------------------------------------
-// PLAYER_RESPAWN_TIME, from the old game's constant at main.asm:930:
-// "Invulnerable blinking frames after repositioning." The old ship reached
-// that state through explode -> lose a life -> reposition; this slice has
-// neither lives nor an explosion, so it keeps the WINDOW and not the journey.
-//
-// WHAT IS DELIBERATELY NOT HERE. No PLAYER_STATE machine, no explosion frames,
-// no life counter, no game over. The old game's updatePlayerState is a
-// four-state machine driving four explosion bitmaps, a lives HUD and a
-// terminal state, and none of that is needed to make a turret projectile
-// damage the player -- which is what this slice is. A hit costs the player
-// their invulnerability window and raises a counted event; the slice that adds
-// lives reads plyHits and decides what it means. That is the extension point,
-// and it is one byte.
-.const PLAYER_INVULN_TIME = 100                     // frames, the old value
+// A hit costs the player an invulnerability window, during which the ship
+// blinks and projectiles pass through it, and raises a counted event. There is
+// no state machine, no explosion, no life counter and no game over: anything
+// that adds lives reads plyHits and decides what a hit MEANS. That one byte is
+// the extension point.
+.const PLAYER_INVULN_TIME = 100                     // frames
 .const PLAYER_BLINK_MASK  = %00000100               // toggle every 4 frames
 
 // --- geometry ---------------------------------------------------------------
-// Y. The mux admission range, adopted UNCHANGED for HW0/HW1.
-//
-// It is not obviously the right range for these two slots: they are outside the
-// multiplexer, so MIN_REUSE_GAP does not apply to them, and their DMA is
+// Y. The same range the mux admits on, adopted for HW0/HW1 -- 171 pixels of
+// travel. A wider range may well be available to these two slots, since they
+// are outside the multiplexer (MIN_REUSE_GAP does not apply) and their DMA is
 // fetched in cycles 57..62 of the PREVIOUS line rather than 0..9 of their own,
-// so the bottom aperture split's margin argument is a different calculation.
-// A wider range is therefore probably available -- and this slice does not have
-// the measurement that would justify it, so it does not take it. 55..226 is
-// already 171 pixels of travel, more than the old game's 182 minus the 11 it
-// spent below the aperture.
+// which makes the bottom split's margin a different calculation. It is not
+// taken without the measurement that would justify it.
 //
-// What IS load-bearing at 55: sprite Y is compared against the low byte of the
+// WHAT IS LOAD-BEARING AT 55: sprite Y is compared against the low byte of the
 // raster, so Y=55 matches again at raster 311. exFrame clears $d015 at 250 and
-// exHud does not set it until raster 4, so that compare passes with nothing
-// enabled. A player allowed above 55 would start eating into that guarantee.
+// exHud does not set it until raster 4, so that second compare passes with
+// nothing enabled. Allowing the player above 55 would eat into that guarantee.
+//
 // Stated as literals rather than aliased to MIN_SPRITE_Y / MAX_SPRITE_Y, which
-// live in renderer.asm and are not defined yet at this point in the import
-// order. renderer.asm asserts the two pairs agree, which is the better place
-// for it anyway: sharing the range is a DECISION, and a decision deserves a
-// check rather than an alias that hides it.
+// are not defined yet at this point in the import order. renderer.asm asserts
+// the two pairs agree, which is the better place for it anyway: sharing a
+// range is a DECISION and deserves a check rather than an alias that hides it.
 .const PLAYER_MIN_Y     = 55
 .const PLAYER_MAX_Y     = 226
 
-// X. The old game's limits, unchanged: the 24-pixel ship just touches the left
-// and right side borders, which are NOT opened (only the vertical border is),
-// so it slides under the border edge rather than past it.
+// X. The 24-pixel ship just touches the left and right side borders, which are
+// NOT opened (only the vertical border is), so it slides under the border edge
+// rather than past it.
 .const PLAYER_MIN_X     = 23
 .const PLAYER_MAX_X     = 321
 .const PLAYER_START_X   = 160
@@ -192,9 +150,8 @@
 * = $c520 "player state"
 
 // --- logical state ----------------------------------------------------------
-// Deliberately small. There is no velocity because the behaviour being
-// preserved has none, and no explosion/blink/lives state because this slice
-// does not have those systems yet -- they arrive with the code that uses them.
+// Deliberately small: position, the two timers that change how the ship looks,
+// and a hit tally. There is no velocity because the movement model has none.
 plyX:        .byte <PLAYER_START_X       // 9-bit screen X, low byte
 plyXHi:      .byte >PLAYER_START_X       // ...and bit 8
 plyY:        .byte PLAYER_START_Y
@@ -214,33 +171,29 @@ plyMuzzle:   .byte 0
 // it, and neither can any other projectile in flight.
 //
 // It starts at ZERO and nothing but a hit makes it non-zero. That matters more
-// than it looks: while it runs the ship blinks, and a blink is a presentation
-// change, and a presentation change republishes the schedule. A player who
+// than it looks: while it runs the ship blinks, a blink is a presentation
+// change, and a presentation change republishes the schedule. A ship that
 // booted invulnerable would rebuild every fourth frame for two seconds without
-// touching the stick, which is exactly the property tests/test_slice_a.py
-// exists to protect.
+// the stick being touched.
 plyInvuln:   .byte 0
 
-// Hits taken, saturating. THE EVENT A LIVES SYSTEM WILL CONSUME, and the only
-// thing this slice publishes about damage. Nothing reads it yet.
+// Hits taken, saturating. The only thing published about damage, and the hook
+// a lives system would read. Nothing reads it yet.
 plyHits:     .byte 0
 
 // 1 = the presentation block changed since the builder last consumed it, so
-// this frame must rebuild and republish. Cleared by the game frame that acts on
-// it. With a stationary player and no fixture, NOTHING is rebuilt and the
-// adopted CURRENT block simply keeps being read -- which is exactly the
-// property the static regression fixtures rely on.
+// this frame must rebuild and republish. Cleared by the game frame that acts
+// on it. With a stationary ship and an empty pool NOTHING is rebuilt, and the
+// adopted CURRENT block simply keeps being read.
 plyDirty:    .byte 1                     // start dirty: the boot build publishes
 
 // --- input ------------------------------------------------------------------
 // The live joystick sample, active low, as read from $dc00.
 joyState:    .byte JOY_MASK              // all lines high = nothing pressed
 
-// Non-zero: readInput leaves joyState alone, so a test can drive the player
-// without simulating keyboard or joystick input at the host. The same
-// affordance, and the same reason, as `fixtureIndex` being pokeable and
-// `pinFine` holding the scroll phase: an automated run must be able to reach a
-// state a human reaches with their hands.
+// Non-zero: readInput leaves joyState alone, so a test can drive the ship by
+// poking joyState without simulating input at the host. An automated run must
+// be able to reach a state a human reaches with their hands.
 joyHold:     .byte 0
 
 // --- the presentation block -------------------------------------------------
@@ -248,9 +201,9 @@ joyHold:     .byte 0
 // this whole block; it never reads plyX, plyVisible or joyState.
 //
 // It is ONE CONTIGUOUS ARRAY on purpose: playerEmit compares the freshly built
-// block against the copy the builder last took, so a later slice can change a
-// pointer, a colour or the enable mask without having to remember to set a
-// dirty flag. The block is the contract, and the block is what is compared.
+// block against the copy the builder last took, so changing a pointer, a
+// colour or the enable mask raises the dirty flag by itself and nobody has to
+// remember to. The block is the contract, and the block is what is compared.
 plyPres:
 plyPresX0:     .byte 0                   // HW0 X low byte
 plyPresY0:     .byte 0
@@ -272,30 +225,24 @@ plyPresEnd:
 plyPub:      .fill PLY_PRES_BYTES, 0
 
 playerStateEnd:
-// $c540, NOT $c600. The P3 fixture data does begin at $c600, but src/scroll.asm
-// puts the scroll state at $c540 and it is this block that would reach it
-// first -- so the old guard was checking a boundary eighty bytes past the one
-// that actually binds. Found while adding two bytes here, with four left.
 .if (playerStateEnd > $c540) { .error "the player state has grown into the scroll state at $c540" }
 
 // ===========================================================================
-// The ship, converted from the old game's multicolour art at assembly time.
+// The ship: multicolour source art, split into two hires layers at ASSEMBLY
+// time.
 // ===========================================================================
-// c64Shooter/src/main.asm `playerSprite` is a MULTICOLOUR bitmap and this
-// engine has no multicolour: $d01c is forced to zero by exHud and again by
-// exHandoff, so every sprite is hires. Rather than redraw the ship by eye, the
-// original bytes are kept verbatim below and split into two hires layers by a
-// rule stated once, here, in code:
+// $d01c is forced to zero by exHud and again by exHandoff, so every sprite is
+// hires. The source bitmaps below are multicolour and are split by one rule:
 //
-//     multicolour pair 10  -> LAYER 0, the hull        (its per-sprite colour)
-//     multicolour pairs 01 and 11 -> LAYER 1, the trim ($D025 / $D026 detail)
-//     pair 00 -> transparent in both
+//     multicolour pair 10          -> LAYER 0, the hull
+//     multicolour pairs 01 and 11  -> LAYER 1, the trim
+//     pair 00                      -> transparent in both
 //
-// A multicolour pixel is two hires pixels wide and sits at the same bit
-// position, so the split preserves the SHAPE exactly -- same 24x21 cell, same
-// silhouette, same proportions. The two layers are disjoint by construction
-// (each pair goes to exactly one of them), which is what lets them be drawn as
-// two co-located sprites without either punching a hole in the other.
+// A multicolour pixel is two hires pixels wide at the same bit position, so
+// the split preserves the SHAPE exactly -- same 24x21 cell, same silhouette,
+// same proportions. The two layers are disjoint by construction (each pair
+// goes to exactly one), which is what lets them be drawn as two co-located
+// sprites without either punching a hole in the other.
 //
 // The visible result: a light-blue hull with a continuous light-grey stripe
 // from the nose, down the fuselage, out through the two exhaust flames. The
@@ -311,10 +258,9 @@ playerStateEnd:
 
 .if (playerMC.size() != 21 * 3) { .error "the player source bitmap must be 21 rows of 3 bytes" }
 
-// c64Shooter's playerFireSprite, also verbatim. It differs from the resting
-// ship on rows 0, 1 and 2 only -- four muzzle blocks at the nose, two per
-// cannon -- and every differing pixel is multicolour pair 10, the hull. That is
-// why only the hull layer is emitted from it below.
+// The firing ship. It differs from the resting one on rows 0, 1 and 2 only --
+// four muzzle blocks at the nose, two per cannon -- and every differing pixel
+// is pair 10, the hull, which is why only a hull layer is emitted from it.
 .var playerFireMC = List()
 .eval playerFireMC.add($08,$28,$20,  $02,$28,$80,  $08,$aa,$20,  $00,$be,$00)
 .eval playerFireMC.add($02,$be,$80,  $02,$be,$80,  $0a,$be,$a0,  $0a,$96,$a0)
@@ -375,25 +321,18 @@ playerBitmapsEnd:
 }
 
 // ===========================================================================
-// Code. MAIN THREAD ONLY. Never called from an interrupt.
-// ===========================================================================
-// ===========================================================================
-// Code. MAIN THREAD ONLY, and therefore OUTSIDE VIC BANK 0.
+// Code. MAIN THREAD ONLY, never called from an interrupt, and therefore
+// OUTSIDE VIC BANK 0.
 // ===========================================================================
 // $4000 is plain RAM under the $01 = $35 the renderer installs, and the VIC --
 // locked to bank 0, $0000-$3fff -- cannot reach it at all.
 //
-// That is the point. Bank 0 is 16 KB and every byte of it is contended: two
-// screen pages, the sprite bitmaps, the HUD's pool, the player's, the blank
-// charset, and a real character set when terrain arrives. None of this routine
-// is ever fetched by the VIC, so spending bank-0 space on it would be paying
-// the scarcest resource in the machine for nothing. The engine already draws
-// this line for its STATE (every array lives at $c000 and above); this is the
-// same line drawn for main-thread CODE, and the game systems that follow --
-// weapons, enemies, waves, collision -- belong on this side of it too.
-//
-// $4000-$bfff is otherwise untouched, and the PRG already spans $0801-$cfda, so
-// this costs nothing on disk either.
+// That is the rule the whole engine follows: NOTHING LIVES IN VIC BANK 0
+// UNLESS THE VIC READS IT. Bank 0 is 16 KB and every byte is contended by two
+// screen pages, the sprite bitmaps, the HUD's pool, the player's, the terrain
+// charset window and the blank charset. Main-thread code and state are never
+// fetched by the VIC, so they live above $4000 with the rest of the game
+// systems.
 // ===========================================================================
 * = $4000 "player code"
 
@@ -429,8 +368,7 @@ playerInit:
 // Port A of CIA1 is the keyboard column drive AND joystick 2; reading it
 // returns the pin states. Nothing in this program drives $dc01 (port B is left
 // as an input), so no key can pull a column low and be mistaken for a stick
-// direction. The fixture-select key scan DOES write $dc00, which is why it is
-// behind FIXTURE_KEYS and not in the production path.
+// direction.
 // ---------------------------------------------------------------------------
 readInput:
     lda joyHold
@@ -441,18 +379,6 @@ readInput:
 !held:
     rts
 
-// ---------------------------------------------------------------------------
-// playerTick — one frame of movement. joyState in, plyX/plyXHi/plyY out.
-//
-// ONE PIXEL PER FRAME PER AXIS, which is what the old game did: c64Shooter's
-// updatePlayer has a `dec`/`inc` per direction and no velocity state anywhere.
-// Diagonals therefore move one pixel on each axis, exactly as they did.
-//
-// The bounds are applied as a TOTAL CLAMP after the moves rather than as the
-// old pre-move refusal. Same behaviour at the edges, and it also means no
-// sequence of writes to plyX/plyY -- by a later system, or by a test poking the
-// machine -- can leave the ship outside the range the renderer is promised.
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // playerTakeHit — what being hit MEANS. Called by src/ebullet.asm when a
 // projectile's box overlaps the ship's.
@@ -508,6 +434,18 @@ playerInvulnTick:
     sta plyVisible
     rts
 
+// ---------------------------------------------------------------------------
+// playerTick — one frame of movement. joyState in, plyX/plyXHi/plyY out, and
+// plyDirty raised if the ship actually moved.
+//
+// ONE PIXEL PER FRAME PER AXIS with no velocity state, so a diagonal moves one
+// pixel on each axis.
+//
+// The bounds are applied as a TOTAL CLAMP after the moves rather than as a
+// refusal before them, so no sequence of writes to plyX/plyY -- by another
+// system, or by a test poking the machine -- can leave the ship outside the
+// range the renderer is promised.
+// ---------------------------------------------------------------------------
 playerTick:
     jsr playerInvulnTick
 
@@ -622,9 +560,7 @@ playerClampY:
 //
 // The two layers are CO-LOCATED BY CONSTRUCTION: both X values and both Y
 // values are written from the same plyX/plyY in the same pass, so they cannot
-// drift apart by one frame the way two independently scheduled sprites could.
-// That was the one property the old three-layer experiment went to some trouble
-// to guarantee, and here it is free.
+// drift apart by a frame the way two independently scheduled sprites could.
 // ---------------------------------------------------------------------------
 playerEmit:
     lda plyX
@@ -638,9 +574,8 @@ playerEmit:
     // The weapon sets plyMuzzle and knows nothing else about how a shot looks.
     // Swapping the base pointer and the hull colour for those frames goes out
     // through the block the renderer already publishes, so firing costs no new
-    // sprite, no new slot and not one line of renderer change -- and the block
-    // compare at the bottom of this routine notices the change by itself, which
-    // is exactly the property it was written for in Slice A.
+    // sprite, no new slot and no renderer change -- and the block compare at
+    // the bottom of this routine notices it without being told.
     ldx #PLAYER_PTR_BASE
     ldy #PLAYER_COL_BASE
     lda plyMuzzle
@@ -698,10 +633,9 @@ pt_xhi:   .byte 0
 pt_y:     .byte 0
 
 // ---------------------------------------------------------------------------
-// SEGMENT GROWTH GUARD. Nothing is allocated above this yet, so the bound is a
-// generous one -- but it is stated, because an unbounded segment in a file that
-// uses explicit `* =` placement is how the previous project discovered its
-// overlaps at run time instead of at build time.
+// SEGMENT GROWTH GUARD. The bound is generous, since nothing is allocated
+// immediately above -- but an explicit `* =` segment without one turns an
+// overlap into a run-time mystery instead of a build error.
 // ---------------------------------------------------------------------------
 .if (* > $4400) {
     .error "the player code has outgrown its $4000 segment"

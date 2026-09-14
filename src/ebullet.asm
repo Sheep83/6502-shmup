@@ -14,85 +14,43 @@
 //     ebulletPlayerTick<- here: the projectile meets the ship
 //     playerTakeHit    the player decides what being hit means
 //
-// ---------------------------------------------------------------------------
-// WHY THIS IS ITS OWN FILE
-// ---------------------------------------------------------------------------
-// Because it is not turret behaviour. The old game's turret fire and its enemy
-// fire went through ONE spawn routine, one cap and one lifecycle -- "same cap,
-// allocator, aim quantisation and projectile lifecycle", as the call site put
-// it -- and enemy fire is a later slice. Keeping the projectile here means
-// that slice adds a caller and nothing else.
-//
-// It is a pool and a lifecycle, not a framework. There is no component
-// registry, no generic entity system and no dispatch table: three bullets, one
-// type, four routines.
-//
-// ---------------------------------------------------------------------------
-// WHAT CAME ACROSS, AND FROM WHERE
-// ---------------------------------------------------------------------------
-// Read out of ~/Desktop/c64Shooter-main.zip, src/main.asm:
-// spawnEnemyBulletAt (2888), chooseEnemyBulletSlope (2975), moveEnemyBullet
-// (3002), checkBulletPlayerOverlap, and the constants at 573-578.
-//
-//   MAX_ENEMY_BULLETS      3    a HARD GLOBAL cap, not per turret
-//   ENEMY_BULLET_SPEED_Y   3    fixed, downward
-//   ENEMY_BULLET_COLOUR    7    yellow
-//   the aim                     X velocity quantised to -2..+2 from the
-//                               horizontal distance to the player AT SPAWN;
-//                               the trajectory is then immutable
-//   the hitbox                  bulletX - playerX in -7..+23,
-//                               bulletY - playerY in -7..+20
-//
-// DELIBERATELY NOT TAKEN: planCoarseBulletSuppression, the old renderer's
-// machinery for dropping a projectile out of a batch that would obstruct a
-// coarse copy. It is adaptive sprite scheduling of exactly the kind this
-// engine replaced with the legality-window batch merge, and this projectile
-// has no special standing with the renderer at all.
+// Projectiles are a pool and a lifecycle, not a framework: one type, one
+// bitmap, four routines. Any future hostile fire source adds a caller here and
+// nothing else -- the cap, the allocator, the aim and the lifecycle are shared.
 // ===========================================================================
 
-// ---------------------------------------------------------------------------
-// THE CAP, AND WHY IT IS STILL THREE
-// ---------------------------------------------------------------------------
-// The old game's number, kept, and it survives its own re-derivation here:
-//
-//   1. the old behaviour is three, globally, across every hostile source;
-//   2. at most TWO turrets of level 1 are ever combat-visible at once (proved
-//      by the model sweep in tests/test_turret_combat.py), and each reloads a
-//      100-frame timer, so turrets alone cannot ask for more than two in
-//      flight except while an earlier one is still falling;
-//   3. the pool is MAX_OBJECTS = 16 and the schedule holds MAX_SCHED = 24, so
-//      three is nowhere near either;
-//   4. the frame budget is the real limit, and docs/ENGINE_CONTRACT.md §10
-//      puts the practical ceiling at about eight well-separated sprites.
-//      Three projectiles on top of a live enemy population is exactly the
-//      pressure the firing gate below refuses to add.
-//
-// So three is not a number this slice invented and it is not a number it
-// inherited without checking.
+// THE CAP IS GLOBAL, not per firing source, and three is a budget decision:
+// at most two level-1 turrets are combat-visible at once and each reloads a
+// 100-frame timer, so three in flight already means an earlier shot is still
+// falling. The real limit is the frame budget -- docs/ENGINE_CONTRACT.md §10
+// puts the practical ceiling near eight well-separated sprites -- and three
+// projectiles on top of a live enemy population is most of the headroom.
 .const EBULLET_MAX      = 3
 .const EBULLET_VY       = 3             // whole pixels a frame, downward
 .const EBULLET_COL      = 7             // yellow
 .const EBULLET_VX_MAX   = 2             // the steepest quantised slope
 
-// The aim buckets, from chooseEnemyBulletSlope. They "intentionally favour
-// smooth-looking trajectories over exact mathematical interception".
+// The aim buckets. They deliberately favour smooth-looking trajectories over
+// exact interception: a shot that always converged on the player's pixel would
+// be both unfair and visibly mechanical.
 .const EBULLET_AIM_NEAR = 24            // closer than this: straight down
 .const EBULLET_AIM_MID  = 72            // closer than this: one pixel a frame
 
-// The player hitbox, from checkBulletPlayerOverlap. The ship is 24 wide and 21
-// tall and the projectile is 8 by 8, so the overlap window is the ship's box
-// grown by the bullet's size on the two leading edges.
+// The player hitbox. The ship is 24 wide and 21 tall and the projectile is
+// 8 by 8, so the overlap window is the ship's box grown by the bullet's size
+// on the two leading edges.
 .const EBULLET_HIT_LEFT = 8             // bulletX may be up to 7 left of plyX
 .const EBULLET_HIT_RIGHT = 24           // ...and up to 23 right of it
 .const EBULLET_HIT_UP   = 8             // bulletY may be up to 7 above plyY
 .const EBULLET_HIT_DOWN = 21            // ...and up to 20 below it
 
-// Horizontal despawn, from moveEnemyBullet's two edge tests.
+// Horizontal despawn.
 .const EBULLET_X_MAX    = 345           // 9-bit; past the useful right edge
 .const EBULLET_X_MIN    = 8             // a borrow out of the low byte
 
-// Vertical despawn. The old rule was Y >= 250, and it is kept, but the
-// COLLISION band is this engine's renderable one -- see ebulletPlayerTick.
+// Vertical despawn. Wider than the renderable band on purpose: a projectile
+// may fly on below the aperture undrawn, but it stops being able to hit the
+// player there -- see ebulletPlayerTick.
 .const EBULLET_Y_MAX    = 250
 
 .if (EBULLET_MAX > MAX_OBJECTS) {
@@ -100,13 +58,11 @@
 }
 
 // ---------------------------------------------------------------------------
-// The bitmap. One shared 8x8 dart, hires, from the old enemyBulletSprite.
+// The bitmap. One shared 8x8 dart, hires, used by every projectile.
 // ---------------------------------------------------------------------------
-// It goes after the enemy's bitmap rather than beside it, because a sprite
-// pointer is an address divided by 64 and $36c0 is the next aligned slot.
-// (It used to clear the enemy's spawn and colour TABLES too; those left with
-// the spawner when src/waves.asm took the job over, and the guard below now
-// names the bitmap, which is what actually sits below this address.)
+// It sits directly after the enemy's bitmap because a sprite pointer is an
+// address divided by 64 and $36c0 is the next aligned slot. The guards below
+// pin it between the enemy bitmap and the blank charset.
 .const EBULLET_SPRITE   = $36c0
 .const EBULLET_PTR      = EBULLET_SPRITE / 64
 
@@ -149,14 +105,12 @@ ebulletBitmapEnd:
 // can retire a projectile.
 ebCount:     .byte 0                    // live projectiles, 0..EBULLET_MAX
 
-// The spawn request. A caller fills these and calls ebulletSpawn, exactly as
-// the old BULLET_SPAWN_X_LO/HI/Y did, so a later enemy-fire slice has the same
-// three bytes to fill and nothing new to learn.
+// The spawn request: a caller fills these three bytes and calls ebulletSpawn.
 ebSpawnXLo:  .byte 0
 ebSpawnXHi:  .byte 0
 ebSpawnY:    .byte 0
 
-// --- diagnostics, read by the tests and the report -------------------------
+// --- diagnostics -----------------------------------------------------------
 ebFired:     .byte 0                    // projectiles that reached the world
 ebRefused:   .byte 0                    // spawns the cap or the pool refused
 ebPlayerHits: .byte 0                   // projectiles that reached the ship
@@ -188,9 +142,9 @@ ebulletInit:
 // Exit: carry CLEAR and X = the slot on success; carry SET and nothing changed
 //       if the cap or the pool refused.
 //
-// THE TRAJECTORY IS FIXED AT LAUNCH and never revised, which is the old
-// behaviour and is also the cheap one: a projectile costs one add per axis per
-// frame and never looks at the player again.
+// THE TRAJECTORY IS FIXED AT LAUNCH and never revised: a projectile costs one
+// add per axis per frame and never looks at the player again. It also means a
+// shot can be dodged, which a homing one could not.
 //
 // ALLOCATE, FILL, THEN ACTIVATE -- the pool's own contract, and the reason it
 // is two calls. Between them the slot is not yet named by sortedIDs, so a
@@ -249,14 +203,8 @@ ebulletSpawn:
     rts
 
 // ---------------------------------------------------------------------------
-// ebulletAim — the quantised slope, from chooseEnemyBulletSlope.
-// In/out: X = the slot, preserved. Writes objVX,x.
-//
-// The old routine's own note: the thresholds "intentionally favour
-// smooth-looking trajectories over exact mathematical interception. They
-// correspond to nearby good aiming points". A projectile that always aimed
-// perfectly would be unfair and would also look wrong, because every shot
-// would converge on the same pixel.
+// ebulletAim — pick the quantised X slope from the distance to the player.
+// Entry/exit: X = the slot, preserved. Writes objVX,x. Clobbers A.
 // ---------------------------------------------------------------------------
 ebulletAim:
     // delta = playerX - bulletX, nine bits and signed.
@@ -322,8 +270,8 @@ ebulletSlope:
 // Called from objectUpdateAll, which already knows the slot is active and
 // already knows its type.
 //
-// The despawn rules are the old moveEnemyBullet's: off either side, or at the
-// bottom of the screen. Nothing else retires a projectile except a hit.
+// A projectile retires off either side or at the bottom of the screen, and
+// nothing else retires one except a hit on the player.
 // ---------------------------------------------------------------------------
 ebulletTick:
     // ---- horizontal: signed velocity into a nine-bit position -------------
@@ -380,8 +328,8 @@ ebulletRetire:
     jsr objectFree                      // despawn touches no VIC register: the
                                         // next schedule simply omits it
     lda ebCount
-    beq !done+                          // the old game's own defensive guard
-    dec ebCount                         // against an accidental double release
+    beq !done+                          // guard the counter: retiring an
+    dec ebCount                         // already-free slot must not underflow
 !done:
     rts
 
@@ -399,11 +347,10 @@ ebulletRetire:
 // does it walk the pool, and the pool is sixteen slots with at most three of
 // them projectiles.
 //
-// ONLY INSIDE THE RENDERABLE BAND. A projectile whose Y the builder would
-// reject is not drawn, and something the player cannot see must not kill them.
-// The old game gated its scan the same way and said so: "Culled ingress cannot
-// cause an invisible software collision." Its band was the old aperture's;
-// this one is MIN_SPRITE_Y..MAX_SPRITE_Y, which is where THIS renderer admits.
+// ONLY INSIDE THE RENDERABLE BAND, MIN_SPRITE_Y..MAX_SPRITE_Y. A projectile
+// the builder would reject on Y is not drawn, and something the player cannot
+// see must not be able to kill them. This band must therefore stay the same
+// one buildSchedule admits on.
 // ---------------------------------------------------------------------------
 ebulletPlayerTick:
     lda ebCount

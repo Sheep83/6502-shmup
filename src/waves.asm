@@ -1,5 +1,5 @@
 // ===========================================================================
-// waves.asm — the encounter director, v1
+// waves.asm — the encounter director: authored triggers, waves, flight paths
 // ===========================================================================
 // MAIN THREAD ONLY. This file knows nothing about hardware sprites, raster
 // batches, schedule publication, mux slot reuse or VIC register ownership,
@@ -14,79 +14,53 @@
 //                    -> the ordinary object pool
 //                    -> the existing renderer
 //
-// ---------------------------------------------------------------------------
-// WHAT THIS REPLACES, AND WHY IT IS A REPLACEMENT RATHER THAN A LAYER
-// ---------------------------------------------------------------------------
-// src/enemy.asm carried a four-entry spawn table cycled on a 48-frame timer.
-// Its own comment said what it was for: "This is NOT a wave system and is not
-// the seed of one. It exists so that the lifecycle runs continuously on a
-// normal boot." It did that job and this file takes it over whole -- the
-// timer, the cursor, the table and the colours are gone rather than wrapped,
-// because a spawner that still runs underneath a director is a second author
-// of the same screen and the two would fight over the pool.
+// THIS FILE IS THE ONLY AUTHOR OF ENEMY SPAWNS. Nothing else may create a
+// TYPE_ENEMY object: a second spawner running underneath the director would be
+// a second author of the same screen and the two would fight over one pool.
 //
-// What is NOT replaced: enemies remain ordinary TYPE_ENEMY objects with the
-// same art, the same six HP, the same hit flash, the same death animation and
-// the same single vertical despawn rule. The player's hitscan, the turrets
-// and the hostile projectiles do not know this file exists.
+// What it does NOT own: enemies are ordinary TYPE_ENEMY objects with their own
+// art, HP, hit flash, death animation and despawn rules (src/enemy.asm), moved
+// by the ordinary movement interpreter (src/movement.asm). The player's
+// hitscan, the turrets and the hostile projectiles do not know this file
+// exists.
 //
-// ---------------------------------------------------------------------------
-// THE SHAPE OF v1.1, AND WHAT IS DELIBERATELY ABSENT
-// ---------------------------------------------------------------------------
-// Two concurrent wave instances, a fixed authored trigger list, FOUR wave
-// definitions, and flight paths built by SEQUENCING movement stages rather
-// than by adding a movement mode per shape. No random selection, no difficulty
-// curve, no population budget, no formation AI, no upgrade carriers, no
-// escorts, no boss logic, no enemy firing, no procedural generation. Those are
-// later slices and every one of them is easier to add to a small thing that
-// works than to a large thing that nearly does.
-//
-// WHAT v1.1 CHANGED. v1 handed each enemy one primitive and one queued
-// follow-on, which is exactly enough for "fly in, then turn" and nothing more.
-// A pattern is now a list of stage records (the format is src/movement.asm's,
-// the bytes are below) and the object walks it by itself. Loops, S-turns and
-// lingers are ORDERINGS of the same five primitives, so the vocabulary stopped
-// growing at the point the content started getting interesting -- which is the
-// whole architectural bet of this slice.
-//
-// MUX-FRIENDLY CHOREOGRAPHY IS PART OF THE CONTENT, NOT THE RENDERER'S
-// PROBLEM. Members arrive on different raster lines and reach the bottom of
-// the aperture at different times. A wave that entered as a rank on one line
-// and crossed the screen that way would be asking six hardware sprites to
-// cover four logical ones in a single reuse window, and the honest fix for
-// that is to author the wave differently rather than make the scheduler
-// cleverer.
-//
-// HOW THE Y FAN IS MADE CHANGED WITH INGRESS. v1.1 fanned every wave with a
-// positive yStep, which was right when waves spawned inside the aperture and
-// wrong the moment they spawned above it: a downward yStep pushes the later
-// members of a top-entering wave DOWN INTO VIEW, so they appear on screen
-// instead of arriving through the edge. The three patterns that now enter from
-// above therefore use yStep 0 and let the DESCENT do it -- every member is
-// falling, so an interval of 26 frames is itself 32 lines of separation by the
-// time they are all in view. Only the sweep, which enters level through the
-// side border, still needs an authored yStep.
+// THE SHAPE: WAVE_SLOTS concurrent wave instances, a fixed authored trigger
+// list, four wave definitions, and flight paths built by SEQUENCING movement
+// stages rather than by adding a movement mode per shape. Loops, S-turns and
+// lingers are ORDERINGS of the same five primitives, so the vocabulary stops
+// growing as the content gets more interesting. There is deliberately no
+// random selection, difficulty curve, population budget, formation AI, escort
+// logic or procedural generation.
 //
 // ---------------------------------------------------------------------------
-// INGRESS AND EGRESS
+// TWO CONTENT RULES THAT ARE EASY TO BREAK FROM HERE
 // ---------------------------------------------------------------------------
-// Every member of every wave now spawns ENTIRELY OUTSIDE the visible playfield
-// and flies in, because v1.1 spawned them on lines 56..132 -- up to a third of
-// the way down the aperture -- and enemies visibly materialised in mid-air.
-// Three patterns enter from above, where the renderer simply does not admit
-// them until they cross raster 55; the sweep enters through the LEFT BORDER at
-// X=0, where the VIC clips it column by column and the arrival is genuinely
-// progressive. src/enemy.asm's lifecycle bounds are the other half of this.
+// MUX-FRIENDLY CHOREOGRAPHY IS THE CONTENT'S JOB, NOT THE RENDERER'S. Members
+// must arrive on different raster lines and reach the bottom of the aperture at
+// different times. A wave crossing the screen as a rank on ONE line asks six
+// hardware sprites to cover four logical ones inside a single reuse window, and
+// the honest fix is to author the wave differently rather than make the
+// scheduler cleverer.
 //
-// WAVE_SLOTS is a compile-time constant and raising it costs exactly one
-// constant: every loop below is bounded by it, nothing is unrolled, and no
-// state is shared between instances.
+// EVERY MEMBER SPAWNS ENTIRELY OUTSIDE THE VISIBLE PLAYFIELD and flies in.
+// Spawning inside the aperture makes enemies materialise in mid-air. Three
+// patterns enter from above, where the renderer does not admit them until they
+// cross raster 55; the sweep enters through the LEFT BORDER at X=0, where the
+// VIC clips it column by column so the arrival is progressive.
+//
+// That interacts with how the Y fan is made. A positive yStep pushes the later
+// members of a TOP-ENTERING wave down INTO view, so they appear on screen
+// rather than arriving through the edge. The three top-entering patterns
+// therefore use yStep 0 and let the DESCENT separate them -- every member is
+// falling, so a 26-frame interval is itself 32 lines of separation by the time
+// they are all in view. Only the sweep, which enters level through the side
+// border, needs an authored yStep.
 // ===========================================================================
 
 // --- how many waves may run at once ----------------------------------------
-// Two is the point of the slice. The arrays, the loops and the free-instance
-// scan are all written against the constant, so three costs five bytes of
-// state and no code at all.
+// The arrays, the loops and the free-instance scan are all written against this
+// constant, and no state is shared between instances, so raising it costs a few
+// bytes of state and no code at all.
 .const WAVE_SLOTS = 2
 
 // ===========================================================================
@@ -113,15 +87,15 @@
 // and a quarter turn is WM_QUARTER = 16 steps. WM_ARC increases the heading
 // (clockwise: east -> south -> west), WM_ARC_MIRROR decreases it.
 //
-// FRAMES PER STEP IS THE TURN RADIUS: 4 gives the wide 61-pixel sweep v1 had,
-// 2 gives a tight 31-pixel snap. It is what lets one arc primitive be both a
-// lazy hook and a dogfight loop.
+// FRAMES PER STEP IS THE TURN RADIUS: 4 gives a wide 61-pixel sweep, 2 a tight
+// 31-pixel snap. It is what lets one arc primitive be both a lazy hook and a
+// dogfight loop.
 .var progs = List()
 
 // --- 0: ECHELON SWEEP -------------------------------------------------------
-// Level flight east, then the same quarter turn v1's left sweep made, then
-// away down. The straight leg's velocity is heading 0's own (+6,0), so the
-// turn begins with no discontinuity at all.
+// Level flight east, a quarter turn, then away down. The straight leg's
+// velocity is heading 0's own (+6,0), so the turn begins with no
+// discontinuity at all.
 .eval progs.add(List()
     .add(List().add(WM_STRAIGHT, 34, 6, 0))     // run in along the top
     .add(List().add(WM_ARC, WM_QUARTER, 4, 0))     // wide quarter turn to south
@@ -165,18 +139,16 @@
 // step makes it tight (about a 31-pixel radius) and quick enough to read as a
 // manoeuvre rather than a drift.
 //
-// THE DIVE IN FRONT OF IT IS THE INGRESS STAGE. v1.1 launched this pattern due
-// east on the spawn line, which is exactly the one heading that cannot arrive
-// from above: a level enemy started off-screen stays off-screen. Rather than
-// give the loop a special entrance, it gets a stage -- which is what a
-// composable stage system is for. Forty frames of (+4,+4) carry it down out of
-// hiding and into view, and the loop then starts from a diagonal heading,
-// which tilts the circle without changing what it is.
+// THE DIVE IN FRONT OF IT IS THE INGRESS STAGE, and it is needed: a loop
+// launched due east on the spawn line never descends into view, because level
+// flight from off-screen stays off-screen. Rather than give the loop a special
+// entrance it gets a stage, which is what a composable stage system is for.
+// Forty frames of (+4,+4) carry it into view and the loop then starts from a
+// diagonal heading, tilting the circle without changing what it is.
 //
-// The circle's centre sits ninety degrees clockwise of the entry heading, so
-// entering on a descending diagonal hangs it down and to the left of the entry
-// point and it clears the top of the aperture by a comfortable margin. That is
-// checked below rather than asserted here.
+// The circle's centre sits ninety degrees clockwise of the entry heading, so a
+// descending-diagonal entry hangs it down and left of the entry point and it
+// clears the top of the aperture. The flight proof below checks that.
 .eval progs.add(List()
     .add(List().add(WM_STRAIGHT, 40, 4, 4))        // dive in from above
     .add(List().add(WM_ARC, 76, 2, 0))             // loop, and keep turning
@@ -216,15 +188,17 @@
 //   8  heading    launch heading, 0..WM_HEAD_LEN-1
 //   9  program    byte offset of its first stage record
 //
-// YSTEP IS THE NEW FIELD AND IT IS THE MUX-FRIENDLINESS ONE. v1 fanned members
-// along X only, so a four-strong wave entered as a rank all on one raster line
-// and stayed that way for as long as its launch leg was level -- four logical
-// sprites competing for the same reuse window, which is precisely the geometry
-// the multiplexer finds hardest. Fanning Y as well turns every entry into an
-// ECHELON: the members arrive on distinct lines, spread further as their paths
-// diverge, and reach the exit corridor at different times. It is one signed
-// byte and it is the difference between content that respects the renderer's
-// capacity and content that attacks it.
+// YSTEP IS THE MUX-FRIENDLINESS FIELD. Fanning members along X alone lets a
+// four-strong wave enter as a RANK on one raster line and stay that way for as
+// long as its launch leg is level -- four logical sprites competing for one
+// reuse window, the geometry the multiplexer finds hardest. Fanning Y turns the
+// entry into an ECHELON: members arrive on distinct lines, spread further as
+// their paths diverge, and reach the exit at different times.
+//
+// It is not always the right tool, though: see the top-entering waves below,
+// which fan vertically through the INTERVAL instead, because a yStep would push
+// their later members into view rather than letting them arrive through the
+// edge.
 .const WAVEDEF_SIZE = 10
 
 // --- 0: "echelon sweep" -----------------------------------------------------
@@ -317,12 +291,10 @@
 // The cheap structural ones first, then the one that matters: FLYING EVERY
 // PATTERN, for every member, through the REAL lifecycle rules.
 //
-// v1 could prove termination by inspection, because it had one arc that always
-// descended and a rule that a wave must launch descending. Composition ended
-// that, and the ingress/egress correction ends the simple version of it too: a
-// path may now start off-screen, climb, level off, loop, reverse, and leave by
-// any of three edges. Whether it ever leaves at all is a property of the whole
-// sequence rather than of any stage in it.
+// TERMINATION CANNOT BE PROVED BY INSPECTION HERE. A composed path may start
+// off-screen, climb, level off, loop, reverse and leave by any of three edges,
+// so whether it ever leaves at all is a property of the whole SEQUENCE and not
+// of any stage in it.
 //
 // So the assembler integrates each path in quarter pixels -- the same
 // arithmetic the 6502 does -- applying src/enemy.asm's three despawn rules
@@ -330,10 +302,9 @@
 //
 //   * IT LEAVES. Some edge is reached inside the frame budget; otherwise the
 //     enemy holds a pool slot for the rest of the session.
-//   * IT ARRIVES. The sprite actually becomes visible inside the aperture,
-//     and reasonably soon. A pattern that is authored off-screen and never
-//     crosses in is invisible content, and the ingress work makes that a very
-//     easy mistake to make.
+//   * IT ARRIVES. The sprite actually becomes visible inside the aperture, and
+//     reasonably soon. Since every pattern is authored to START off-screen, a
+//     path that never crosses in is invisible content and an easy mistake.
 //   * IT NEVER WRAPS. X stays positive for the whole flight, so no borrow can
 //     put logXHi at $ff and reappear the sprite 256 pixels to the right.
 //   * IT DOES NOT MATERIALISE IN VIEW. Every member is entirely outside the
@@ -478,57 +449,31 @@
 // 24+5+30+5 = 64 coarse rows, about ten seconds, which is short enough to
 // qualify by eye without waiting around.
 //
-// FIVE COARSE ROWS BETWEEN LEFT AND RIGHT, AND THE NUMBER IS LOAD-BEARING.
-// worldProgress advances once every eight frames, so five rows is forty
-// frames. A wave INSTANCE is active for exactly as long as it is still
-// sending members -- LEFT sends four at twenty-eight frame intervals, so it
-// occupies its instance for about eighty-four frames -- and RIGHT therefore
-// arrives with LEFT still less than half way through its own spawning. That
-// is what puts two instances in flight at once rather than merely two groups
-// of enemies on screen.
+// THE DELTAS ARE WAVE FOOTPRINTS, NOT INSTANCE LIFETIMES, and that distinction
+// is what gives the game its pacing. An INSTANCE is held only until its last
+// member is sent -- 1 + (count-1)*interval frames, about eight coarse rows for
+// every wave here -- but its ENEMIES stay alive for far longer. Spacing on
+// instance lifetime would therefore run every formation into the next one
+// continuously, with never a moment of one pattern alone on screen.
 //
-// It was authored at ten rows first, which is eighty frames, and the two
-// waves then queued politely one after another: the first instance had
-// finished spawning a few frames before the second was triggered, and the
-// director never held two at once. The enemies still overlapped -- they
-// outlive their wave by seconds -- which is exactly the kind of nearly-right
-// that a test looking only at the screen would have passed.
-//
-// v1.1 USED THAT ARRANGEMENT TO PAIR PATTERNS AND OVERDID IT. An instance is
-// held until its LAST member is sent, i.e. 1 + (count-1)*interval frames:
-//
-//     sweep   1 + 3 x 22 = 67 frames = 8.4 rows
-//     s-turn  1 + 2 x 26 = 53 frames = 6.6 rows
-//     linger  1 + 2 x 26 = 53 frames = 6.6 rows
-//     loop    1 + 2 x 34 = 69 frames = 8.6 rows
-//
-// so a delta shorter than the running wave's occupancy puts two INSTANCES in
-// flight at once. v1.1 authored two such pairs in a 61-row period and the
-// result, watched in VICE, was formations running into each other more or less
-// continuously: there was never a moment with one pattern on screen to look at.
-//
-// WHAT ACTUALLY SETS THE PACE IS NOT THE INSTANCE, IT IS THE ENEMY. A wave's
-// instance is finished in eight rows; its enemies are alive for far longer, so
-// the interval that matters is the wave's whole FOOTPRINT -- the span it spends
-// spawning plus the lifetime of the last member to leave:
+// So each delta is the wave's whole footprint: the span it spends spawning plus
+// the lifetime of its last member to leave.
 //
 //     sweep   66 +  177 = 243 frames = 30 rows
 //     s-turn  52 +  200 = 252 frames = 32 rows
 //     linger  52 +  206 = 258 frames = 32 rows
 //     loop    68 +  317 = 385 frames = 48 rows
 //
-// The deltas below are those footprints, so each formation has cleared the
-// aperture before the next arrives. That is the breathing room: pattern, empty
-// sky, pattern.
+// Each formation has cleared the aperture before the next arrives: pattern,
+// empty sky, pattern.
 //
-// ONE DELIBERATE OVERLAP SURVIVES, and it is the four-row delta between the
-// sweep and the S-turn. They are the right pair for it: the sweep enters
-// through the LEFT BORDER at a fixed height and the S-turn comes down from
-// ABOVE on the other side of the screen, so the two formations are separated
-// in entry point, in direction and in Y for the whole time they share the
-// aperture -- an overlap the multiplexer is never asked to work for. Everything
-// else is spaced. The director's ability to run two instances at once is
-// proved and tagged; it does not need demonstrating four times a cycle.
+// ONE DELIBERATE OVERLAP: the four-row delta between the sweep and the S-turn,
+// which is shorter than the sweep's occupancy and therefore puts two INSTANCES
+// in flight at once. They are the right pair for it -- the sweep enters through
+// the LEFT BORDER at a fixed height and the S-turn comes down from ABOVE on the
+// other side of the screen, so the two formations are separated in entry point,
+// direction and Y for the whole time they share the aperture. That is an
+// overlap the multiplexer is never asked to work for.
 //
 // The period is 48+4+38+36 = 126 coarse rows, about twenty seconds.
 .var trigDelta = List().add(48, 4, 38, 36)
@@ -548,11 +493,8 @@
 // ===========================================================================
 // State. MAIN THREAD ONLY.
 // ===========================================================================
-// MOVED FROM $77a0 IN v1.1, by two arrays' worth. The movement state next door
-// grew wmSteps and repurposed wmNext as a stage cursor, and $7700..$779f had
-// exactly nothing left in it. $77c0 gives the movement block room for twelve
-// per-object arrays where it now uses ten, and leaves this block sixty-four
-// bytes for seventeen -- neither is against a wall any more.
+// Sixty-four bytes above the movement state, which the guards below keep from
+// growing into it.
 * = $77c0 "wave state"
 
 // --- the active wave instances ----------------------------------------------
@@ -587,11 +529,8 @@ waveStateEnd:
 }
 
 // ===========================================================================
-// MOVED FROM $7a00 IN v1.1. The stage table and four patterns' worth of wave
-// definitions did not fit in the 54 bytes v1 had left between the end of this
-// code and its $7c00 guard, and $7c00..$bfff was empty -- the next thing above
-// this file is the schedule buffers at $c000. Movement takes the $7800..$7bff
-// this vacates, which is where its heading table went.
+// Code and authored tables. MAIN THREAD ONLY, outside VIC bank 0. The next
+// thing above this file is the schedule buffers at $c000.
 * = $7c00 "waves"
 
 // ---------------------------------------------------------------------------
@@ -815,8 +754,8 @@ waveSpawnMember:
     // the member count, which is small, and a multiply here would be three
     // times the code for a loop that runs twice.
     //
-    // BOTH AXES, v1.1. The Y step is what turns a rank into an echelon, and it
-    // is the cheap half: logY is eight bits, so it is one add with no carry to
+    // BOTH AXES. The Y step is what turns a rank into an echelon, and it is the
+    // cheap half: logY is eight bits, so it is one add with no carry to
     // propagate, against the nine-bit dance X has to do.
     ldy wvInst
     lda wvIndex,y
@@ -858,11 +797,10 @@ waveSpawnMember:
 
     // ---- movement ----------------------------------------------------------
     // The launch heading and the first stage record, and then src/movement.asm
-    // does the rest: wmEnterStage is the SAME routine that takes up every
-    // later stage, so a pattern's first stage cannot behave differently from
-    // the same stage in the middle of a pattern. v1 set mode, velocity, timer
-    // and follow-on here by hand and had to be kept in step with the
-    // interpreter by eye.
+    // does the rest. wmEnterStage is the SAME routine that takes up every later
+    // stage, so a pattern's first stage cannot behave differently from the same
+    // stage in the middle of one -- which is why the mode, velocity and timer
+    // are NOT set here by hand.
     lda waveDefTable + 8,y
     sta wmPhase,x                       // launch heading
     lda waveDefTable + 9,y
