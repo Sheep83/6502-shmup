@@ -112,9 +112,9 @@ VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 
 .PHONY: p3-fixtures p4-fixtures
 .PHONY: all build d64 test test-fast test-engine-full
-.PHONY: test-slice-a test-slice-a-prime test-slice-b
+.PHONY: test-boot test-production test-turret-regression
 .PHONY: test-p0 test-p1 test-p2 test-p3 test-p4 test-p5 test-renderer-full
-.PHONY: test-terrain test-turrets test-turret-combat test-turret-firing run run-d64 clean
+.PHONY: run run-d64 clean
 
 all: build
 
@@ -159,131 +159,76 @@ test-p5: build
 	python3 tests/test_p5.py
 
 # ---------------------------------------------------------------------------
-# The two-tier regression policy.
+# The regression surface, in two sizes.
 #
-# test-fast is for running CONSTANTLY while implementing: the P5 model and table
-# drift check, a short walk of all three ring modes, and the two invariants that
-# the expensive bugs of this project actually violated -- the frame transaction
-# staying at raster 250, and presentation still being coherent late in the
-# frame. It does not free-run for twenty seconds per fixture and it does not
-# soak. If it is not quick it will not be run, and a regression suite nobody
-# runs is worse than none.
+# `make test` is THE EVERYDAY GATE, rewritten from scratch at the
+# `legacy-tests-retired` tag. It answers one question -- "does the current
+# game actually work, and did we obviously break the engine" -- against the
+# game AS IT EXISTS NOW, not by replaying the historical migration path one
+# slice at a time. Three VICE launches, a few minutes:
 #
-# test-full is the qualification gate and is deliberately NOT weakened: the
-# whole P0-P4 ladder including the FIX 16 regression, the complete P5 suite, and
-# a 20,000-frame soak of the principal mode. Run it once when the work is
-# believed finished, not during iteration.
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# The regression surface, in three sizes.
+#   test_boot.py               builds, boots into the real production loop,
+#                               and the frame counter advances. Fails fast and
+#                               cheaply before anything heavier runs.
+#   test_production.py         one production session proving: the fault
+#                               counters stay clean over ordinary play; the
+#                               scroll/world-progress contract holds every
+#                               sampled frame; the object pool cycles with no
+#                               corrupted membership (an enemy bullet is an
+#                               ordinary pool object now, not a special case);
+#                               the player moves, takes a hit, blinks and
+#                               returns solid without ever publishing a stray
+#                               $d015 bit; and the schedule the renderer
+#                               adopts stays inside its allocated size with no
+#                               page/pointer coherence fault.
+#   test_turret_regression.py  the compact, permanent regression for the
+#                               turret-firing production defect: a turret
+#                               watched through the REAL production loop keeps
+#                               counting down its fire timer across a genuine
+#                               coarse scroll step instead of re-arming, and
+#                               the real game launches a projectile with
+#                               nothing poked. This is retained specifically
+#                               because the bug it catches is a cross-
+#                               subsystem interaction that a direct routine
+#                               call cannot see -- see constraint #4 in
+#                               reports/production-test-suite-rewrite.md.
 #
-# `make test` is the one to run constantly: a compact probe that reads the
-# engine's OWN instrumentation counters -- the frame transaction's raster, the
-# HUD and handoff entry rasters, both aperture splits, page/pointer coherence
-# and the HUD bitmap-write window -- across five fixtures in about a minute. It
-# protects every invariant that is expensive to get wrong and cheap to break.
+# What used to run here -- Slices A/A'/B/C/D, the terrain and turret
+# migration-porting proofs, and the historical batch-window schedule-settle
+# comparison (which was flaky on the untouched commit, not on anything this
+# game does) -- proved that the ORIGINAL PORT from the old game was faithful.
+# That job is done and the proof is preserved at the `legacy-tests-retired`
+# git tag; it does not need re-running on every future change to a system
+# those slices already certified once.
 #
-# `make test-engine-full` is the inherited qualification ladder. It is slow and
-# it is not part of ordinary game development; run it when the renderer, the
-# scroller or the aperture has been touched.
-# ---------------------------------------------------------------------------
-# `make test` is THREE probes, and deliberately so.
+# Two heavier, EXPLICITLY NON-DEFAULT targets remain because they still catch
+# something the fast gate does not, and are named so nobody mistakes them for
+# part of ordinary development:
 #
-#   test_engine.py        the engine the game is built on
-#   test_slice_a.py       the game's own path: production boot, the published
-#                         player block, and the full-byte $d015/$d010
-#                         composition that lets the player and the mux share
-#                         two registers
-#   test_slice_a_prime.py the world contract: scroll direction, the coarse
-#                         cadence, and that every row of both pages carries the
-#                         stage row it should
-#   test_slice_b.py       the weapon: fire cadence, heat, overheat, the shot
-#                         event, and the HUD heat feed
-#   test_slice_c.py       the dynamic object pool: lifecycle, slot reuse, the
-#                         stale sorted-ID hazard, one real enemy, and the
-#                         production population ladder
-#   test_slice_d.py       the player's hitscan: cannon geometry, target
-#                         selection, damage, hit feedback, death and the safe
-#                         removal of a killed object
-#   test_terrain.py       the level-1 terrain contract: the authored package is
-#                         the original, metatile expansion, the stage-row
-#                         mapping, colour RAM, and the $d018 charset windows
-#   test_turrets.py       the static background-character turrets and the black
-#                         open border: the authored placement is the old repo's
-#                         own, the world row -> generated cell mapping, the
-#                         hidden-page overlay, the terrain-recoverable contract,
-#                         zero sprite/object resources, and $d021 as aperture
-#                         state sampled by raster
-#   test_turret_combat.py the player-vs-turret combat contract: the old
-#                         constants, the nearest-wins/enemy-takes-a-tie
-#                         arbitration, the 16-pixel hitbox, the colour pulse
-#                         and hit flash, and destruction restoring the
-#                         authoritative terrain on BOTH pages
-#   test_turret_firing.py the other half: the recovered firing cadence and
-#                         eligibility, the capped hostile projectile pool, its
-#                         flight and despawn, software projectile -> player
-#                         collision, and the invulnerability window
-#   test_batch_window.py  legality-window batch merging: the window arithmetic
-#                         at the reuse boundary, the common-intersection rule,
-#                         a structural sweep, and the 6502 against the model.
-#                         Runs `--fast` here: the deterministic boundary/trap/
-#                         batch-size proofs plus ONE machine-vs-model layout,
-#                         no random sweep. Measured: 22s fast vs 54s full, and
-#                         the 4,144-layout sweep itself is 0.06s of that 54s --
-#                         the cost is a second VICE population setup for five
-#                         more layouts, not the sweep. The full run lives under
-#                         `make test-renderer-full` below.
+#   make test-engine-full   the inherited P0-P5 qualification ladder, plus
+#                           test_engine.py's own posed-fixture (MAXCAP/RING)
+#                           stress load. Run it when the renderer, scroller or
+#                           aperture itself has been touched -- not for a
+#                           gameplay-level change.
+#   make test-renderer-full the exhaustive legality-window sweep (4,144
+#                           layouts). Run it when the batch-merge window
+#                           arithmetic itself has changed.
 #
-# The last five are what break while a game is being built on an engine that
-# is already qualified, so they belong in the target that gets run constantly
-# rather than in a slower gate.
-#
-# IT IS NO LONGER ABOUT A MINUTE. Each slice adds a probe and the target is
-# growing with the game; run a single `make test-slice-X` while working on one
-# system, and this before believing anything. When it becomes slow enough that
-# it stops being run, that is the moment to split it -- not before.
+# Future features get their own focused tests for the task at hand, same as
+# always -- they just do not accumulate into this file by default afterward.
 test: build
-	python3 tests/test_engine.py
-	python3 tests/test_slice_a.py
-	python3 tests/test_slice_a_prime.py
-	python3 tests/test_slice_b.py
-	python3 tests/test_slice_c.py
-	python3 tests/test_slice_d.py
-	python3 tests/test_terrain.py
-	python3 tests/test_turrets.py
-	python3 tests/test_turret_combat.py
-	python3 tests/test_turret_firing.py
-	python3 tests/test_batch_window.py --fast
+	python3 tests/test_boot.py
+	python3 tests/test_production.py
+	python3 tests/test_turret_regression.py
 
-test-slice-a: build
-	python3 tests/test_slice_a.py
+test-boot: build
+	python3 tests/test_boot.py
 
-test-slice-a-prime: build
-	python3 tests/test_slice_a_prime.py
+test-production: build
+	python3 tests/test_production.py
 
-test-slice-b: build
-	python3 tests/test_slice_b.py
-
-test-slice-c: build
-	python3 tests/test_slice_c.py
-
-test-slice-d: build
-	python3 tests/test_slice_d.py
-
-test-terrain: build
-	python3 tests/test_terrain.py
-
-test-turrets: build
-	python3 tests/test_turrets.py
-
-test-turret-combat: build
-	python3 tests/test_turret_combat.py
-
-test-turret-firing: build
-	python3 tests/test_turret_firing.py
-
-test-batch-window: build
-	python3 tests/test_batch_window.py --fast
+test-turret-regression: build
+	python3 tests/test_turret_regression.py
 
 test-fast: build
 	python3 tests/test_engine.py
@@ -302,9 +247,14 @@ test-engine-full: build
 
 # test-renderer-full — the exhaustive legality-window qualification:
 # tests/test_batch_window.py in FULL mode, its 4,144-layout random/shaped
-# sweep and all six machine-vs-model layouts, not just the one `make test`
-# checks. Same relationship as test-engine-full to test_p5.py --fast: the
-# deterministic core runs constantly, the exhaustive proof runs on demand.
+# sweep and all six machine-vs-model layouts. `make test` no longer runs any
+# form of this file: its schedule-settle comparison is flaky on an UNTOUCHED
+# commit (proven during the turret-firing corrective task -- three failures in
+# ten standalone runs with none of that task's changes applied), which is a
+# pre-existing harness property of this file, not a signal about ordinary
+# gameplay changes. Run this target on demand when the batch-merge window
+# arithmetic itself has changed; test_production.py's renderer-sanity section
+# is what runs by default instead.
 test-renderer-full: build
 	python3 tests/test_batch_window.py
 
