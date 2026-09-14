@@ -187,7 +187,13 @@ objectZeroSlot:
     sta logXHi,x
     sta logPtr,x
     sta logCol,x
-    rts
+    // ...NOR ITS TRAJECTORY. src/movement.asm's per-object arrays are indexed
+    // by this same slot and simply live elsewhere in memory, because this
+    // block has run up against the collision state at $c5f3 with nothing to
+    // spare. The clearing belongs HERE and not there: "a reused slot inherits
+    // nothing" is the POOL's invariant, and a pool that delegates it to the
+    // subsystems that happen to use it has stopped guaranteeing anything.
+    jmp wmClearSlot                     // X preserved; its rts is ours
 
 // ---------------------------------------------------------------------------
 // objectAlloc — reserve a free slot WITHOUT activating it.

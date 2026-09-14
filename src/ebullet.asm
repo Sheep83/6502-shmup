@@ -102,17 +102,19 @@
 // ---------------------------------------------------------------------------
 // The bitmap. One shared 8x8 dart, hires, from the old enemyBulletSprite.
 // ---------------------------------------------------------------------------
-// It goes after the enemy's spawn table and colour table rather than beside
-// its bitmap, because a sprite pointer is an address divided by 64 and the
-// tables left the next aligned slot at $36c0.
+// It goes after the enemy's bitmap rather than beside it, because a sprite
+// pointer is an address divided by 64 and $36c0 is the next aligned slot.
+// (It used to clear the enemy's spawn and colour TABLES too; those left with
+// the spawner when src/waves.asm took the job over, and the guard below now
+// names the bitmap, which is what actually sits below this address.)
 .const EBULLET_SPRITE   = $36c0
 .const EBULLET_PTR      = EBULLET_SPRITE / 64
 
 .if ((EBULLET_SPRITE & 63) != 0) {
     .error "the projectile bitmap must be 64-byte aligned"
 }
-.if (EBULLET_SPRITE < enemyColoursEnd) {
-    .error "the projectile bitmap overlaps the enemy's tables"
+.if (EBULLET_SPRITE < enemyBitmapEnd) {
+    .error "the projectile bitmap overlaps the enemy bitmap"
 }
 .if (EBULLET_SPRITE + 64 > BLANK_CHARSET) {
     .error "the projectile bitmap has run into the blank charset"

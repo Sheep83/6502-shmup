@@ -310,6 +310,15 @@ BasicUpstart2(entry)
                                         // composes the overlay onto the row
                                         // terrain has just decoded
 #import "scroll.asm"
+#import "movement.asm"                  // AFTER objects.asm (MAX_OBJECTS) and
+                                        // renderer.asm (the production Y band
+                                        // its arc is proven against)
+#import "waves.asm"                     // AFTER movement.asm (the WM_*
+                                        // primitives and arc geometry its
+                                        // authored content names), enemy.asm
+                                        // (ENEMY_PTR, ENEMY_MAX_HP) and
+                                        // scroll.asm (worldProgress, the clock
+                                        // its triggers are authored against)
 
 // OUTSIDE VIC BANK 0, with the player, the scroller, the weapon, the object
 // pool, the enemy and collision. This segment was at $0810 while $0800-$0fff
@@ -530,7 +539,13 @@ gameFrame:
     // Five cycles unless a turret is actually on the aperture.
     jsr turretFireTick
 
-    jsr enemySpawnTick
+    // THE ENCOUNTER DIRECTOR, and it sits exactly where the spawner it
+    // replaces did: after every object has moved and after the hitscan, so an
+    // enemy created this frame is drawn where it was created rather than moved
+    // before it has ever been seen. One sixteen-bit compare against the next
+    // authored trigger plus a walk of two wave instances, whatever the stage
+    // is doing.
+    jsr waveTick
 
     jsr hudDemoTick                     // score, lives and upgrade only: their
                                         // systems do not exist yet. Heat left
@@ -668,6 +683,10 @@ gameInit:
     jsr weaponInit
     jsr collisionInit
     jsr enemyInit
+    jsr waveInit                        // no wave running, the first authored
+                                        // trigger one delta of worldProgress
+                                        // away. AFTER objectInit, whose empty
+                                        // pool it assumes
     jsr playerEmit
     jsr sortTick
     jsr buildSchedule

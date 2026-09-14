@@ -68,8 +68,6 @@
 .const ENEMY_MAX_HP      = 6        // ENEMY_START_HEALTH, main.asm:995. TYPE
                                    // data: every enemy of this type starts
                                    // here, so no per-object maximum is stored
-.const ENEMY_VY          = 2        // the old ingressTopStraightShort dive
-.const ENEMY_SPAWN_PERIOD = 48      // frames between spawns; see the note below
 
 // The enemy bitmap goes in the last free 64-byte block of VIC bank 0, between
 // the player's art and the blank charset the aperture depends on.
@@ -81,60 +79,39 @@
 // Sharing a bound is a DECISION and a decision deserves a check, which is why
 // these are asserted against the renderer's own constants below rather than
 // quietly importing them -- the same rule src/player.asm follows.
-.const ENEMY_SPAWN_Y     = 55       // MIN_SPRITE_Y: the first renderable line
 .const ENEMY_DESPAWN_Y   = 226      // MAX_SPRITE_Y: the last renderable line
 
-.if (ENEMY_SPAWN_Y != MIN_SPRITE_Y) {
-    .error "the enemy spawns outside the renderer's production Y band"
-}
 .if (ENEMY_DESPAWN_Y != MAX_SPRITE_Y) {
     .error "the enemy despawn line no longer matches the renderer's Y band"
 }
 
 // ===========================================================================
-// The spawn table. Four entries, cycled.
+// THE SPAWN TABLE IS GONE, AND THAT IS THIS SLICE'S POINT
 // ===========================================================================
-// This is NOT a wave system and is not the seed of one. It exists so that the
-// lifecycle -- allocate, activate, update, sort, render, despawn, REUSE the
-// slot -- runs continuously on a normal boot without a debug key, because a
-// lifecycle that only runs when a test pokes it is a lifecycle nobody has
-// watched.
+// There used to be four spawn entries here, cycled on a 48-frame timer, and
+// the comment above them said exactly what they were: "This is NOT a wave
+// system and is not the seed of one. It exists so that the lifecycle runs
+// continuously on a normal boot." It did that job for three slices.
 //
-// Two of the four entries deliberately cross the 255/256 horizontal boundary
-// during flight, one in each direction, so that the nine-bit X path and the
-// $d010 composition are exercised by ordinary play rather than only by a test.
+// src/waves.asm is the wave system, and it took the whole job over rather
+// than wrapping it. A spawner still running underneath a director would be a
+// second author of the same screen, and the two would fight over a pool that
+// is already shared with hostile projectiles.
 //
-// The table is built as an ASSEMBLER list and then emitted, rather than written
-// straight out as .byte rows, so that the proof below can read it. A proof that
-// cannot see the data it is about is not a proof.
+// WHAT MOVED, AND WHERE TO LOOK FOR IT:
 //
-//                            xLo  xHi  vx  vy    colour (old set 0)
-.var enySpawns = List()
-.eval enySpawns.add(List().add( 72,  0,  0, ENEMY_VY,  2))   // dive, left of centre
-.eval enySpawns.add(List().add(160,  0,  0, ENEMY_VY,  6))   // dive, centre
-.eval enySpawns.add(List().add(248,  0,  1, ENEMY_VY, 10))   // drifts RIGHT across X=256
-.eval enySpawns.add(List().add( 40,  1, -1, ENEMY_VY,  7))   // from X=296, drifts LEFT across it
-
-.const ENEMY_SPAWN_ENTRIES = 4
-.if (enySpawns.size() != ENEMY_SPAWN_ENTRIES) { .error "spawn entry count disagrees with the table" }
-
-// TERMINATION PROOF. The single despawn rule is "Y has passed the bottom of the
-// band", so an enemy with vy <= 0 would never despawn and would hold its pool
-// slot for ever. Rather than defend against that at run time, refuse to
-// assemble it.
+//   the cadence            -> waveRunInstance's per-instance timer
+//   which enemy is next    -> wvIndex, per wave instance
+//   the spawn positions    -> the authored wave definitions in waves.asm
+//   the colours            -> the same, one per wave rather than per entry
+//   the velocities         -> the movement primitives in src/movement.asm
+//   "carry set = pool full" -> unchanged, and still the allocation contract
 //
-// The spawn X is proven to start inside the nine-bit world too, so that a
-// mistyped entry cannot put an enemy somewhere the renderer will silently
-// refuse to draw for its whole life.
-.for (var e = 0; e < ENEMY_SPAWN_ENTRIES; e++) {
-    .if (enySpawns.get(e).get(3) <= 0) {
-        .error "a spawn entry has a non-descending vy, so that enemy could never despawn"
-    }
-    .var x9 = enySpawns.get(e).get(0) + 256 * enySpawns.get(e).get(1)
-    .if (x9 < 0 || x9 > 343) {
-        .error "a spawn entry starts outside the nine-bit horizontal range"
-    }
-}
+// WHAT DID NOT MOVE: everything below. The art, the six HP, the hit flash,
+// the death animation, the single vertical despawn rule and the pool
+// discipline are what make this an ENEMY, and none of them cares who decided
+// to create it. The player's hitscan, the turrets and the projectiles do not
+// know src/waves.asm exists.
 
 // ===========================================================================
 // Art. The old multicolour bitmap, flattened to hires at assembly time.
@@ -196,28 +173,6 @@ enemyBitmapEnd:
 .if (enemyBitmapEnd - enemyBitmap != 64) { .error "the enemy bitmap must be exactly 64 bytes" }
 .if (enemyBitmapEnd > BLANK_CHARSET) { .error "the enemy bitmap has run into the blank charset" }
 
-//        xLo  xHi   vx   vy
-enemySpawnTable:
-.for (var e = 0; e < ENEMY_SPAWN_ENTRIES; e++) {
-    .byte enySpawns.get(e).get(0), enySpawns.get(e).get(1)
-    .byte enySpawns.get(e).get(2), enySpawns.get(e).get(3)
-}
-enemySpawnTableEnd:
-.if (enemySpawnTableEnd - enemySpawnTable != ENEMY_SPAWN_ENTRIES * 4) {
-    .error "the spawn table must be exactly four bytes per entry"
-}
-
-// The old game's first visual set colours, one per spawn entry.
-// shooter_test/src/main.asm:5809.
-enemyColours:
-.for (var e = 0; e < ENEMY_SPAWN_ENTRIES; e++) {
-    .byte enySpawns.get(e).get(4)
-}
-enemyColoursEnd:
-.if (enemyColoursEnd - enemyColours != ENEMY_SPAWN_ENTRIES) {
-    .error "there must be exactly one enemy colour per spawn entry"
-}
-
 // ===========================================================================
 // State.
 // ===========================================================================
@@ -225,9 +180,10 @@ enemyColoursEnd:
 // contiguously. Six bytes in the hole between the P5 ring's state and the
 // player's, rather than a second gap further up the page.
 * = $c517 "enemy state"
-enySpawnTimer: .byte 0                  // frames until the next spawn attempt
-enySpawnNext:  .byte 0                  // which spawn entry is next, 0..N-1
-enySpawned:    .byte 0, 0               // 16-bit, saturating: total spawned
+// The spawn cursor and its timer left with the spawn table: src/waves.asm
+// owns when an enemy is created. What stays is the count of enemies that
+// reached the end of their own lives, which is this file's business and
+// nobody else's -- enemyDespawn is still the ONLY place a slot is released.
 enyDespawned:  .byte 0, 0               // 16-bit, saturating: total despawned
 enyStateEnd:
 .if (enyStateEnd > $c520) { .error "the enemy state has grown into the player state at $c520" }
@@ -238,102 +194,9 @@ enyStateEnd:
 // enemyInit — no enemies, and the first spawn one period away.
 // ---------------------------------------------------------------------------
 enemyInit:
-    lda #ENEMY_SPAWN_PERIOD
-    sta enySpawnTimer
     lda #0
-    sta enySpawnNext
-    sta enySpawned
-    sta enySpawned + 1
     sta enyDespawned
     sta enyDespawned + 1
-    rts
-
-// ---------------------------------------------------------------------------
-// enemySpawnTick — the cadence. MAIN THREAD, once per frame.
-//
-// A spawn that the pool refuses is NOT retried on the next frame: the timer is
-// reloaded either way. A full pool means the screen is already as busy as this
-// slice allows, and retrying every frame would turn a transient full pool into
-// a burst the moment one slot frees.
-// ---------------------------------------------------------------------------
-enemySpawnTick:
-    dec enySpawnTimer
-    bne !done+
-    lda #ENEMY_SPAWN_PERIOD
-    sta enySpawnTimer
-    jsr enemySpawn
-!done:
-    rts
-
-// ---------------------------------------------------------------------------
-// enemySpawn — one enemy from the next spawn-table entry.
-//
-// Returns: carry clear if one was spawned, carry set if the pool was full.
-// The entry cursor advances ONLY on success, so a refused spawn does not skip
-// a formation member -- the old game advanced WAVE_SPRITE_INDEX "only after a
-// successful allocation/spawn" for the same reason (4894).
-// ---------------------------------------------------------------------------
-enemySpawn:
-    jsr objectAlloc                     // X = a zeroed free slot, or carry set
-    bcc !got+
-    rts                                 // pool full; carry still set
-!got:
-    // Y indexes the spawn table: entry * 4.
-    lda enySpawnNext
-    asl
-    asl
-    tay
-
-    lda enemySpawnTable + 0,y
-    sta logX,x
-    lda enemySpawnTable + 1,y
-    sta logXHi,x
-    lda enemySpawnTable + 2,y
-    sta objVX,x
-    lda enemySpawnTable + 3,y
-    sta objVY,x
-
-    lda #ENEMY_SPAWN_Y
-    sta logY,x
-    lda #ENEMY_PTR
-    sta logPtr,x
-
-    // The colour is indexed by ENTRY, not by slot: the same trajectory always
-    // arrives in the same colour, which is what makes a wrong one obvious.
-    tya
-    lsr
-    lsr
-    tay
-    lda enemyColours,y
-    sta logCol,x
-
-    lda #ENEMY_MAX_HP                   // type data, not per-object storage:
-    sta objHP,x                         // every enemy of this type starts here
-    lda #TYPE_ENEMY
-    sta objType,x
-
-    // EVERY FIELD IS NOW SET, so the object may join the active set. Not one
-    // instruction earlier: this is the old game's rule at 4922, and here it is
-    // load-bearing because logActive is exactly what the sorter reads.
-    jsr objectActivate
-
-    inc enySpawnNext
-    lda enySpawnNext
-    cmp #ENEMY_SPAWN_ENTRIES
-    bcc !wrapped+
-    lda #0
-    sta enySpawnNext
-!wrapped:
-
-    inc enySpawned                      // 16-bit, saturating at $ffff
-    bne !counted+
-    inc enySpawned + 1
-    bne !counted+
-    lda #$ff
-    sta enySpawned
-    sta enySpawned + 1
-!counted:
-    clc
     rts
 
 // ---------------------------------------------------------------------------
@@ -356,43 +219,30 @@ enemyTick:
     jsr enemyFlashTick
 !noFlash:
 
-    // ---- vertical: whole pixels, as the old game ---------------------------
-    lda logY,x
-    clc
-    adc objVY,x
-    sta logY,x
+    // ---- WHERE IT IS THIS FRAME -------------------------------------------
+    // The whole of movement now lives in src/movement.asm: the enemy runs
+    // whichever primitive its wave handed it, at quarter-pixel resolution,
+    // and this file does not know or care whether that is a straight vector
+    // or a phase of an arc. Two enemies from two different waves can be at
+    // completely different points of completely different primitives in the
+    // same call to objectUpdateAll, which is the property the encounter
+    // director is built on.
+    jsr wmTick
 
-    // THE SINGLE DESPAWN RULE. Past the bottom of the renderable band, the
-    // enemy is gone. Nothing else in this file frees a slot.
+    // THE SINGLE DESPAWN RULE, UNCHANGED. Past the bottom of the renderable
+    // band, the enemy is gone. Nothing else in this file frees a slot.
     //
-    // The test is unsigned and the band ends well below 255, so a descending
-    // enemy always reaches it: the assembly-time check on the spawn table
-    // guarantees vy is positive, which is what makes that a proof rather than
-    // an expectation.
+    // It is still sufficient now that enemies can curve, and that is proved
+    // rather than hoped: src/movement.asm asserts at assembly time that every
+    // arc phase descends and that the last one descends strictly, and
+    // src/waves.asm asserts that no authored wave can launch on an unbounded
+    // non-descending vector. So every path this engine can express ends with
+    // vy > 0 and therefore reaches this test.
+    lda logY,x
     cmp #ENEMY_DESPAWN_Y + 1
     bcc !alive+
     jmp enemyDespawn
 !alive:
-
-    // ---- horizontal: nine bits, signed velocity ---------------------------
-    lda objVX,x
-    beq !done+                          // the common case: a straight dive
-    bmi !left+
-
-    clc                                 // moving right
-    adc logX,x
-    sta logX,x
-    bcc !done+
-    inc logXHi,x                        // crossed 255 -> 256 going right
-    rts
-
-!left:
-    clc                                 // moving left: A is negative, so the
-    adc logX,x                          // sign extension is $ff in the high
-    sta logX,x                          // byte and a CLEAR carry is the borrow
-    bcs !done+
-    dec logXHi,x                        // crossed 256 -> 255 going left
-!done:
     rts
 
 // ---------------------------------------------------------------------------
@@ -460,36 +310,22 @@ enemyDeathTick:
     jmp enemyDespawn
 
 // ---------------------------------------------------------------------------
-// enemyBaseColour — the spawn colour for the slot's trajectory.
+// enemyBaseColour — the colour a hit flash returns to.
 // Entry/exit: X = slot, preserved.
 //
-// The old game stored OBJECT_BASE_COLOUR per object so an impact flash could be
-// undone. Here the colour is a property of the spawn ENTRY, and the entry that
-// produced this enemy is recoverable from its velocity pair, so the base colour
-// is looked up rather than stored. One byte of table beats sixteen of state.
+// This used to DERIVE the answer, searching the spawn table for the entry
+// whose velocity pair matched the object's -- one byte of table instead of
+// sixteen of state, which was a good trade while a velocity pair identified a
+// trajectory for life.
+//
+// It does not any more. An enemy's velocity now changes every few frames as
+// it turns, so by the time it is hit its velocity says nothing about where it
+// came from. The colour is therefore STORED, once, at spawn: src/waves.asm
+// writes wmBaseCol beside the movement state it is already writing, and the
+// derivation is gone rather than patched.
 // ---------------------------------------------------------------------------
 enemyBaseColour:
-    ldy #ENEMY_SPAWN_ENTRIES - 1
-!find:
-    lda objVX,x
-    cmp enemySpawnTable + 2,y
-    bne !nextEntry+
-    lda logXHi,x
-    cmp enemySpawnTable + 1,y
-    beq !found+
-!nextEntry:
-    dey
-    dey
-    dey
-    dey
-    bpl !find-
-    ldy #0                              // no match: the first entry's colour is
-!found:                                 // a defined answer rather than a stale
-    tya                                 // one
-    lsr
-    lsr
-    tay
-    lda enemyColours,y
+    lda wmBaseCol,x
     sta logCol,x
     rts
 

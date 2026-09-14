@@ -113,6 +113,7 @@ VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 .PHONY: p3-fixtures p4-fixtures
 .PHONY: all build d64 test test-fast test-engine-full
 .PHONY: test-boot test-production test-turret-regression
+.PHONY: test-encounter-director
 .PHONY: test-p0 test-p1 test-p2 test-p3 test-p4 test-p5 test-renderer-full
 .PHONY: run run-d64 clean
 
@@ -192,6 +193,15 @@ test-p5: build
 #                               subsystem interaction that a direct routine
 #                               call cannot see -- see constraint #4 in
 #                               reports/production-test-suite-rewrite.md.
+#   test_encounter_director.py the encounter director: an authored trigger off
+#                               worldProgress starts a wave, a SECOND wave
+#                               instance runs concurrently with the first,
+#                               enemies from both coexist, the curved movement
+#                               primitive turns smoothly, slots come back
+#                               through the ordinary pool, and a deliberately
+#                               filled pool defers spawns instead of losing
+#                               them. Watched through the real frame loop, for
+#                               the same reason the turret regression is.
 #
 # What used to run here -- Slices A/A'/B/C/D, the terrain and turret
 # migration-porting proofs, and the historical batch-window schedule-settle
@@ -220,6 +230,7 @@ test: build
 	python3 tests/test_boot.py
 	python3 tests/test_production.py
 	python3 tests/test_turret_regression.py
+	python3 tests/test_encounter_director.py
 
 test-boot: build
 	python3 tests/test_boot.py
@@ -229,6 +240,9 @@ test-production: build
 
 test-turret-regression: build
 	python3 tests/test_turret_regression.py
+
+test-encounter-director: build
+	python3 tests/test_encounter_director.py
 
 test-fast: build
 	python3 tests/test_engine.py
