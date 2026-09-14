@@ -31,14 +31,52 @@
 // and the hostile projectiles do not know this file exists.
 //
 // ---------------------------------------------------------------------------
-// THE SHAPE OF v1, AND WHAT IS DELIBERATELY ABSENT
+// THE SHAPE OF v1.1, AND WHAT IS DELIBERATELY ABSENT
 // ---------------------------------------------------------------------------
-// Two concurrent wave instances, a fixed authored trigger list, two wave
-// definitions and three movement primitives. No random selection, no
-// difficulty curve, no population budget, no formation AI, no upgrade
-// carriers, no escorts, no boss logic, no enemy firing, no procedural
-// generation. Those are later slices and every one of them is easier to add
-// to a small thing that works than to a large thing that nearly does.
+// Two concurrent wave instances, a fixed authored trigger list, FOUR wave
+// definitions, and flight paths built by SEQUENCING movement stages rather
+// than by adding a movement mode per shape. No random selection, no difficulty
+// curve, no population budget, no formation AI, no upgrade carriers, no
+// escorts, no boss logic, no enemy firing, no procedural generation. Those are
+// later slices and every one of them is easier to add to a small thing that
+// works than to a large thing that nearly does.
+//
+// WHAT v1.1 CHANGED. v1 handed each enemy one primitive and one queued
+// follow-on, which is exactly enough for "fly in, then turn" and nothing more.
+// A pattern is now a list of stage records (the format is src/movement.asm's,
+// the bytes are below) and the object walks it by itself. Loops, S-turns and
+// lingers are ORDERINGS of the same five primitives, so the vocabulary stopped
+// growing at the point the content started getting interesting -- which is the
+// whole architectural bet of this slice.
+//
+// MUX-FRIENDLY CHOREOGRAPHY IS PART OF THE CONTENT, NOT THE RENDERER'S
+// PROBLEM. Members arrive on different raster lines and reach the bottom of
+// the aperture at different times. A wave that entered as a rank on one line
+// and crossed the screen that way would be asking six hardware sprites to
+// cover four logical ones in a single reuse window, and the honest fix for
+// that is to author the wave differently rather than make the scheduler
+// cleverer.
+//
+// HOW THE Y FAN IS MADE CHANGED WITH INGRESS. v1.1 fanned every wave with a
+// positive yStep, which was right when waves spawned inside the aperture and
+// wrong the moment they spawned above it: a downward yStep pushes the later
+// members of a top-entering wave DOWN INTO VIEW, so they appear on screen
+// instead of arriving through the edge. The three patterns that now enter from
+// above therefore use yStep 0 and let the DESCENT do it -- every member is
+// falling, so an interval of 26 frames is itself 32 lines of separation by the
+// time they are all in view. Only the sweep, which enters level through the
+// side border, still needs an authored yStep.
+//
+// ---------------------------------------------------------------------------
+// INGRESS AND EGRESS
+// ---------------------------------------------------------------------------
+// Every member of every wave now spawns ENTIRELY OUTSIDE the visible playfield
+// and flies in, because v1.1 spawned them on lines 56..132 -- up to a third of
+// the way down the aperture -- and enemies visibly materialised in mid-air.
+// Three patterns enter from above, where the renderer simply does not admit
+// them until they cross raster 55; the sweep enters through the LEFT BORDER at
+// X=0, where the VIC clips it column by column and the arrival is genuinely
+// progressive. src/enemy.asm's lifecycle bounds are the other half of this.
 //
 // WAVE_SLOTS is a compile-time constant and raising it costs exactly one
 // constant: every loop below is bounded by it, nothing is unrolled, and no
@@ -51,108 +89,376 @@
 // state and no code at all.
 .const WAVE_SLOTS = 2
 
+// ===========================================================================
+// THE STAGE PROGRAMS — the flight paths, as sequences of movement stages
+// ===========================================================================
+// src/movement.asm owns the four-byte stage record format and the interpreter
+// that runs it; these are the bytes. A pattern is a short list of stages ended
+// by WM_EXIT, and the interesting shapes come from the ORDER rather than from
+// any stage being clever:
+//
+//     kind             arg                 byte 2              byte 3
+//     WM_STRAIGHT      frames              vx                  vy
+//     WM_HOLD          frames              vx                  vy
+//     WM_ARC           heading steps       frames per step     --
+//     WM_ARC_MIRROR    heading steps       frames per step     --
+//     WM_EXIT          --                  --                  --
+//
+// HEADINGS, because every one of these is authored in them: the heading table
+// runs clockwise from east in WM_HEAD_LEN steps, so with +y DOWN --
+//
+//     0 east (+6,0)   8 down-right (+4,+4)   16 south (0,+6)
+//    24 down-left (-4,+4)                    32 west (-6,0)
+//
+// and a quarter turn is WM_QUARTER = 16 steps. WM_ARC increases the heading
+// (clockwise: east -> south -> west), WM_ARC_MIRROR decreases it.
+//
+// FRAMES PER STEP IS THE TURN RADIUS: 4 gives the wide 61-pixel sweep v1 had,
+// 2 gives a tight 31-pixel snap. It is what lets one arc primitive be both a
+// lazy hook and a dogfight loop.
+.var progs = List()
+
+// --- 0: ECHELON SWEEP -------------------------------------------------------
+// Level flight east, then the same quarter turn v1's left sweep made, then
+// away down. The straight leg's velocity is heading 0's own (+6,0), so the
+// turn begins with no discontinuity at all.
+.eval progs.add(List()
+    .add(List().add(WM_STRAIGHT, 34, 6, 0))     // run in along the top
+    .add(List().add(WM_ARC, WM_QUARTER, 4, 0))     // wide quarter turn to south
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
+// --- 1: S-TURN --------------------------------------------------------------
+// COMPOSED, NOT A CURVE ENGINE: one arc anticlockwise and one clockwise, and
+// the S is the join between them. Launched steep (heading 12), the first arc
+// unwinds it to level east and the second rolls it over past south to
+// down-left, so the silhouette is a bulge right followed by a sweep away left.
+//
+// The heading never leaves 0..20, so vy is never negative and the path never
+// climbs -- which is why this one needs no special pleading about the top of
+// the aperture.
+.eval progs.add(List()
+    .add(List().add(WM_ARC_MIRROR, 12, 3, 0))      // steep -> level: bulge right
+    .add(List().add(WM_ARC, 20, 3, 0))             // level -> down-left: the turn back
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
+// --- 2: LINGER AND BREAK ----------------------------------------------------
+// Runs in on a diagonal, nearly stops for about a second in the middle of the
+// screen, then accelerates away through a turn.
+//
+// THE HOLD IS (0,+1), NOT (0,0). A dead stop reads as a bug -- a sprite frozen
+// mid-screen looks like something has hung -- while a quarter pixel a frame is
+// visibly deliberate drift, and it keeps the object descending so that even a
+// hold is making progress toward the despawn rule.
+//
+// The velocity jump from the hold's (0,+1) to the arc's full (+3,+5) is the
+// POINT of the pattern rather than a discontinuity to apologise for: the enemy
+// hangs, then breaks away.
+.eval progs.add(List()
+    .add(List().add(WM_STRAIGHT, 28, 3, 5))     // run in, down-right
+    .add(List().add(WM_HOLD, 48, 0, 1))         // hang there, drifting
+    .add(List().add(WM_ARC, 12, 4, 0))             // break away down-left
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
+// --- 3: LOOP ----------------------------------------------------------------
+// A FULL CIRCLE AND A BIT: 76 heading steps is 64 for the loop plus 12 to
+// leave on a steep descent instead of back on the entry heading. Two frames a
+// step makes it tight (about a 31-pixel radius) and quick enough to read as a
+// manoeuvre rather than a drift.
+//
+// THE DIVE IN FRONT OF IT IS THE INGRESS STAGE. v1.1 launched this pattern due
+// east on the spawn line, which is exactly the one heading that cannot arrive
+// from above: a level enemy started off-screen stays off-screen. Rather than
+// give the loop a special entrance, it gets a stage -- which is what a
+// composable stage system is for. Forty frames of (+4,+4) carry it down out of
+// hiding and into view, and the loop then starts from a diagonal heading,
+// which tilts the circle without changing what it is.
+//
+// The circle's centre sits ninety degrees clockwise of the entry heading, so
+// entering on a descending diagonal hangs it down and to the left of the entry
+// point and it clears the top of the aperture by a comfortable margin. That is
+// checked below rather than asserted here.
+.eval progs.add(List()
+    .add(List().add(WM_STRAIGHT, 40, 4, 4))        // dive in from above
+    .add(List().add(WM_ARC, 76, 2, 0))             // loop, and keep turning
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
+.const PROG_SWEEP  = 0
+.const PROG_S      = 1
+.const PROG_LINGER = 2
+.const PROG_LOOP   = 3
+
+// Byte offsets of each program's first record, computed rather than authored:
+// a hand-maintained offset is a number that is right until somebody inserts a
+// stage.
+.var progAt = List()
+.var progBytes = 0
+.for (var p = 0; p < progs.size(); p++) {
+    .eval progAt.add(progBytes)
+    .eval progBytes = progBytes + WM_STAGE_SIZE * progs.get(p).size()
+}
+.if (progBytes > 256) {
+    .error "the stage table has outgrown the one-byte cursor in wmStage"
+}
+
 // --- the authored wave definitions ------------------------------------------
-// Twelve bytes each, and the record is deliberately flat: the director reads
-// it with one indexed load per field and never copies it anywhere.
+// Ten bytes each, and the record is deliberately flat: the director reads it
+// with one indexed load per field and never copies it anywhere.
 //
 //   0  count      how many enemies this wave sends
 //   1  interval   frames between one member and the next
 //   2  startXLo   nine-bit spawn X...
 //   3  startXHi
 //   4  startY     spawn line, inside the renderer's production band
-//   5  xStep      signed, added to X per member, so a wave fans rather than
-//                 forming a single-file queue
-//   6  colour     every member of a wave shares one, so which wave an enemy
+//   5  xStep      signed, added to X per member
+//   6  yStep      signed, added to Y per member
+//   7  colour     every member of a wave shares one, so which wave an enemy
 //                 belongs to is visible on screen
-//   7  mode       the movement primitive it launches with
-//   8  vx         quarter pixels per frame, signed
-//   9  vy         quarter pixels per frame, signed
-//  10  timer      frames in the launch primitive (WM_STRAIGHT), or the phase
-//                 length when launching straight into an arc
-//  11  next       the primitive to take up when the launch one finishes
-.const WAVEDEF_SIZE = 12
-
-// ---------------------------------------------------------------------------
-// DEFINITION 0 — "left sweep". Enters top-left travelling RIGHT along the top
-// of the aperture, holds that line long enough to be worth shooting at, then
-// turns down through the arc and leaves.
+//   8  heading    launch heading, 0..WM_HEAD_LEN-1
+//   9  program    byte offset of its first stage record
 //
-// vx = +6 quarter pixels is 1.5 px/frame, and the launch velocity is exactly
-// the arc's phase-0 velocity (+WM_ARC_SPEED, 0) so that the turn begins with
-// no discontinuity at all -- see wmEnterNext.
-// ---------------------------------------------------------------------------
-.var defLeftSweep = List().add(
-    4,                  // count
-    28,                 // interval
-    48, 0,              // startX = 48
-    60,                 // startY
-    14,                 // xStep: members fan to the right
+// YSTEP IS THE NEW FIELD AND IT IS THE MUX-FRIENDLINESS ONE. v1 fanned members
+// along X only, so a four-strong wave entered as a rank all on one raster line
+// and stayed that way for as long as its launch leg was level -- four logical
+// sprites competing for the same reuse window, which is precisely the geometry
+// the multiplexer finds hardest. Fanning Y as well turns every entry into an
+// ECHELON: the members arrive on distinct lines, spread further as their paths
+// diverge, and reach the exit corridor at different times. It is one signed
+// byte and it is the difference between content that respects the renderer's
+// capacity and content that attacks it.
+.const WAVEDEF_SIZE = 10
+
+// --- 0: "echelon sweep" -----------------------------------------------------
+// Four across the top-left, each 20 lines below and 16 pixels right of the one
+// before, all running east and turning down together. The stagger is what
+// makes it an echelon rather than a rank: the members are 20 lines apart at
+// entry -- a sprite is 21 tall -- and the quarter turn preserves that spacing
+// all the way to the exit.
+.var defSweep = List().add(
+    4, 22,              // count, interval
+    0, 0,               // startX = 0: the sprite covers columns 0..23 and the
+                        // display window starts at 24, so it is ENTIRELY
+                        // behind the left border and slides into view through
+                        // it. This is the one edge the hardware clips for us.
+    64,                 // startY: inside the aperture, because this pattern
+                        // arrives from the SIDE rather than from above
+    0, 20,              // xStep 0, yStep +20: every member enters at the same
+                        // point on the border and the INTERVAL spaces them
+                        // along X as they fly east -- 33 pixels per member --
+                        // while yStep stacks them into an echelon. Fanning X
+                        // at spawn would have put the later members on screen
+                        // before they had entered.
     10,                 // colour: light red
-    WM_STRAIGHT,        // mode
-    WM_ARC_SPEED, 0,    // vx, vy -- the arc's own phase-0 velocity
-    40,                 // timer: 40 frames of level flight first
-    WM_ARC)             // then turn down
+    0,                  // heading: due east, straight through the border
+    PROG_SWEEP)
 
-// ---------------------------------------------------------------------------
-// DEFINITION 1 — "right hook". Enters top-right and turns down IMMEDIATELY,
-// mirrored, so it crosses the left sweep's path rather than trailing it.
-//
-// It launches straight into WM_ARC_MIRROR: mode is the arc itself, timer is
-// the phase length, and next is WM_EXIT.
-// ---------------------------------------------------------------------------
-.var defRightHook = List().add(
-    3,                  // count
-    20,                 // interval
-    290 - 256, 1,       // startX = 290
-    72,                 // startY
-    -14,                // xStep: members fan to the left
+// --- 1: "S-turn" ------------------------------------------------------------
+// Three entering steep from ABOVE the aperture and weaving right then away
+// left. startY 30 puts the whole 21-line sprite above raster 55 with four
+// lines to spare, and the launch heading descends at a pixel and a half a
+// frame, so it is in view about seventeen frames later.
+.var defSTurn = List().add(
+    3, 26,
+    90, 0,              // startX = 90
+    30,                 // startY: hidden above the aperture
+    28, 0,              // xStep +28, yStep 0: the Y separation comes from the
+                        // interval instead. Every member descends, so 26
+                        // frames of head start IS vertical spacing -- and a
+                        // positive yStep would have pushed the later members
+                        // down into view before they had entered.
     3,                  // colour: cyan
-    WM_ARC_MIRROR,      // mode
-    -WM_ARC_SPEED, 0,   // vx, vy -- phase 0, mirrored
-    WM_ARC_STEP,        // timer: one phase
-    WM_EXIT)            // then straight on out
+    12,                 // heading: steep down-right
+    PROG_S)
 
-.var waveDefs = List().add(defLeftSweep).add(defRightHook)
-.const WAVE_DEFS = 2
-.const WAVE_DEF_LEFT  = 0
-.const WAVE_DEF_RIGHT = 1
+// --- 2: "linger and break" --------------------------------------------------
+// Three running in from above on a shallow diagonal and hanging in the middle
+// third. The interval gives the members about 32 lines of separation by the
+// time they park, which is more than a sprite is tall -- and parking is
+// exactly when that matters.
+.var defLinger = List().add(
+    3, 26,
+    120, 0,             // startX = 120
+    30,                 // startY: hidden above the aperture
+    36, 0,              // xStep +36, yStep 0: as above, the descent plus the
+                        // interval is the vertical fan
+    7,                  // colour: yellow
+    10,                 // heading: down-right, shallow
+    PROG_LINGER)
+
+// --- 3: "loop" --------------------------------------------------------------
+// Three loops, widely spaced in time (34 frames) as well as in space, because
+// three simultaneous circles in one place would be a knot rather than a
+// manoeuvre. The dive stage in PROG_LOOP is what brings them in from hiding.
+.var defLoop = List().add(
+    3, 34,
+    70, 0,              // startX = 70
+    30,                 // startY: hidden above the aperture
+    50, 0,              // xStep +50: the circles are 62 pixels across, so they
+                        // need most of that between them to read as three
+                        // separate manoeuvres. yStep 0: the dive plus the
+                        // interval separates them vertically.
+    13,                 // colour: light green
+    8,                  // heading: down-right, so the dive carries it into
+                        // view and the circle hangs below and left of where
+                        // the loop starts
+    PROG_LOOP)
+
+.var waveDefs = List().add(defSweep).add(defSTurn).add(defLinger).add(defLoop)
+.const WAVE_DEFS     = 4
+.const WAVE_DEF_SWEEP  = 0
+.const WAVE_DEF_S      = 1
+.const WAVE_DEF_LINGER = 2
+.const WAVE_DEF_LOOP   = 3
 
 .if (waveDefs.size() != WAVE_DEFS) { .error "wave definition count disagrees with the table" }
 
-// ASSEMBLY-TIME PROOFS over the authored content. Every one of these is a
-// mistake that would produce an enemy nobody can see, or one that never
-// leaves and holds a pool slot for the rest of the session.
+// ===========================================================================
+// ASSEMBLY-TIME PROOFS over the authored content
+// ===========================================================================
+// The cheap structural ones first, then the one that matters: FLYING EVERY
+// PATTERN, for every member, through the REAL lifecycle rules.
+//
+// v1 could prove termination by inspection, because it had one arc that always
+// descended and a rule that a wave must launch descending. Composition ended
+// that, and the ingress/egress correction ends the simple version of it too: a
+// path may now start off-screen, climb, level off, loop, reverse, and leave by
+// any of three edges. Whether it ever leaves at all is a property of the whole
+// sequence rather than of any stage in it.
+//
+// So the assembler integrates each path in quarter pixels -- the same
+// arithmetic the 6502 does -- applying src/enemy.asm's three despawn rules
+// frame by frame, and checks what a human cannot check by reading:
+//
+//   * IT LEAVES. Some edge is reached inside the frame budget; otherwise the
+//     enemy holds a pool slot for the rest of the session.
+//   * IT ARRIVES. The sprite actually becomes visible inside the aperture,
+//     and reasonably soon. A pattern that is authored off-screen and never
+//     crosses in is invisible content, and the ingress work makes that a very
+//     easy mistake to make.
+//   * IT NEVER WRAPS. X stays positive for the whole flight, so no borrow can
+//     put logXHi at $ff and reappear the sprite 256 pixels to the right.
+//   * IT DOES NOT MATERIALISE IN VIEW. Every member is entirely outside the
+//     visible playfield at spawn -- above it, or behind a side border.
+//
+// WHAT IS DELIBERATELY NO LONGER CHECKED: that the path stays inside the
+// aperture. Bounded off-screen travel is now the POINT rather than a fault, so
+// the validator distinguishes it from a runaway by asking whether the flight
+// ends at an edge and whether it was ever on screen, instead of by fencing the
+// coordinates in.
+.const SIM_FRAME_BUDGET = 900        // frames before a path is called stuck
+.const SIM_ENTER_BUDGET = 240        // frames a pattern may spend off-screen
+                                     // before it has to have shown itself
+
 .for (var d = 0; d < WAVE_DEFS; d++) {
     .var def = waveDefs.get(d)
     .if (def.size() != WAVEDEF_SIZE) { .error "a wave definition is not WAVEDEF_SIZE bytes" }
     .if (def.get(0) < 1) { .error "a wave definition sends no enemies" }
     .if (def.get(1) < 1) { .error "a wave interval of zero would spawn the whole wave in one frame" }
+    .if (def.get(8) < 0 || def.get(8) >= WM_HEAD_LEN) { .error "a wave launches on a heading that does not exist" }
+    .if (def.get(9) >= progs.size()) { .error "a wave names a stage program that does not exist" }
 
-    // The first member, and the last, must both start inside the nine-bit
-    // world AND inside the renderer's production Y band. The last matters
-    // because xStep walks the spawn point across the screen.
-    .var x0 = def.get(2) + 256 * def.get(3)
-    .var xN = x0 + def.get(5) * (def.get(0) - 1)
-    .if (x0 < 0 || x0 > 343) { .error "a wave's first member spawns outside the nine-bit X range" }
-    .if (xN < 0 || xN > 343) { .error "a wave's last member spawns outside the nine-bit X range" }
-    .if (def.get(4) < MIN_SPRITE_Y || def.get(4) > MAX_SPRITE_Y) {
-        .error "a wave spawns outside the renderer's production Y band"
+    .var prog = progs.get(def.get(9))
+    .if (prog.get(prog.size() - 1).get(0) != WM_EXIT) {
+        .error "a stage program does not end in WM_EXIT and would run off the table"
     }
-    .if (def.get(7) >= WM_MODES) { .error "a wave names a movement primitive that does not exist" }
-    .if (def.get(11) >= WM_MODES) { .error "a wave names a follow-on primitive that does not exist" }
-
-    // TERMINATION. The single despawn rule is vertical, so every authored
-    // path must end descending. A launch primitive that is bounded (a timer)
-    // hands over to `next`, and both arcs end descending by movement.asm's
-    // own proof -- so the only way to author a permanent resident is to
-    // launch WM_STRAIGHT or WM_EXIT with a non-positive vy and nothing to
-    // follow it.
-    .if (def.get(7) == WM_STRAIGHT || def.get(7) == WM_EXIT) {
-        .if (def.get(10) == 0 && def.get(9) <= 0) {
-            .error "a wave launches on an unbounded non-descending vector and could never despawn"
+    .for (var s = 0; s < prog.size() - 1; s++) {
+        .var rec = prog.get(s)
+        .if (rec.get(0) == WM_EXIT) { .error "WM_EXIT is terminal and cannot be followed by another stage" }
+        .if (rec.get(1) < 1) { .error "a stage of zero length would never advance" }
+        .if (rec.get(0) == WM_ARC || rec.get(0) == WM_ARC_MIRROR) {
+            .if (rec.get(2) < 1) { .error "an arc stage with no frames per step would turn infinitely fast" }
+        } else {
+            // The wrap guard in src/enemy.asm runs once a frame, so no
+            // authored leg may out-run its clearance window either.
+            .if (abs(rec.get(2)) > ENEMY_CLEAR_X_LEFT * 4) {
+                .error "a straight or hold leg moves in X fast enough to step over the left clearance window and wrap"
+            }
         }
-        .if ((def.get(11) == WM_STRAIGHT || def.get(11) == WM_EXIT) && def.get(9) <= 0) {
-            .error "a wave's follow-on vector never descends and could never despawn"
+    }
+
+    // ---- fly every member -------------------------------------------------
+    .for (var m = 0; m < def.get(0); m++) {
+        .var x0 = def.get(2) + 256 * def.get(3) + def.get(5) * m
+        .var y0 = def.get(4) + def.get(6) * m
+
+        // SPAWNED OUT OF SIGHT. The sprite covers x0..x0+23 and y0..y0+20, and
+        // the visible playfield is columns 24..343 of rasters 55..247, so
+        // "entirely outside" is one of these three.
+        .var hiddenAbove = (y0 + SPRITE_HEIGHT - 1) < APERTURE_TOP_RASTER
+        .var hiddenLeft  = (x0 + 23) < 24
+        .var hiddenRight = x0 > 343
+        .if (!hiddenAbove && !hiddenLeft && !hiddenRight) {
+            .error "a wave member spawns where part of it is already on screen; it would pop into existence inside the playfield"
+        }
+        .if (x0 < 0 || x0 > 511) { .error "a wave member spawns outside the nine-bit X world" }
+        .if (y0 < 0 || y0 > 255) { .error "a wave member spawns outside the eight bits logY has" }
+
+        // ---- the flight, in quarter pixels --------------------------------
+        .var x = x0 * 4
+        .var y = y0 * 4
+        .var head = def.get(8)
+        .var vx = 0
+        .var vy = 0
+        .var frames = 0
+        .var freed = false
+        .var wrapped = false
+        .var seen = false
+        .var seenAt = 0
+
+        .for (var s = 0; s < prog.size() && !freed && frames <= SIM_FRAME_BUDGET; s++) {
+            .var rec = prog.get(s)
+            .var isArc = (rec.get(0) == WM_ARC || rec.get(0) == WM_ARC_MIRROR)
+            // An EXIT keeps the velocity it inherited and runs until an edge;
+            // everything else has an authored length.
+            .var outer = rec.get(0) == WM_EXIT ? SIM_FRAME_BUDGET : (isArc ? rec.get(1) : 1)
+            .if (!isArc && rec.get(0) != WM_EXIT) {
+                .eval vx = rec.get(2)
+                .eval vy = rec.get(3)
+            }
+            .for (var k = 0; k < outer && !freed && frames <= SIM_FRAME_BUDGET; k++) {
+                .if (isArc) {
+                    .eval head = mod(head + (rec.get(0) == WM_ARC ? 1 : WM_HEAD_LEN - 1), WM_HEAD_LEN)
+                    .eval vx = headVX.get(head)
+                    .eval vy = headVY.get(head)
+                }
+                .var inner = isArc ? rec.get(2) : (rec.get(0) == WM_EXIT ? 1 : rec.get(1))
+                .for (var f = 0; f < inner && !freed; f++) {
+                    .eval x = x + vx
+                    .eval y = y + vy
+                    .eval frames = frames + 1
+                    .var px = floor(x / 4)
+                    .var py = floor(y / 4)
+                    // src/enemy.asm's three rules, direction and all: a
+                    // sprite behind a side border counts as gone only if it
+                    // is still traveling that way, which is what lets a
+                    // pattern ENTER through one.
+                    .if (px < 0) { .eval wrapped = true }
+                    .if ((px < ENEMY_CLEAR_X_LEFT && vx < 0)
+                         || (px >= ENEMY_CLEAR_X_RIGHT && vx > 0)
+                         || py >= ENEMY_CLEAR_Y) {
+                        .eval freed = true
+                    }
+                    // Visible = admitted by the renderer AND inside the
+                    // display window horizontally.
+                    .if (!freed && py >= MIN_SPRITE_Y && py <= MAX_SPRITE_Y
+                         && (px + 23) >= 24 && px <= 343) {
+                        .if (!seen) { .eval seenAt = frames }
+                        .eval seen = true
+                    }
+                }
+            }
+        }
+
+        .if (wrapped) {
+            .error "a pattern walks X past zero, where a borrow into logXHi reappears the sprite on the far side"
+        }
+        .if (!freed) {
+            .error "a pattern never reaches any despawn edge inside SIM_FRAME_BUDGET frames"
+        }
+        .if (!seen) {
+            .error "a pattern is never visible inside the aperture: it is authored entirely off-screen"
+        }
+        .if (seenAt > SIM_ENTER_BUDGET) {
+            .error "a pattern spends longer than SIM_ENTER_BUDGET frames off-screen before entering view"
         }
     }
 }
@@ -187,8 +493,46 @@
 // director never held two at once. The enemies still overlapped -- they
 // outlive their wave by seconds -- which is exactly the kind of nearly-right
 // that a test looking only at the screen would have passed.
-.var trigDelta = List().add(24, 5, 30, 5)
-.var trigDef   = List().add(WAVE_DEF_LEFT, WAVE_DEF_RIGHT, WAVE_DEF_LEFT, WAVE_DEF_RIGHT)
+//
+// v1.1 USED THAT ARRANGEMENT TO PAIR PATTERNS AND OVERDID IT. An instance is
+// held until its LAST member is sent, i.e. 1 + (count-1)*interval frames:
+//
+//     sweep   1 + 3 x 22 = 67 frames = 8.4 rows
+//     s-turn  1 + 2 x 26 = 53 frames = 6.6 rows
+//     linger  1 + 2 x 26 = 53 frames = 6.6 rows
+//     loop    1 + 2 x 34 = 69 frames = 8.6 rows
+//
+// so a delta shorter than the running wave's occupancy puts two INSTANCES in
+// flight at once. v1.1 authored two such pairs in a 61-row period and the
+// result, watched in VICE, was formations running into each other more or less
+// continuously: there was never a moment with one pattern on screen to look at.
+//
+// WHAT ACTUALLY SETS THE PACE IS NOT THE INSTANCE, IT IS THE ENEMY. A wave's
+// instance is finished in eight rows; its enemies are alive for far longer, so
+// the interval that matters is the wave's whole FOOTPRINT -- the span it spends
+// spawning plus the lifetime of the last member to leave:
+//
+//     sweep   66 +  177 = 243 frames = 30 rows
+//     s-turn  52 +  200 = 252 frames = 32 rows
+//     linger  52 +  206 = 258 frames = 32 rows
+//     loop    68 +  317 = 385 frames = 48 rows
+//
+// The deltas below are those footprints, so each formation has cleared the
+// aperture before the next arrives. That is the breathing room: pattern, empty
+// sky, pattern.
+//
+// ONE DELIBERATE OVERLAP SURVIVES, and it is the four-row delta between the
+// sweep and the S-turn. They are the right pair for it: the sweep enters
+// through the LEFT BORDER at a fixed height and the S-turn comes down from
+// ABOVE on the other side of the screen, so the two formations are separated
+// in entry point, in direction and in Y for the whole time they share the
+// aperture -- an overlap the multiplexer is never asked to work for. Everything
+// else is spaced. The director's ability to run two instances at once is
+// proved and tagged; it does not need demonstrating four times a cycle.
+//
+// The period is 48+4+38+36 = 126 coarse rows, about twenty seconds.
+.var trigDelta = List().add(48, 4, 38, 36)
+.var trigDef   = List().add(WAVE_DEF_SWEEP, WAVE_DEF_S, WAVE_DEF_LINGER, WAVE_DEF_LOOP)
 .const WAVE_TRIGGERS = 4
 
 .if (trigDelta.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS) {
@@ -204,7 +548,12 @@
 // ===========================================================================
 // State. MAIN THREAD ONLY.
 // ===========================================================================
-* = $77a0 "wave state"
+// MOVED FROM $77a0 IN v1.1, by two arrays' worth. The movement state next door
+// grew wmSteps and repurposed wmNext as a stage cursor, and $7700..$779f had
+// exactly nothing left in it. $77c0 gives the movement block room for twelve
+// per-object arrays where it now uses ten, and leaves this block sixty-four
+// bytes for seventeen -- neither is against a wall any more.
+* = $77c0 "wave state"
 
 // --- the active wave instances ----------------------------------------------
 // Structure of arrays, indexed by instance, exactly like the object pool: one
@@ -233,12 +582,17 @@ wvSpawned:   .byte 0                // enemies actually created
 
 waveStateEnd:
 .if (waveStateEnd > $7800) { .error "the wave state has grown into the movement code at $7800" }
-.if (movementStateEnd > $77a0) {
+.if (movementStateEnd > $77c0) {
     .error "the movement state has grown into this block"
 }
 
 // ===========================================================================
-* = $7a00 "waves"
+// MOVED FROM $7a00 IN v1.1. The stage table and four patterns' worth of wave
+// definitions did not fit in the 54 bytes v1 had left between the end of this
+// code and its $7c00 guard, and $7c00..$bfff was empty -- the next thing above
+// this file is the schedule buffers at $c000. Movement takes the $7800..$7bff
+// this vacates, which is where its heading table went.
+* = $7c00 "waves"
 
 // ---------------------------------------------------------------------------
 // waveInit — no waves running, the first trigger one delta away.
@@ -454,10 +808,16 @@ waveSpawnMember:
     sta logX,x
     lda waveDefTable + 3,y
     sta logXHi,x
+    lda waveDefTable + 4,y
+    sta logY,x
 
     // The fan-out is a repeated add rather than a multiply: wvIndex is at most
     // the member count, which is small, and a multiply here would be three
     // times the code for a loop that runs twice.
+    //
+    // BOTH AXES, v1.1. The Y step is what turns a rank into an echelon, and it
+    // is the cheap half: logY is eight bits, so it is one add with no carry to
+    // propagate, against the nine-bit dance X has to do.
     ldy wvInst
     lda wvIndex,y
     beq !placed+
@@ -471,45 +831,48 @@ waveSpawnMember:
     sta logX,x
     tya
     bmi !fanLeft+
-    bcc !fanNext+
+    bcc !fanY+
     inc logXHi,x
-    jmp !fanNext+
+    jmp !fanY+
 !fanLeft:
-    bcs !fanNext+
+    bcs !fanY+
     dec logXHi,x
-!fanNext:
+!fanY:
+    ldy wvDefBase
+    lda waveDefTable + 6,y               // yStep, signed
+    clc
+    adc logY,x
+    sta logY,x
+
     dec wvCount
     bne !fan-
 !placed:
-
     ldy wvDefBase
-    lda waveDefTable + 4,y
-    sta logY,x
 
     // ---- presentation ------------------------------------------------------
     lda #ENEMY_PTR
     sta logPtr,x
-    lda waveDefTable + 6,y
+    lda waveDefTable + 7,y
     sta logCol,x
     sta wmBaseCol,x                     // what a hit flash returns to
 
     // ---- movement ----------------------------------------------------------
-    lda waveDefTable + 7,y
-    sta wmMode,x
+    // The launch heading and the first stage record, and then src/movement.asm
+    // does the rest: wmEnterStage is the SAME routine that takes up every
+    // later stage, so a pattern's first stage cannot behave differently from
+    // the same stage in the middle of a pattern. v1 set mode, velocity, timer
+    // and follow-on here by hand and had to be kept in step with the
+    // interpreter by eye.
     lda waveDefTable + 8,y
-    sta wmVX,x
+    sta wmPhase,x                       // launch heading
     lda waveDefTable + 9,y
-    sta wmVY,x
-    lda waveDefTable + 10,y
-    sta wmTimer,x
-    lda waveDefTable + 11,y
-    sta wmNext,x
+    sta wmStage,x                       // its pattern's first stage record
     lda #0
-    sta wmPhase,x
     sta wmAccX,x                        // objectAlloc zeroed these; setting
     sta wmAccY,x                        // them again is two bytes for a
                                         // guarantee that does not depend on
                                         // another file's promise
+    jsr wmEnterStage                    // X preserved
 
     // ---- combat: an ordinary enemy, exactly as before ---------------------
     lda #ENEMY_MAX_HP
@@ -538,19 +901,19 @@ waveSpawnFull:
 // ---------------------------------------------------------------------------
 // waveDefBase — Y = wvDef[X] * WAVEDEF_SIZE. Entry/exit: X preserved.
 //
-// WAVEDEF_SIZE is twelve, so this is a shift-and-add rather than a multiply:
-// n*12 = n*8 + n*4. Two definitions make the table twenty-four bytes and the
+// WAVEDEF_SIZE is ten, so this is a shift-and-add rather than a multiply:
+// n*10 = n*8 + n*2. Four definitions make the table forty bytes and the
 // arithmetic could have been a lookup, but the lookup would need an entry per
 // definition and this needs none.
 // ---------------------------------------------------------------------------
 waveDefBase:
     lda wvDef,x
     asl                                 // n*2
-    asl                                 // n*4
     sta wvScratch
+    asl                                 // n*4
     asl                                 // n*8
     clc
-    adc wvScratch                       // n*12
+    adc wvScratch                       // n*10
     tay
     rts
 
@@ -565,11 +928,35 @@ wvScratch:  .byte 0                     // waveDefBase's partial product
 
 // ---------------------------------------------------------------------------
 // The authored content, as bytes.
+//
+// THE STAGE TABLE IS READ BY src/movement.asm, which is imported before this
+// file: its interpreter indexes waveStageTable with the cursor each object
+// carries. That direction is deliberate -- movement owns the FORMAT and the
+// code that runs it, waves owns the BYTES -- and it works because
+// KickAssembler resolves labels late even though it resolves constants in
+// import order.
 // ---------------------------------------------------------------------------
+waveStageTable:
+.for (var p = 0; p < progs.size(); p++) {
+    .var prog = progs.get(p)
+    .for (var s = 0; s < prog.size(); s++) {
+        .var rec = prog.get(s)
+        .byte rec.get(0), rec.get(1), rec.get(2) & $ff, rec.get(3) & $ff
+    }
+}
+waveStageTableEnd:
+.if (waveStageTableEnd - waveStageTable != progBytes) {
+    .error "the stage table is not WM_STAGE_SIZE bytes per record"
+}
+
 waveDefTable:
 .for (var d = 0; d < WAVE_DEFS; d++) {
     .var def = waveDefs.get(d)
-    .for (var f = 0; f < WAVEDEF_SIZE; f++) { .byte def.get(f) }
+    .for (var f = 0; f < WAVEDEF_SIZE; f++) {
+        // Field 9 is authored as a program INDEX and stored as the byte offset
+        // of that program's first record, so that the 6502 never multiplies.
+        .if (f == 9) { .byte progAt.get(def.get(f)) } else { .byte def.get(f) & $ff }
+    }
 }
 waveDefTableEnd:
 .if (waveDefTableEnd - waveDefTable != WAVE_DEFS * WAVEDEF_SIZE) {
@@ -585,4 +972,4 @@ waveTrigEnd:
     .error "the trigger table is not two bytes per trigger"
 }
 
-.if (* > $7c00) { .error "the wave code has outgrown its $7a00 segment" }
+.if (* > $8000) { .error "the wave code has outgrown its $7c00 segment" }

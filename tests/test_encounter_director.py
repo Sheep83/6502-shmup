@@ -45,12 +45,24 @@ ARC_PHASES_WANTED = 4      # "several", not all 16 -- enough to prove the
                            # primitive is actually running, not proof of the
                            # authored table (that was implementation-time work)
 BOTH_ACTIVE_STREAK = 5     # a real overlap window, not one flickering frame
+CHAIN_WANTED = 2           # v1.1: two stage transitions on ONE enemy, which is
+                           # a three-stage authored path walked end to end.
+                           # Three of the four patterns clear this on their
+                           # first member, so it costs the run no extra frames.
+                           # WHICH stages they were is deliberately not checked
+                           # here -- that is tests/test_flight_paths.py's job,
+                           # and a permanent regression that knew every
+                           # authored pattern would have to be re-tuned every
+                           # time the content was.
 
-# A full authored cycle is 24+5+30+5 = 64 coarse rows at one row per eight
-# frames, ~512 frames. This is slack for whichever phase of the cycle we
-# happen to join at, not a target frame count -- the loop below exits the
-# moment every behaviour has been observed, usually well before this.
-MAX_FRAMES = 650
+# A full authored cycle is 48+4+38+36 = 126 coarse rows at one row per eight
+# frames, ~1008 frames, and there is now exactly ONE two-instance overlap in
+# it: the encounter schedule was deliberately spaced out so that formations
+# mostly arrive alone, which is a gameplay decision that costs this test a
+# longer worst case. Slack for whichever phase of the cycle we join at, not a
+# target -- the loop below still exits the moment every behaviour has been
+# observed, which is usually around half of this.
+MAX_FRAMES = 1250
 
 
 def check_layout():
@@ -61,25 +73,28 @@ def check_layout():
     check("wvActive/wvDef are contiguous, as this file's bulk read assumes",
           sym["wvDef"] == sym["wvActive"] + WAVE_SLOTS,
           f"wvActive={sym['wvActive']:04x} wvDef={sym['wvDef']:04x}")
-    check("wmMode/wmNext/wmPhase are contiguous, as this file's bulk read "
+    check("wmMode/wmStage/wmPhase are contiguous, as this file's bulk read "
           "assumes",
-          sym["wmNext"] == sym["wmMode"] + MAX_OBJECTS
+          sym["wmStage"] == sym["wmMode"] + MAX_OBJECTS
           and sym["wmPhase"] == sym["wmMode"] + 2 * MAX_OBJECTS,
-          f"wmMode={sym['wmMode']:04x} wmNext={sym['wmNext']:04x} "
+          f"wmMode={sym['wmMode']:04x} wmStage={sym['wmStage']:04x} "
           f"wmPhase={sym['wmPhase']:04x}")
 
 
 def sample(mon):
     """The few state bytes needed to judge one frame: wave active+def,
-    movement mode+phase, per-object colour and type. Four small monitor
-    reads, no more."""
+    movement mode+stage+phase, per-object colour and type. Four small monitor
+    reads, no more -- wmStage costs nothing extra because it sits between
+    wmMode and wmPhase and is already inside that one bulk read."""
     wave = rd(mon, sym["wvActive"], 2 * WAVE_SLOTS)
     move = rd(mon, sym["wmMode"], 3 * MAX_OBJECTS)
     col = rd(mon, sym["wmBaseCol"], MAX_OBJECTS)
     typ = rd(mon, sym["objType"], MAX_OBJECTS)
     active, wdef = wave[:WAVE_SLOTS], wave[WAVE_SLOTS:]
-    mode, phase = move[0:MAX_OBJECTS], move[2 * MAX_OBJECTS:3 * MAX_OBJECTS]
-    return active, wdef, mode, phase, col, typ
+    mode = move[0:MAX_OBJECTS]
+    stage = move[MAX_OBJECTS:2 * MAX_OBJECTS]
+    phase = move[2 * MAX_OBJECTS:3 * MAX_OBJECTS]
+    return active, wdef, mode, stage, phase, col, typ
 
 
 def main():
@@ -109,17 +124,25 @@ def main():
 
         any_start = False
         both_streak = 0
+        both_best = 0       # the LONGEST overlap seen, not the current one:
+                            # the streak resets when a wave finishes spawning,
+                            # so reporting it at the end said "0" on a run
+                            # whose overlap had been fine
         both_confirmed = False
         coexist_confirmed = False
         despawn_confirmed = False
         arc_best = 0
         arc_runs = {}       # slot -> {"col": c, "phases": [seen, in order]}
+        chain_best = 0      # most stage transitions seen on ONE enemy
+        chains = {}         # slot -> transitions by its current occupant
         prev_active = None
         prev_type = None
+        prev_stage = None
+        prev_col = None
         seen_frames = 0
 
         for _ in range(MAX_FRAMES):
-            active, wdef, mode, phase, col, typ = step_n(
+            active, wdef, mode, stage, phase, col, typ = step_n(
                 mon, sym["frameCounter"], 1, lambda: sample(mon))[0]
             seen_frames += 1
 
@@ -133,6 +156,7 @@ def main():
 
             if sum(active) == WAVE_SLOTS:
                 both_streak += 1
+                both_best = max(both_best, both_streak)
                 if both_streak >= BOTH_ACTIVE_STREAK:
                     both_confirmed = True
                 if wdef[0] != wdef[1]:
@@ -166,11 +190,27 @@ def main():
                 for i in range(MAX_OBJECTS):
                     if prev_type[i] == TYPE_ENEMY and typ[i] == TYPE_NONE:
                         despawn_confirmed = True
+                    # A COMPOSED PATH, counted per OCCUPANT. The stage cursor
+                    # only ever advances, so a slot whose cursor moved while
+                    # the same enemy held it walked from one authored stage to
+                    # the next; a slot handed to a new enemy starts over, and
+                    # the colour is what tells the two apart (objectAlloc
+                    # reissues the lowest free slot, very often on the very
+                    # next frame).
+                    if (prev_type[i] == TYPE_ENEMY and typ[i] == TYPE_ENEMY
+                            and prev_col[i] == col[i]):
+                        if stage[i] != prev_stage[i]:
+                            chains[i] = chains.get(i, 0) + 1
+                            chain_best = max(chain_best, chains[i])
+                    else:
+                        chains.pop(i, None)
 
             prev_active, prev_type = active, typ
+            prev_stage, prev_col = stage, col
 
             if (any_start and both_confirmed and coexist_confirmed
-                    and arc_best >= ARC_PHASES_WANTED and despawn_confirmed):
+                    and arc_best >= ARC_PHASES_WANTED and despawn_confirmed
+                    and chain_best >= CHAIN_WANTED):
                 break
 
         mon.cmd(f"delete {bp}")
@@ -178,13 +218,17 @@ def main():
 
         check("an authored trigger started a wave during the run", any_start)
         check("two wave instances were active concurrently for a real span",
-              both_confirmed, f"longest streak {both_streak}, "
+              both_confirmed, f"longest streak {both_best}, "
               f"{seen_frames} frames watched")
         check("enemies from two different wave definitions were on screen "
               "together", coexist_confirmed)
         check("at least one enemy progressed through several distinct "
               "phases of the curved primitive",
               arc_best >= ARC_PHASES_WANTED, f"best run {arc_best} phases")
+        check("one enemy walked its authored path through several movement "
+              "stages, so stage composition runs in the production loop",
+              chain_best >= CHAIN_WANTED,
+              f"best chain {chain_best} stage transitions on one enemy")
         check("an enemy despawned and returned its pool slot", despawn_confirmed)
 
         # --- the engine is unharmed ------------------------------------------

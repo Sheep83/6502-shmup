@@ -110,25 +110,14 @@ KEYSET    := -keyset
 VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 
 
-.PHONY: p3-fixtures p4-fixtures
-.PHONY: all build d64 test test-fast test-engine-full
+.PHONY: all build d64 test
 .PHONY: test-boot test-production test-turret-regression
-.PHONY: test-encounter-director
-.PHONY: test-p0 test-p1 test-p2 test-p3 test-p4 test-p5 test-renderer-full
+.PHONY: test-encounter-director test-flight-paths test-ingress-egress test-clip-scratch
 .PHONY: run run-d64 clean
 
 all: build
 
 # Fixed output location. No per-run directories, ever.
-# The P3 fixture records are generated from tests/p3_model.py. Regenerating is
-# not part of `build` on purpose -- a build must never silently rewrite source.
-# `make test-p3` fails if the generated file has drifted from its source.
-p3-fixtures:
-	python3 tools/gen_p3_fixtures.py
-
-p4-fixtures:
-	python3 tools/gen_p4_fixtures.py
-
 build:
 	@mkdir -p build
 	java -jar "$(KA)" src/main.asm -odir "$(ROOT)/build" -o "$(PRG)" -vicesymbols
@@ -141,23 +130,11 @@ d64: build
 	@$(C1541) "$(D64)" -write "$(PRG)" engine >/dev/null
 	@echo "wrote $(D64)"
 
-test-p0: build
-	python3 tests/test_p0.py
 
-test-p1: build
-	python3 tests/test_p1.py
 
-test-p2: build
-	python3 tests/test_p2.py
 
-test-p3: build
-	python3 tests/test_p3.py
 
-test-p4: build
-	python3 tests/test_p4.py
 
-test-p5: build
-	python3 tests/test_p5.py
 
 # ---------------------------------------------------------------------------
 # The regression surface, in two sizes.
@@ -216,18 +193,11 @@ test-p5: build
 # git tag; it does not need re-running on every future change to a system
 # those slices already certified once.
 #
-# Two heavier, EXPLICITLY NON-DEFAULT targets remain because they still catch
-# something the fast gate does not, and are named so nobody mistakes them for
-# part of ordinary development:
-#
-#   make test-engine-full   the inherited P0-P5 qualification ladder, plus
-#                           test_engine.py's own posed-fixture (MAXCAP/RING)
-#                           stress load. Run it when the renderer, scroller or
-#                           aperture itself has been touched -- not for a
-#                           gameplay-level change.
-#   make test-renderer-full the exhaustive legality-window sweep (4,144
-#                           layouts). Run it when the batch-merge window
-#                           arithmetic itself has changed.
+# THE P0-P5 LADDER AND ITS FIXTURES ARE RETIRED. The posed-fixture stress
+# targets, the exhaustive legality-window sweep and the fixture generators went
+# with the fixture system itself; the geometry they certified is exercised by
+# test_production.py's renderer-sanity section against the real game. Git has
+# them.
 #
 # Future features get their own focused tests for the task at hand, same as
 # always -- they just do not accumulate into this file by default afterward.
@@ -249,51 +219,37 @@ test-turret-regression: build
 test-encounter-director: build
 	python3 tests/test_encounter_director.py
 
-test-fast: build
-	python3 tests/test_engine.py
-	python3 tests/p5_model.py
-	python3 tools/gen_p5_tables.py --check
-	python3 tests/test_p5.py --fast
+# NON-DEFAULT ON PURPOSE. The composable-movement vocabulary (v1.1): stage
+# transitions, a three-stage path walked end to end, an arc and its mirror on
+# one enemy, a linger that ends by itself, and repeated arcs carrying an enemy
+# most of the way round a circle. It waits for four specific authored patterns
+# to come round on a ten-second cycle, which is a minute of gate time to
+# re-prove content that only changes when somebody edits it deliberately --
+# so `make test` keeps the fast architecture proof and this stays here, for
+# when the patterns or the movement primitives themselves are touched.
+test-flight-paths: build
+	python3 tests/test_flight_paths.py
 
-test-engine-full: build
-	python3 tests/test_engine.py
-	python3 tests/test_p0.py
-	python3 tests/test_p1.py
-	python3 tests/test_p2.py
-	python3 tests/test_p3.py
-	python3 tests/test_p4.py
-	python3 tests/test_p5.py
+# NON-DEFAULT ON PURPOSE, same reasoning as test-flight-paths. The enemy
+# lifecycle bounds: enemies are born entirely outside the visible playfield,
+# fly in through an edge, and are freed only once they have genuinely cleared
+# one -- never at the old premature Y=226 cutoff, which was the renderer's
+# admission ceiling being used as the edge of the world. It watches most of a
+# twenty-second authored cycle so that every pattern arrives and leaves, which
+# does not belong in the fast gate.
+test-ingress-egress: build
+	python3 tests/test_ingress_egress.py
 
-# test-renderer-full — the exhaustive legality-window qualification:
-# tests/test_batch_window.py in FULL mode, its 4,144-layout random/shaped
-# sweep and all six machine-vs-model layouts. `make test` no longer runs any
-# form of this file: its schedule-settle comparison is flaky on an UNTOUCHED
-# commit (proven during the turret-firing corrective task -- three failures in
-# ten standalone runs with none of that task's changes applied), which is a
-# pre-existing harness property of this file, not a signal about ordinary
-# gameplay changes. Run this target on demand when the batch-merge window
-# arithmetic itself has changed; test_production.py's renderer-sanity section
-# is what runs by default instead.
-test-renderer-full: build
-	python3 tests/test_batch_window.py
+# NON-DEFAULT ON PURPOSE, same reasoning as the other two. Runtime vertical
+# clipping: a clipped enemy keeps its true logY, is scheduled at the aperture
+# boundary, and is drawn from a scratch block holding the canonical art shifted
+# by exactly the rows that hang outside. Waits for enemies to cross the edges
+# on the authored schedule, which is content timing, not engine behaviour.
+test-clip-scratch: build
+	python3 tests/test_clip_scratch.py
 
-# The acceptance configuration.
-#
-# This is the ONLY target that opens a window. Every automated suite launches
-# x64sc with -console instead, because a Gtk3 window takes the macOS keyboard
-# focus the moment it maps: a suite that opens a dozen of them steals every
-# keystroke from whatever the user is doing in another application. That
-# happened, and the emulator had to be killed mid-run.
-#
-# VICE runs in the FOREGROUND. It used to be launched with a trailing `&`, and
-# that is why the VS Code "Run in VICE" task appeared to do nothing: make
-# returned the instant it had forked, VS Code treated the task as finished and
-# killed its whole process tree, taking the emulator with it. Held in the
-# foreground, the task lives exactly as long as the emulator does and ending the
-# task stops it cleanly -- which is also the process ownership this repository
-# asks for everywhere else.
-#
-# From a terminal, background it yourself if you want the prompt back: `make run &`.
+
+
 run: build
 	$(X64) $(VICE_OPTS) -autostartprgmode 1 -autostart "$(PRG)"
 

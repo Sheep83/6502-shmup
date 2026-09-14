@@ -96,9 +96,6 @@
 .if (PLAYER_SPRITES + PLAYER_BLOCKS * 64 > BLANK_CHARSET) {
     .error "player bitmaps run into the blank charset at $3800"
 }
-.if (PLAYER_PTR_FIRST < SPRITE_PTR_FIRST + SPRITE_COUNT && PLAYER_PTR_FIRST + PLAYER_BLOCKS > SPRITE_PTR_FIRST) {
-    .error "player and gameplay sprite pointers overlap"
-}
 .if (PLAYER_PTR_FIRST < HUD_PTR_FIRST + HUD_BLOCKS && PLAYER_PTR_FIRST + PLAYER_BLOCKS > HUD_PTR_FIRST) {
     .error "player and HUD sprite pointers overlap"
 }

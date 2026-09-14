@@ -36,68 +36,163 @@
 // four frames in one direction only, and the curve would visibly sag.
 //
 // ---------------------------------------------------------------------------
-// WHAT THIS IS NOT
+// v1.1: COMPOSABLE STAGES, AND WHY THE ARC TABLE CHANGED SHAPE
 // ---------------------------------------------------------------------------
-// It is not a movement virtual machine, a spline evaluator or a script
-// interpreter. It is three primitives and a table. Loops, orbits, S-curves,
-// Beziers and target-seeking are deliberately absent: the point of this slice
-// is to prove that per-object independent movement state works at all, and a
-// vocabulary big enough to be interesting is a later decision made with the
-// architecture already standing.
+// v1 gave each object one primitive and one queued follow-on (wmNext), and its
+// arc was a QUARTER TURN FROM A FIXED HEADING: sixteen phases from "east" to
+// "south", with the mirrored variant running east-to-south with vx negated.
+// That is enough for a sweep and a hook and nothing else, because two arcs
+// cannot be joined -- the second one restarts pointing east whatever the first
+// one left the object doing, so ARC -> ARC is a ninety-degree snap rather than
+// a longer turn.
+//
+// So the table is now a HEADING table: WM_HEAD_LEN directions around the whole
+// circle at a constant speed, and an object carries WHICH DIRECTION IT IS
+// FACING (wmPhase) rather than how far through one particular turn it is. An
+// arc stage then means "rotate the heading N steps", clockwise (WM_ARC) or
+// anticlockwise (WM_ARC_MIRROR), and everything the content wants falls out of
+// composition rather than out of new code:
+//
+//     quarter turn   ARC 16
+//     half turn      ARC 32
+//     loop           ARC 64 (and 76 is a loop that leaves on a new heading)
+//     S-turn         ARC n -> ARC_MIRROR m
+//     hook and glide ARC n -> STRAIGHT -> ARC m
+//
+// The old quarter arc is exactly the first sixteen entries of this table, so
+// nothing that worked in v1 moves differently: a sweep still launches east and
+// still turns south, it just says so as "heading 0, rotate 16" instead of
+// "phase 0..15 of the only turn there is".
+//
+// WHAT THIS STILL IS NOT. Not a bytecode VM, not a spline evaluator, not a
+// script interpreter, and not target-seeking. A stage record is four bytes
+// read with indexed loads, the interpreter is one compare ladder, and the
+// vocabulary is five primitives. Everything interesting is meant to come from
+// the ORDER the content puts them in, which costs no 6502 cycles at all.
 // ===========================================================================
 
 // --- the primitives ---------------------------------------------------------
+// The v1 numbering is deliberately UNCHANGED. WM_HOLD is appended rather than
+// inserted, so every value a test, a report or a monitor session learned about
+// the movement state still means what it meant.
 .const WM_STRAIGHT   = 0        // constant velocity for wmTimer frames
-.const WM_ARC        = 1        // the table below, phase-stepped
-.const WM_ARC_MIRROR = 2        // ...with vx negated: the same turn, handed
+.const WM_ARC        = 1        // rotate the heading CLOCKWISE, one step per
+                                // stage-authored frame count
+.const WM_ARC_MIRROR = 2        // ...ANTICLOCKWISE: the same turn, handed
 .const WM_EXIT       = 3        // constant velocity, until the despawn rule
-.const WM_MODES      = 4
+.const WM_HOLD       = 4        // a bounded linger: an authored (usually slow
+                                // or zero) velocity for wmTimer frames. Same
+                                // mechanics as WM_STRAIGHT, kept distinct so
+                                // that "this enemy is deliberately loitering"
+                                // is visible in the state rather than inferred
+                                // from a small number.
+.const WM_MODES      = 5
 
-// --- the arc ----------------------------------------------------------------
-// Sixteen phases turning a velocity vector through ninety degrees, from
-// "straight along X" to "straight down Y", at a constant speed of six quarter
-// pixels a frame (1.5 px/frame, 75 px/second).
+// --- the stage record -------------------------------------------------------
+// Four bytes, and the third and fourth mean different things to different
+// primitives because an arc has no use for a velocity and a straight leg has
+// no use for a step length. The FORMAT lives here, beside the interpreter that
+// executes it; the BYTES live in src/waves.asm, beside the rest of the
+// authored content.
 //
-// The values are round(6*cos(t)), round(6*sin(t)) for t stepping 0..90 degrees
-// in sixteen steps, written out rather than generated so that the table a
-// human reads is the table the 6502 executes -- and so the assembly-time
-// proofs below are about the real bytes.
+//   0  kind       WM_*
+//   1  arg        STRAIGHT/HOLD: frames.  ARC/ARC_MIRROR: heading steps.
+//   2  vx / step  STRAIGHT/HOLD: vx.      ARC/ARC_MIRROR: frames per step.
+//   3  vy         STRAIGHT/HOLD: vy.      ARC/ARC_MIRROR: unused.
 //
-// WM_ARC_STEP frames are spent on each phase, so the whole turn takes
-// WM_ARC_LEN * WM_ARC_STEP = 64 frames, about 1.3 seconds. Within one phase
-// the velocity is constant, so the path is sixteen straight segments -- but
-// each junction changes a component by at most one quarter pixel a frame
-// (12.5 px/s), which is well under what reads as a direction change.
-.const WM_ARC_LEN   = 16
-.const WM_ARC_STEP  = 4         // frames per phase
+// WM_EXIT reads none of them: it is terminal and it KEEPS whatever velocity
+// the stage before it left behind, which is what makes ARC -> EXIT continuous.
+//
+// FRAMES PER STEP IS THE TURN RADIUS, and it is per stage rather than global
+// for one byte that was going spare. The heading sweeps a full circle in
+// WM_HEAD_LEN steps whatever happens, so a step held for f frames travels
+// WM_ARC_SPEED*f/4 pixels and the circle it is walking round has radius
+// WM_ARC_SPEED*f*WM_HEAD_LEN/(8*PI) -- 61 pixels at f=4, 31 at f=2. A wide
+// sweeping hook and a tight snap loop are therefore the same primitive with a
+// different byte, not two primitives.
+.const WM_STAGE_SIZE = 4
+
+// --- the heading table ------------------------------------------------------
+// WM_HEAD_LEN directions at a constant speed of WM_ARC_SPEED quarter pixels a
+// frame (1.5 px/frame, 75 px/second), measured CLOCKWISE FROM EAST in screen
+// coordinates -- +x right, +y DOWN, so clockwise is right, down, left, up.
+//
+//     heading  0   east   (+6,  0)
+//     heading 16   south  ( 0, +6)
+//     heading 32   west   (-6,  0)
+//     heading 48   north  ( 0, -6)
+//
+// Sixty-four so that the wrap is AND #63 rather than a compare and a fixup,
+// and because sixty-four is what makes a quarter turn sixteen steps: the same
+// sixteen the v1 arc had, at the same four frames each, so a quarter turn is
+// still 64 frames and still turns at the same rate.
+//
+// GENERATED RATHER THAN WRITTEN OUT, which is a reversal of the v1 table's own
+// reasoning ("the table a human reads is the table the 6502 executes"). That
+// argument was sound for sixteen hand-checkable pairs and is not for a hundred
+// and twenty-eight: nobody verifies the sixty-fourth cosine by eye, and a
+// typo in it would be invisible. What the assembly-time proofs below check is
+// therefore not the arithmetic but the PROPERTIES the movement code depends
+// on -- the quadrant anchors, the smoothness, and that no heading stands still.
+.const WM_HEAD_LEN  = 64
+.const WM_HEAD_MASK = WM_HEAD_LEN - 1
+.const WM_ARC_STEP  = 4         // default frames per heading step
 .const WM_ARC_SPEED = 6         // quarter pixels per frame
+.const WM_QUARTER   = WM_HEAD_LEN / 4
 
-.var arcVX = List().add(6,6,6,6,5,5,5,4,4,4,3,2,2,1,1,0)
-.var arcVY = List().add(0,1,1,2,2,3,4,4,4,5,5,5,6,6,6,6)
-
-.if (arcVX.size() != WM_ARC_LEN || arcVY.size() != WM_ARC_LEN) {
-    .error "the arc table must have WM_ARC_LEN entries on both axes"
+.var headVX = List()
+.var headVY = List()
+.for (var i = 0; i < WM_HEAD_LEN; i++) {
+    .var a = 2 * PI * i / WM_HEAD_LEN
+    .eval headVX.add(round(WM_ARC_SPEED * cos(a)))
+    .eval headVY.add(round(WM_ARC_SPEED * sin(a)))
 }
 
-// TERMINATION PROOF, and it is the reason the single vertical despawn rule in
-// src/enemy.asm is still sufficient now that enemies can curve.
-//
-// An arc always ends in WM_EXIT carrying the arc's LAST velocity. If that
-// velocity had vy <= 0 the enemy would fly up or sideways for ever and hold
-// its pool slot until the heat death of the C64. So: the last phase must
-// descend, and -- because an enemy may be destroyed mid-arc and because a
-// wave definition may enter the arc at any phase -- every phase must be
-// non-ascending, which also guarantees the turn never doubles back.
-.if (arcVY.get(WM_ARC_LEN - 1) <= 0) {
-    .error "the arc's last phase does not descend, so WM_EXIT could never despawn"
+// THE QUADRANT ANCHORS. Every authored heading in src/waves.asm is reasoned
+// about in these terms, and the arithmetic that produced the table is only
+// worth having if they came out exactly.
+.if (headVX.get(0) != WM_ARC_SPEED || headVY.get(0) != 0) {
+    .error "heading 0 is not due east at full speed"
 }
-.for (var i = 0; i < WM_ARC_LEN; i++) {
-    .if (arcVY.get(i) < 0) { .error "an arc phase ascends; the turn doubles back" }
-    .if (arcVX.get(i) < 0) { .error "arc vx must be authored positive; WM_ARC_MIRROR negates it" }
-    .if (i > 0) {
-        .if (arcVY.get(i) < arcVY.get(i - 1)) { .error "arc vy is not monotonic" }
-        .if (arcVX.get(i) > arcVX.get(i - 1)) { .error "arc vx is not monotonic" }
+.if (headVX.get(WM_QUARTER) != 0 || headVY.get(WM_QUARTER) != WM_ARC_SPEED) {
+    .error "heading WM_HEAD_LEN/4 is not due south at full speed"
+}
+.if (headVX.get(2 * WM_QUARTER) != -WM_ARC_SPEED || headVY.get(2 * WM_QUARTER) != 0) {
+    .error "heading WM_HEAD_LEN/2 is not due west at full speed"
+}
+.if (headVX.get(3 * WM_QUARTER) != 0 || headVY.get(3 * WM_QUARTER) != -WM_ARC_SPEED) {
+    .error "heading 3*WM_HEAD_LEN/4 is not due north at full speed"
+}
+
+// SMOOTHNESS, which is the property the whole quarter-pixel exercise exists to
+// buy. One heading step may change a velocity component by at most one quarter
+// pixel a frame (12.5 px/s), which is well under what reads as a direction
+// change; two would be a visible kink in every turn in the game. Checked round
+// the WRAP as well, because a loop of more than WM_HEAD_LEN steps crosses it.
+.for (var i = 0; i < WM_HEAD_LEN; i++) {
+    .var j = mod(i + 1, WM_HEAD_LEN)
+    .if (abs(headVX.get(j) - headVX.get(i)) > 1) {
+        .error "a heading step moves vx by more than one quarter pixel"
     }
+    .if (abs(headVY.get(j) - headVY.get(i)) > 1) {
+        .error "a heading step moves vy by more than one quarter pixel"
+    }
+    // A heading with no velocity at all would be an enemy that stops dead
+    // mid-turn and, if it were the last one, never despawned.
+    .if (headVX.get(i) == 0 && headVY.get(i) == 0) {
+        .error "a heading has zero velocity"
+    }
+}
+
+// THE WRAP GUARD'S SPEED HALF. src/enemy.asm frees an enemy whose nine-bit X
+// has fallen below ENEMY_CLEAR_X_LEFT, which is what keeps the coordinate
+// positive and stops a borrow into logXHi putting the sprite back on screen
+// 256 pixels to the right. That check runs once a frame, so it only works if
+// one frame's movement cannot carry an enemy clean over the window. It is
+// asserted HERE rather than there because this is the file that decides how
+// fast anything moves.
+.if (ENEMY_CLEAR_X_LEFT * 4 < WM_ARC_SPEED) {
+    .error "an enemy can cross the left clearance window in one frame and wrap"
 }
 
 // ===========================================================================
@@ -112,9 +207,18 @@
 * = $7700 "movement state"
 
 wmMode:    .fill MAX_OBJECTS, 0     // WM_*: which primitive is running
-wmNext:    .fill MAX_OBJECTS, 0     // WM_*: what to enter when it finishes
-wmPhase:   .fill MAX_OBJECTS, 0     // arc phase, 0..WM_ARC_LEN-1
-wmTimer:   .fill MAX_OBJECTS, 0     // frames left in this phase/primitive
+wmStage:   .fill MAX_OBJECTS, 0     // BYTE offset of the current stage record
+                                    // in waveStageTable. v1's wmNext held a
+                                    // single queued primitive and lived here;
+                                    // a cursor into an authored list is the
+                                    // same byte doing a strictly larger job.
+wmPhase:   .fill MAX_OBJECTS, 0     // HEADING, 0..WM_HEAD_LEN-1. v1 counted
+                                    // progress through one fixed turn here;
+                                    // it now says which way the object faces,
+                                    // which is what lets turns compose.
+wmTimer:   .fill MAX_OBJECTS, 0     // frames left in this stage (straight,
+                                    // hold) or in this heading step (arcs)
+wmSteps:   .fill MAX_OBJECTS, 0     // heading steps left in this arc stage
 wmVX:      .fill MAX_OBJECTS, 0     // signed, QUARTER pixels per frame
 wmVY:      .fill MAX_OBJECTS, 0     // signed, QUARTER pixels per frame
 wmAccX:    .fill MAX_OBJECTS, 0     // sub-pixel remainder, 0..3
@@ -122,8 +226,8 @@ wmAccY:    .fill MAX_OBJECTS, 0     // sub-pixel remainder, 0..3
 wmBaseCol: .fill MAX_OBJECTS, 0     // the colour a hit flash returns to
 
 movementStateEnd:
-.if (movementStateEnd > $77a0) {
-    .error "the movement state has grown into the wave state at $77a0"
+.if (movementStateEnd > $77c0) {
+    .error "the movement state has grown into the wave state at $77c0"
 }
 
 // ===========================================================================
@@ -141,9 +245,10 @@ movementStateEnd:
 wmClearSlot:
     lda #0
     sta wmMode,x
-    sta wmNext,x
+    sta wmStage,x
     sta wmPhase,x
     sta wmTimer,x
+    sta wmSteps,x
     sta wmVX,x
     sta wmVY,x
     sta wmAccX,x
@@ -164,11 +269,14 @@ wmTick:
     jsr wmApplyVelocity
 
     lda wmMode,x
-    cmp #WM_STRAIGHT
-    beq wmStraightStep
+    cmp #WM_ARC
+    beq wmArcStep
+    cmp #WM_ARC_MIRROR
+    beq wmArcStep
     cmp #WM_EXIT
-    beq wmNoStep                        // constant velocity until the bounds
-    jmp wmArcStep                       // WM_ARC or WM_ARC_MIRROR
+    beq wmNoStep                        // terminal: constant velocity until
+                                        // the despawn rule
+    jmp wmTimedStep                     // WM_STRAIGHT or WM_HOLD
 wmNoStep:
     rts
 
@@ -222,15 +330,20 @@ wmXDone:
     rts
 
 // ---------------------------------------------------------------------------
-// wmStraightStep — count the primitive out. X = slot, preserved.
+// wmTimedStep — count a straight leg or a linger out. X = slot, preserved.
 //
-// A zero timer means "run for ever", which is what makes WM_STRAIGHT usable
-// as a plain unbounded vector as well as a timed leg. WM_EXIT is the same
-// behaviour reached by a different route and is kept separate only because a
-// test and a human reading the state both want to know which one an object is
-// in.
+// WM_STRAIGHT and WM_HOLD are the same mechanism and deliberately share it:
+// the only difference between flying somewhere and loitering is the velocity
+// the content chose, and a second copy of "decrement a timer" would be two
+// places to fix the day the timer grows a second byte.
+//
+// A zero timer means "run for ever". Authored stages never use it -- an
+// unbounded stage that is not WM_EXIT could never reach the despawn rule, and
+// src/waves.asm rejects one at assembly time -- but it is what a freshly
+// zeroed slot holds, so a slot that is somehow ticked before its wave has
+// configured it sits still rather than running off the end of the stage table.
 // ---------------------------------------------------------------------------
-wmStraightStep:
+wmTimedStep:
     lda wmTimer,x
     beq wmNoStep                        // unbounded
     dec wmTimer,x
@@ -238,87 +351,137 @@ wmStraightStep:
     jmp wmEnterNext
 
 // ---------------------------------------------------------------------------
-// wmArcStep — hold each phase for WM_ARC_STEP frames, then take the next.
-// X = slot, preserved.
+// wmArcStep — one frame of a turn. X = slot, preserved.
+//
+// Hold the current heading for the stage's own frame count, then rotate one
+// step: clockwise for WM_ARC, anticlockwise for WM_ARC_MIRROR. The stage ends
+// when it has spent all of its steps, and the object LEAVES ON ITS FINAL
+// HEADING -- so an EXIT after a turn carries the direction the turn finished
+// in, and a second arc after it continues from there rather than restarting.
+//
+// AND #WM_HEAD_MASK IS THE WHOLE OF "LOOPS WORK". A turn of more than a full
+// circle simply wraps the heading and keeps going; there is no loop primitive,
+// no orbit centre and no angle accumulator, because a heading that wraps is
+// already all of those things.
 // ---------------------------------------------------------------------------
 wmArcStep:
     dec wmTimer,x
-    beq !advance+
-    rts
-!advance:
-    lda #WM_ARC_STEP
+    bne !done+                          // still holding this heading
+
+    ldy wmMode,x
+    cpy #WM_ARC_MIRROR
+    beq !ccw+
+    lda wmPhase,x
+    clc
+    adc #1
+    jmp !store+
+!ccw:
+    lda wmPhase,x
+    sec
+    sbc #1
+!store:
+    and #WM_HEAD_MASK
+    sta wmPhase,x
+    jsr wmLoadHeading
+
+    ldy wmStage,x                       // this stage's own step length: the
+    lda waveStageTable + 2,y            // turn radius, per stage
     sta wmTimer,x
 
-    inc wmPhase,x
-    lda wmPhase,x
-    cmp #WM_ARC_LEN
-    bcc wmLoadArcPhase                  // still turning
-                                        // the turn is over: hold the last
-    lda #WM_ARC_LEN - 1                 // velocity and leave on it
-    sta wmPhase,x
+    dec wmSteps,x
+    beq !advance+
+!done:
+    rts
+!advance:
     jmp wmEnterNext
 
 // ---------------------------------------------------------------------------
-// wmLoadArcPhase — velocity <- the arc table at this object's phase.
-// X = slot, preserved. Mirrored variants negate vx and nothing else.
+// wmLoadHeading — velocity <- the heading table at this object's heading.
+// X = slot, preserved.
+//
+// There is no mirroring here any more. v1 negated vx to hand the turn over,
+// which worked only because its arc always started east; a heading table has
+// west in it already, so WM_ARC_MIRROR differs from WM_ARC in which way it
+// STEPS and in nothing else.
 // ---------------------------------------------------------------------------
-wmLoadArcPhase:
+wmLoadHeading:
     ldy wmPhase,x
-    lda wmArcVY,y
-    sta wmVY,x                          // vy is never mirrored: both handed
-                                        // versions of the turn descend
-    lda wmArcVX,y
-    ldy wmMode,x
-    cpy #WM_ARC_MIRROR
-    bne !store+
-    eor #$ff                            // two's complement negate
-    clc
-    adc #1
-!store:
+    lda wmHeadVX,y
     sta wmVX,x
+    lda wmHeadVY,y
+    sta wmVY,x
     rts
 
 // ---------------------------------------------------------------------------
-// wmEnterNext — this primitive is finished; take up wmNext. X = slot.
-//
-// The velocity is NOT reset. Whatever the finishing primitive was carrying is
-// what the next one starts with, which is what makes STRAIGHT -> ARC and
-// ARC -> EXIT continuous: there is no frame on which the object's speed jumps
-// because a mode byte changed.
+// wmEnterNext — this stage is finished; take up the next record. X = slot.
 // ---------------------------------------------------------------------------
 wmEnterNext:
-    lda wmNext,x
+    lda wmStage,x
+    clc
+    adc #WM_STAGE_SIZE
+    sta wmStage,x
+    // falls through
+
+// ---------------------------------------------------------------------------
+// wmEnterStage — begin the stage record wmStage,x already names. X = slot.
+//
+// Also the SPAWN path: src/waves.asm points a new enemy at its pattern's first
+// record, sets its launch heading, and calls straight in here. One routine
+// starts a path and continues it, so a pattern's first stage cannot behave
+// differently from the same stage in the middle of a pattern.
+//
+// THE VELOCITY IS NOT RESET FOR WM_EXIT, and that is what makes ARC -> EXIT
+// continuous: there is no frame on which an object's speed jumps because a
+// mode byte changed. WM_STRAIGHT and WM_HOLD do set one, because a leg that
+// could not choose its own speed could not be a linger.
+// ---------------------------------------------------------------------------
+wmEnterStage:
+    ldy wmStage,x
+    lda waveStageTable + 0,y
     sta wmMode,x
 
-    cmp #WM_STRAIGHT
-    beq !plain+
     cmp #WM_EXIT
-    beq !plain+
+    beq !exit+
+    cmp #WM_ARC
+    beq !arc+
+    cmp #WM_ARC_MIRROR
+    beq !arc+
 
-    // Entering an arc: start at phase 0 and take its velocity immediately, so
-    // the object does not spend one phase-length on whatever it was doing.
-    lda #0
-    sta wmPhase,x
-    lda #WM_ARC_STEP
+    // WM_STRAIGHT / WM_HOLD: an authored velocity for an authored time.
+    lda waveStageTable + 1,y
     sta wmTimer,x
-    jmp wmLoadArcPhase
+    lda waveStageTable + 2,y
+    sta wmVX,x
+    lda waveStageTable + 3,y
+    sta wmVY,x
+    rts
 
-!plain:
+!arc:
+    // Take the heading's velocity IMMEDIATELY rather than after one step, so
+    // that a turn entered from a straight leg starts turning on the next frame
+    // instead of flying on for a step length first.
+    lda waveStageTable + 1,y
+    sta wmSteps,x
+    lda waveStageTable + 2,y
+    sta wmTimer,x
+    jmp wmLoadHeading
+
+!exit:
     lda #0
-    sta wmTimer,x                       // unbounded from here
-    sta wmNext,x                        // and nothing further queued
+    sta wmTimer,x                       // unbounded: the despawn rule ends it
     rts
 
 // ---------------------------------------------------------------------------
-// The arc, as bytes.
+// The heading table, as bytes. Masked to eight bits because half of it is
+// negative and .byte wants what the 6502 will read.
 // ---------------------------------------------------------------------------
-wmArcVX:
-.for (var i = 0; i < WM_ARC_LEN; i++) { .byte arcVX.get(i) }
-wmArcVY:
-.for (var i = 0; i < WM_ARC_LEN; i++) { .byte arcVY.get(i) }
-wmArcEnd:
-.if (wmArcEnd - wmArcVX != 2 * WM_ARC_LEN) {
-    .error "the arc table is not two bytes per phase"
+wmHeadVX:
+.for (var i = 0; i < WM_HEAD_LEN; i++) { .byte headVX.get(i) & $ff }
+wmHeadVY:
+.for (var i = 0; i < WM_HEAD_LEN; i++) { .byte headVY.get(i) & $ff }
+wmHeadEnd:
+.if (wmHeadEnd - wmHeadVX != 2 * WM_HEAD_LEN) {
+    .error "the heading table is not two bytes per heading"
 }
 
-.if (* > $7a00) { .error "the movement code has outgrown its $7800 segment" }
+.if (* > $7c00) { .error "the movement code has outgrown its $7800 segment" }

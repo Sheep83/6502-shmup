@@ -138,6 +138,21 @@
 .const MAX_SCHED   = 24
 .const MAX_BATCH   = 24
 
+// Scratch sprite blocks a single schedule may own, for sprites clipped against
+// the vertical aperture edges. The pool is double-buffered exactly like the
+// schedule itself -- see src/clip.asm, which owns the blocks and the copy.
+//
+// SIX IS A BUDGET, NOT A CEILING. The builder's own rules cap clipped entries
+// at MUX_SLOTS PER EDGE: they all present at the same Y, the first six fit
+// with no slot to reuse, and the seventh finds a zero gap against the entry
+// six places back and is refused. Both edges can be busy at once, so a legal
+// schedule can ask for twelve. Twelve blocks double-buffered is 1536 bytes
+// against the 832 VIC bank 0 can spare, so the pool is six and the overflow is
+// explicit: an entry that cannot get a block is not scheduled that frame and
+// clipPoolFull counts it. It is unreachable by current authored content, whose
+// peak enemy count is seven across the whole aperture.
+.const CLIP_POOL_SLOTS = 6
+
 // The frame IRQ sits in the lower border, so batch 0 (the first up-to-six
 // sprites) is programmed before the raster reaches the top of the display —
 // the classic "set up the initial sprites in vblank" arrangement.
@@ -498,6 +513,8 @@ buildSchedule:
     sta statRejRange
     sta statBatchOverflow
 
+    jsr clipBuildBegin                  // this build owns a fresh scratch pool
+
     ldx schedNext                       // entry base for this buffer
     lda #0
     cpx #0
@@ -580,6 +597,36 @@ bs_loop:
     lda logY,y
     sta bs_y
 
+    // THE PRESENTATION CLAMP, AND IT HAPPENS HERE FOR A REASON.
+    //
+    // A vertically clipped sprite is held at an aperture boundary and given a
+    // row-shifted bitmap (src/clip.asm). Every test below this point -- the
+    // production Y bounds, the reuse gap, the batch line -- must therefore
+    // reason about the Y THE VIC WILL BE PROGRAMMED WITH, not the enemy's true
+    // logY, or the schedule would be legal for a sprite that is not the one
+    // being drawn. Clamping before the first test is what makes those two the
+    // same number.
+    //
+    // The sort above is still by true logY, and stays correct: clamping is
+    // monotonic, so an ascending true order is an ascending presented order,
+    // with ties at the boundaries that the reuse rule already knows how to
+    // refuse.
+    //
+    // logClip is zero for everything that is not a clipped enemy -- ordinary
+    // enemies, projectiles and every qualification fixture -- so this costs
+    // them a load and a branch, and changes nothing they do.
+    lda logClip,y
+    sta bs_clip
+    beq !presented+
+    bmi !clampLow+
+    lda #MIN_SPRITE_Y                   // hanging above the top edge
+    bne !clamped+                       // (55, so always taken)
+!clampLow:
+    lda #MAX_SPRITE_Y                   // hanging below the bottom edge
+!clamped:
+    sta bs_y
+!presented:
+
     // PRODUCTION Y BOUNDS, CHECKED BEFORE EVERYTHING ELSE.
     //
     // This is a property of the sprite alone -- not of how full the schedule
@@ -653,6 +700,27 @@ bs_margin:
     jmp bs_next
 
 bs_accept:
+    // A CLIPPED ENTRY NEEDS A SCRATCH BLOCK, AND IT IS CHECKED BEFORE ANY OF
+    // THIS ENTRY'S STATE IS COMMITTED. The block is not taken here -- the copy
+    // happens once the pointer is about to be stored -- but nothing between
+    // here and there can fail, so checking now is what lets the refusal be a
+    // clean non-acceptance: bs_acc is untouched, no slot is consumed, and the
+    // enemy's logical life carries on exactly as before. It simply is not
+    // drawn this frame, which for a sprite that is by definition half outside
+    // the aperture is the least visible thing that could be dropped.
+    lda bs_clip
+    beq !haveBlock+
+    lda clipUsed
+    cmp #CLIP_POOL_SLOTS
+    bcc !haveBlock+
+    lda clipPoolFull                    // saturating: the count matters, the
+    cmp #$ff                            // exact value past 255 does not
+    beq !counted+
+    inc clipPoolFull
+!counted:
+    jmp bs_next
+!haveBlock:
+
     // physical slot = MUX_FIRST_SLOT + (accepted mod MUX_SLOTS)
     lda bs_acc
     cmp #MUX_SLOTS
@@ -717,7 +785,20 @@ bs_accept:
     sta bs_enable
 
     ldx bs_id                           // restore: the stores below need it
+
+    // THE POINTER, AND FOR A CLIPPED SPRITE IT NAMES SCRATCH RATHER THAN ART.
+    // clipMakeScratch renders the canonical bitmap logPtr already names into a
+    // block of the pool this build owns, and returns that block's pointer. The
+    // schedule carries it from here exactly like any other entry field, so the
+    // bitmap is immutable for the same reasons and over the same lifetime as
+    // the Y beside it. X and Y are preserved across the call.
+    lda bs_clip
+    beq !canonical+
+    jsr clipMakeScratch
+    jmp !ptrDone+
+!canonical:
     lda logPtr,x
+!ptrDone:
     sta schedPtr,y
     lda logCol,x
     sta schedCol,y
@@ -1017,6 +1098,7 @@ bs_n:         .byte 0
 bs_b:         .byte 0
 bs_nb:        .byte 0
 bs_y:         .byte 0
+bs_clip:      .byte 0                  // logClip for the entry being judged
 bs_line:      .byte 0                  // the open batch's chosen raster
 bs_bcur:      .byte 0                  // the open batch's record index
 bs_enable:    .byte 0
@@ -1036,13 +1118,22 @@ bitMaskInv:   .byte $fe,$fd,$fb,$f7,$ef,$df,$bf,$7f
 // ===========================================================================
 // The executor. Consumes CURRENT only.
 // ===========================================================================
-// MOVED from $1500. The two aperture split phases and their instrumentation
-// grew the executor past $1800, where the fixture tables live, and
-// KickAssembler caught the overlap. $2c00 is the documented free region
-// between screen page B and the blank charset (see the memory map in
-// main.asm) and leaves 3 KB of room. Nothing ever points the VIC at it: it is
-// code, and sprite pointers only ever hold $80..$8f.
-* = $2c00 "raster executor"
+// MOVED OUT OF VIC BANK 0. It was at $2c00, and before that $1500; both are
+// inside the 16 KB the VIC can address, and this is code -- the VIC never
+// fetches a byte of it. It was costing 1172 bytes of the scarcest memory in
+// the machine to sit somewhere convenient.
+//
+// $8600 is ordinary RAM: $01 is $35 while the game runs, so BASIC and KERNAL
+// are both banked out and everything from $8000 to $bfff is plain RAM that
+// only the CPU can see. The interrupt vector at $fffe is written from a label,
+// so it follows the code here without being told.
+//
+// RELOCATION IS AN ADDRESS CHANGE, NOT A LOGIC CHANGE, but this is the most
+// timing-critical code in the engine, so it is not assumed to be free: the
+// aperture splits' own instrumentation -- edgeLate, topSplitMax, botSplitMax --
+// was re-measured after the move and is recorded in
+// reports/vic-bank-0-reclamation.md.
+* = $8600 "raster executor"
 
 irqHandler:
     pha
@@ -2069,6 +2160,13 @@ installRenderer:
 // end of the raster executor, and therefore the only place the check means
 // anything.
 // ---------------------------------------------------------------------------
-.if (* > HUD_SPRITES) {
-    .error "the raster executor has grown into the HUD sprite bitmaps"
+rasterExecutorEnd:
+.if (rasterExecutorEnd > $8c00) {
+    .error "the raster executor has outgrown its $8600 segment"
+}
+// AND IT MUST STAY OUT OF THE BANK. The reason it moved here is that the VIC
+// never reads it; an executor that drifted back below $4000 would be spending
+// the scarcest memory in the machine on code again.
+.if (* <= $4000) {
+    .error "the raster executor is back inside VIC bank 0"
 }

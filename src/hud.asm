@@ -60,13 +60,9 @@
 
 .if ((HUD_SPRITES & 63) != 0) { .error "the HUD sprite block must be 64-byte aligned" }
 .if (HUD_SPRITES_END > BLANK_CHARSET) { .error "HUD bitmaps run into the blank charset at $3800" }
-.if (HUD_PTR_FIRST < SPRITE_PTR_FIRST + SPRITE_COUNT && HUD_PTR_FIRST + HUD_BLOCKS > SPRITE_PTR_FIRST) {
-    .error "HUD and gameplay sprite pointers overlap: a handoff test could not tell them apart"
-}
-.if (HUD_SPRITES < SPRITE_BLOCK + SPRITE_COUNT * 64) { .error "HUD bitmaps overlap the gameplay sprite pool" }
 .if (HUD_SPRITES < SCREEN_B + $400) { .error "HUD bitmaps overlap screen page B" }
-// The P5 ring tables ($2400-$27ff) and the raster executor both sit BELOW
-// screen page B's end, so the guard above covers them from this side. The
+// The P5 ring tables and the raster executor have both LEFT VIC bank 0, so
+// there is nothing of theirs left below to collide with. The
 // executor is guarded from its own side too: renderer.asm asserts that it has
 // not grown past HUD_SPRITES, which is the direction that can actually happen.
 // p5_tables.asm cannot be referenced here -- it is imported after this file,

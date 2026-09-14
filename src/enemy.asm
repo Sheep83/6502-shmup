@@ -75,15 +75,85 @@
 .const ENEMY_PTR         = ENEMY_SPRITES / 64
 .if ((ENEMY_SPRITES & 63) != 0) { .error "the enemy bitmap must be 64-byte aligned" }
 
-// The renderer's production Y band, restated as literals rather than aliased.
-// Sharing a bound is a DECISION and a decision deserves a check, which is why
-// these are asserted against the renderer's own constants below rather than
-// quietly importing them -- the same rule src/player.asm follows.
-.const ENEMY_DESPAWN_Y   = 226      // MAX_SPRITE_Y: the last renderable line
+// ===========================================================================
+// LIFECYCLE BOUNDS — WHERE AN ENEMY MAY EXIST, NOT WHERE IT MAY BE SEEN
+// ===========================================================================
+// These are DERIVED from the aperture and the sprite's own size, because the
+// two are different questions and v1.1 answered them with one number.
+//
+// THE ANCHOR. logY is the VIC sprite Y: the raster line of the sprite's TOP
+// row. A sprite therefore covers logY .. logY + SPRITE_HEIGHT - 1. logX is the
+// VIC sprite X, nine bits across logX/logXHi, and the sprite covers
+// logX .. logX + 23; the visible display window starts at sprite X 24 and ends
+// at 343.
+//
+// THE APERTURE is rasters APERTURE_TOP_RASTER..APERTURE_BOT_RASTER (55..247),
+// the terrain playfield between the two raster splits.
+//
+// WHAT WENT WRONG IN v1.1. It despawned at 226 -- MAX_SPRITE_Y, the renderer's
+// ADMISSION ceiling -- and treated that as the edge of the world. But the
+// renderer's band is "the whole sprite is inside the aperture": it REJECTS a
+// sprite outside it rather than clipping it, so 226 is where an enemy stops
+// being DRAWN, not where it has left. Using it as the despawn line meant the
+// object died at the instant it went invisible, and the authored spawn lines
+// (56..132) put the other end of the same mistake well inside the playfield:
+// enemies materialised a third of the way down the screen instead of arriving
+// through an edge.
+//
+// SO THE LIFECYCLE IS NOW WIDER THAN THE VISIBILITY, on purpose. An enemy is
+// alive and moving for as long as any part of it could still matter, and the
+// renderer independently decides whether it can be drawn this frame. That
+// separation is what lets an enemy fly in from off-screen.
+.const ENEMY_HIDDEN_Y = APERTURE_TOP_RASTER - SPRITE_HEIGHT   // 34
+                                    // the LAST Y at which a sprite is still
+                                    // entirely above the aperture. Spawn here
+                                    // or above and nothing is on screen yet.
+.const ENEMY_CLEAR_Y  = APERTURE_BOT_RASTER + 1               // 248
+                                    // the FIRST Y at which the sprite's top is
+                                    // past the bottom of the aperture, so
+                                    // nothing of it remains inside.
 
-.if (ENEMY_DESPAWN_Y != MAX_SPRITE_Y) {
-    .error "the enemy despawn line no longer matches the renderer's Y band"
+// SIDE CLEARANCE. The renderer admits on Y ALONE -- there is no X test in the
+// builder -- so a sprite that is half off the left or right edge is scheduled
+// normally and the VIC clips it in hardware. Side crossings therefore look
+// exactly right without anything being added to the renderer, and these bounds
+// exist to free the object once the hardware has finished clipping it.
+//
+// THE LEFT BOUND IS ALSO A WRAP GUARD, and that is the load-bearing half.
+// logX/logXHi are UNSIGNED: the builder reads `lda logXHi / bne msbSet`, so any
+// non-zero high byte sets the X MSB. An enemy allowed to walk past zero would
+// borrow logXHi down to $ff and reappear 256 pixels to the RIGHT -- a sprite
+// teleporting across the screen, not a sprite leaving it. Freeing at
+// ENEMY_CLEAR_X_LEFT keeps the coordinate positive at all times, so nothing
+// below needs to represent a negative X and no renderer special case is
+// required.
+.const ENEMY_CLEAR_X_LEFT  = 4      // 9-bit X below this: the sprite covers
+                                    // 0..27 at most, of which only columns
+                                    // 24..27 are inside the display window --
+                                    // a four-pixel sliver, and the last safe
+                                    // moment to free before the borrow.
+.const ENEMY_CLEAR_X_RIGHT = 344    // first 9-bit X entirely past the display
+                                    // window's last column (343)
+.const ENEMY_CLEAR_X_RIGHT_LO = ENEMY_CLEAR_X_RIGHT - 256     // 88
+
+// The bounds are DERIVED above, so what is checked here is that the things
+// they were derived FROM still mean what this file thinks they mean.
+.if (ENEMY_HIDDEN_Y + SPRITE_HEIGHT != MIN_SPRITE_Y) {
+    .error "the hidden-above line no longer sits one sprite above the aperture"
 }
+.if (ENEMY_CLEAR_Y <= MAX_SPRITE_Y) {
+    .error "the clear-below line is inside the renderer's admission band"
+}
+.if (ENEMY_CLEAR_Y > 255) {
+    .error "the clear-below line does not fit the eight bits logY has"
+}
+.if (ENEMY_CLEAR_X_RIGHT_LO < 0 || ENEMY_CLEAR_X_RIGHT_LO > 255) {
+    .error "the right clearance does not split into a high byte of exactly one"
+}
+// The matching speed check -- that one frame's movement cannot step OVER the
+// left clearance window and reach a negative X unseen -- lives in
+// src/movement.asm, because WM_ARC_SPEED is defined there and KickAssembler
+// resolves constants strictly in import order.
 
 // ===========================================================================
 // THE SPAWN TABLE IS GONE, AND THAT IS THIS SLICE'S POINT
@@ -185,6 +255,9 @@ enemyBitmapEnd:
 // reached the end of their own lives, which is this file's business and
 // nobody else's -- enemyDespawn is still the ONLY place a slot is released.
 enyDespawned:  .byte 0, 0               // 16-bit, saturating: total despawned
+enyScratch:    .byte 0                  // enemyTick's one spare byte: the clip
+                                        // arithmetic needs logY back after the
+                                        // compare that classified it
 enyStateEnd:
 .if (enyStateEnd > $c520) { .error "the enemy state has grown into the player state at $c520" }
 
@@ -229,20 +302,102 @@ enemyTick:
     // director is built on.
     jsr wmTick
 
-    // THE SINGLE DESPAWN RULE, UNCHANGED. Past the bottom of the renderable
-    // band, the enemy is gone. Nothing else in this file frees a slot.
+    // THE DESPAWN RULES: HAS THE SPRITE LEFT THE APERTURE ALTOGETHER?
     //
-    // It is still sufficient now that enemies can curve, and that is proved
-    // rather than hoped: src/movement.asm asserts at assembly time that every
-    // arc phase descends and that the last one descends strictly, and
-    // src/waves.asm asserts that no authored wave can launch on an unbounded
-    // non-descending vector. So every path this engine can express ends with
-    // vy > 0 and therefore reaches this test.
+    // Three edges, and the enemy survives all of them until nothing of it
+    // could still be inside. It is deliberately NOT the renderer's admission
+    // band: an enemy above the aperture during its approach, or being clipped
+    // by a side border on its way out, is alive and moving and simply not
+    // drawn this frame. See the lifecycle bounds at the top of this file.
+    //
+    // TERMINATION still holds, and it is still proved rather than hoped:
+    // src/waves.asm flies every authored pattern at assembly time and rejects
+    // one that does not reach one of these three edges.
+    //
+    // THE SIDE TESTS ASK WHICH WAY THE ENEMY IS GOING, and they have to.
+    // Position alone cannot tell ARRIVING from LEAVING: the echelon sweep
+    // spawns at X=0 precisely so that it slides in through the left border,
+    // and a rule that freed anything behind that border would kill it on its
+    // first frame -- which is exactly what the first draft of this did. An
+    // enemy behind a border on its way IN is alive; the same enemy behind the
+    // same border on its way OUT is gone.
+    lda logXHi,x
+    beq !checkLeft+
+
+    // High byte set, so X is 256..511: the only way out is the right edge.
+    lda logX,x
+    cmp #ENEMY_CLEAR_X_RIGHT_LO
+    bcc !checkBottom+
+    lda wmVX,x
+    beq !checkBottom+                   // parked behind the border: not gone
+    bmi !checkBottom+                   // coming back in
+    jmp !gone+
+
+!checkLeft:
+    lda logX,x
+    cmp #ENEMY_CLEAR_X_LEFT
+    bcs !checkBottom+
+    lda wmVX,x
+    bmi !gone+                          // still travelling left: it has left
+
+!checkBottom:
     lda logY,x
-    cmp #ENEMY_DESPAWN_Y + 1
+    cmp #ENEMY_CLEAR_Y
     bcc !alive+
+!gone:
     jmp enemyDespawn
 !alive:
+    // falls through to the presentation clip
+
+// ---------------------------------------------------------------------------
+// HOW MUCH OF THIS ENEMY IS OUTSIDE THE APERTURE — presentation only.
+//
+// logY is NOT touched. This writes one annotation, logClip, which the schedule
+// builder turns into a clamped Y and a row-shifted bitmap (src/clip.asm); the
+// enemy goes on moving, colliding and dying by its true coordinate.
+//
+//   logY <  MIN_SPRITE_Y   c = MIN_SPRITE_Y - logY, positive: rows above
+//   logY >  MAX_SPRITE_Y   c = MAX_SPRITE_Y - logY, negative: rows below
+//   otherwise              0
+//
+// A count of SPRITE_HEIGHT or more means nothing of the sprite is inside the
+// aperture at all. Those are left at zero DELIBERATELY: logY is then outside
+// the production band, so the builder's existing admission test refuses the
+// entry, and a fully invisible enemy costs no scratch block, no mux slot and
+// no schedule entry -- while remaining perfectly alive. Culling is the rule
+// that was already there, not a new one.
+    lda logY,x
+    cmp #MIN_SPRITE_Y
+    bcc !above+
+    cmp #MAX_SPRITE_Y + 1
+    bcs !below+
+    lda #0                              // wholly inside: present as authored
+    beq !store+                         // (always taken)
+
+!above:
+    sta enyScratch                      // logY, still in A
+    lda #MIN_SPRITE_Y
+    sec
+    sbc enyScratch                      // 1..SPRITE_HEIGHT-1 while any is seen
+    cmp #SPRITE_HEIGHT
+    bcc !store+
+    lda #0                              // entirely above: let admission cull it
+    beq !store+
+
+!below:
+    sec
+    sbc #MAX_SPRITE_Y                   // 1..SPRITE_HEIGHT-1, as a magnitude
+    cmp #SPRITE_HEIGHT
+    bcs !hidden+
+    eor #$ff                            // negate: rows BELOW are negative
+    clc
+    adc #1
+    bne !store+                         // (never zero: the magnitude was not)
+!hidden:
+    lda #0
+
+!store:
+    sta logClip,x
     rts
 
 // ---------------------------------------------------------------------------

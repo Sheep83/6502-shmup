@@ -187,6 +187,14 @@ objectZeroSlot:
     sta logXHi,x
     sta logPtr,x
     sta logCol,x
+    sta logClip,x                       // ...NOR ITS VERTICAL CLIPPING. The
+                                        // annotation is presentation state, but
+                                        // it is per-SLOT presentation state: a
+                                        // slot inherited from an enemy that was
+                                        // halfway through the bottom edge would
+                                        // otherwise hand its successor a clamped
+                                        // Y and a scratch bitmap on the first
+                                        // frame, before enemyTick had run once.
     // ...NOR ITS TRAJECTORY. src/movement.asm's per-object arrays are indexed
     // by this same slot and simply live elsewhere in memory, because this
     // block has run up against the collision state at $c5f3 with nothing to

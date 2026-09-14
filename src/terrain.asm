@@ -246,7 +246,7 @@ trTiles: .fill 4 * TR_TILE_STRIDE, 0
 .if (trSrc > $fe) {
     .error "trSrc must be a zero-page pointer: (trSrc),y has no absolute form"
 }
-.if (trSrc == fx_src || trSrc == scrPtr) {
+.if (trSrc == scrPtr) {
     .error "trSrc collides with another zero-page pointer"
 }
 
