@@ -61,43 +61,40 @@
 .const SPECIES_COUNT     = 2
 
 // --- where each species' frames live -----------------------------------------
-// PINNED, NOT DERIVED. An address that follows an unrelated asset around is not
-// a memory map, so each of these states where it is and asserts it.
+// NOT PINNED ANY MORE, AND THAT IS THE POINT. These addresses used to be
+// per-species constants -- the Ring "was" $3580 and the Dropper "was" $2c00 --
+// which made a species' identity and its physical home the same fact and made
+// a second level's artwork impossible to place. They are now derived from the
+// SLOT of the engine's enemy sprite window that THIS level's package claims
+// for each species. See src/level_assets.asm for the model, main.asm for the
+// window, and level1/stage_enemies.asm for the claims themselves.
 //
-// FOUR CONSECUTIVE BLOCKS EACH, AND THE ORDER IS LOAD-BEARING. The animation
-// turns a step into a POINTER through a table of absolute pointer values, and
-// those tables are written as "first + n" -- so the frames of a species must be
-// adjacent and in the authored order. The label assertions below are what make
-// reordering an art file a build error rather than a scrambled animation.
+// These constants exist only to place level 1's compiled-in artwork and to
+// assert it landed where its package said. NO RUNTIME CODE READS THEM. The
+// animation resolves pointers through levelAssetsLoad, which reads the
+// descriptor -- so a different package moves the art without touching a line
+// of this file.
 //
-// The Ring sits in the run between the HUD pool and the clip scratch block at
-// $3680: the three blocks the player's old hires layers vacated, plus the one
-// the original single placeholder bitmap occupied. The Dropper takes the first
-// four blocks of the large free run at $2c00.
-.const ENEMY_SPRITES     = $3580
+// FOUR CONSECUTIVE BLOCKS EACH, AND THE ORDER IS STILL LOAD-BEARING: the
+// animation shape below is a list of frame INDICES added to a species' base,
+// so a species' frames must be adjacent and in the authored order. The label
+// assertions further down are what make reordering an art file a build error
+// rather than a scrambled animation.
 .const ENEMY_FRAMES      = 4                        // north, east, south, west
-.const ENEMY_PTR_FIRST   = ENEMY_SPRITES / 64       // $d6; frames are $d6..$d9
-
-.const DROPPER_SPRITES   = $2c00
 .const DROPPER_FRAMES    = 4                        // wide, f-right, f, f-left
-.const DROPPER_PTR_FIRST = DROPPER_SPRITES / 64     // $b0; frames are $b0..$b3
 
-.if ((ENEMY_SPRITES & 63) != 0) { .error "the Ring frames must be 64-byte aligned" }
-.if ((DROPPER_SPRITES & 63) != 0) { .error "the Dropper frames must be 64-byte aligned" }
-.if (ENEMY_SPRITES + ENEMY_FRAMES * 64 > BLANK_CHARSET) {
-    .error "the Ring frames run into the blank charset"
+.const ENEMY_SPRITES     = levelSlotAddr(L1_SLOT_RING)
+.const DROPPER_SPRITES   = levelSlotAddr(L1_SLOT_DROPPER)
+
+.if (ENEMY_FRAMES != DROPPER_FRAMES) {
+    .error "a window slot holds ENEMY_FRAMES blocks: two species of different frame counts need the descriptor to carry the count"
 }
-.if (ENEMY_SPRITES < HUD_SPRITES_END) {
-    .error "the Ring frames overlap the HUD bitmap pool"
-}
-// The Dropper sits in the $2c00 free run, between screen page B below it and
-// the clip scratch at $3100 above.
-.if (DROPPER_SPRITES < SCREEN_B + $400) {
-    .error "the Dropper frames overlap screen page B"
-}
-.if (DROPPER_SPRITES + DROPPER_FRAMES * 64 > $3100) {
-    .error "the Dropper frames run into the clip scratch at $3100"
-}
+// The window guards in main.asm already prove the run is aligned, inside the
+// bank and clear of screen page B and the clip scratch; level_assets.asm proves
+// every package's slots fit inside it. What is left to check here is that the
+// two species of THIS level do not overlap each other, which the descriptor
+// guards also cover, and that the art really landed on its slot -- asserted
+// against the art's own labels below.
 
 // --- the animation cadence ---------------------------------------------------
 // ENEMY_ANIM_SHIFT frames of hold per step, and ENEMY_ANIM_STEPS steps in the
@@ -131,6 +128,14 @@
 }
 .if (SPECIES_COUNT != 2) {
     .error "the species values are animation row offsets: adding a third means extending the table and this check"
+}
+
+// levelAssetsLoad divides an entry index by ENEMY_ANIM_STEPS to recover the
+// species that owns it. A shift, because the step count is already asserted a
+// power of two just above.
+.const ENEMY_ANIM_STEPS_SHIFT = 3
+.if ((1 << ENEMY_ANIM_STEPS_SHIFT) != ENEMY_ANIM_STEPS) {
+    .error "ENEMY_ANIM_STEPS_SHIFT no longer matches ENEMY_ANIM_STEPS"
 }
 
 // ===========================================================================
@@ -231,10 +236,14 @@
 // ROWS of three bytes when an enemy straddles an aperture edge; it never looks
 // inside a byte, and it takes its source address from logPtr. So it follows
 // whichever species and whichever frame is live without knowing either exists.
-* = ENEMY_SPRITES "enemy frames"
+// LEVEL 1'S ARTWORK IS COMPILED IN AT THE SLOTS LEVEL 1 CLAIMED. When there is
+// a loader these two segments are what it writes instead; until then the PRG
+// carries them, which is why the window's contents and the window's claims are
+// asserted against each other rather than assumed to agree.
+* = ENEMY_SPRITES "level1 ring frames"
 #import "enemy_art.asm"                 // sonicRingFrames, four 64-byte frames
 
-* = DROPPER_SPRITES "dropper frames"
+* = DROPPER_SPRITES "level1 dropper frames"
 #import "enemy_dropper_art.asm"         // orbitalDropperFrames, four frames
 
 // The names the rest of the engine knew the Ring's art by, kept pointing at the
@@ -287,6 +296,19 @@
 // objectZeroSlot clears it with the rest of the slot, so a reused slot cannot
 // inherit the previous occupant's species. That is the pool's invariant and
 // this array is subject to it like every other per-object field.
+// THE RESOLVED ANIMATION TABLE. RAM, not PRG: levelAssetsLoad fills it from the
+// shape above and the current level's window claims, once, at gameInit. Until
+// it runs this is zeros, which is why the call sits before anything can spawn.
+//
+// Read once per live enemy per frame by enemyAnimPtrBody, as an absolute,Y --
+// exactly as it read the old constant table, so the hot path did not change.
+* = $c4f0 "enemy animation table"
+enemyAnimSeq:  .fill SPECIES_COUNT * ENEMY_ANIM_STEPS, 0
+enemyAnimSeqEnd:
+.if (enemyAnimSeqEnd > $c500) {
+    .error "the resolved animation table has grown into the enemy species array at $c500"
+}
+
 * = $c500 "enemy species"
 enySpecies:    .fill MAX_OBJECTS, 0     // SPECIES_RING or SPECIES_DROPPER
 enySpeciesEnd:
@@ -347,20 +369,43 @@ enemyInit:
 // moving fastest through the middle. The dwell reads as the turn, not as a
 // stall.
 // ---------------------------------------------------------------------------
-enemyAnimSeq:
-    // SPECIES_RING: rotate, twice per table cycle.
-    .byte ENEMY_PTR_FIRST + 0, ENEMY_PTR_FIRST + 1
-    .byte ENEMY_PTR_FIRST + 2, ENEMY_PTR_FIRST + 3
-    .byte ENEMY_PTR_FIRST + 0, ENEMY_PTR_FIRST + 1
-    .byte ENEMY_PTR_FIRST + 2, ENEMY_PTR_FIRST + 3
-    // SPECIES_DROPPER: out and back, dwelling at each end.
-    .byte DROPPER_PTR_FIRST + 0, DROPPER_PTR_FIRST + 1
-    .byte DROPPER_PTR_FIRST + 2, DROPPER_PTR_FIRST + 3
-    .byte DROPPER_PTR_FIRST + 3, DROPPER_PTR_FIRST + 2
-    .byte DROPPER_PTR_FIRST + 1, DROPPER_PTR_FIRST + 0
-enemyAnimSeqEnd:
-.if (enemyAnimSeqEnd - enemyAnimSeq != SPECIES_COUNT * ENEMY_ANIM_STEPS) {
-    .error "the animation table is not one row of ENEMY_ANIM_STEPS per species"
+// THE SHAPE IS FRAME INDICES, NOT POINTERS, AND THAT IS THE CHANGE. This table
+// used to hold absolute sprite pointers built from ENEMY_PTR_FIRST and
+// DROPPER_PTR_FIRST, which pinned each species to one address for the life of
+// the game. It now holds each species' frames as indices FROM ITS OWN BASE, so
+// it describes only the path a species walks through its own artwork -- which
+// is behaviour, is resident, and does not change when a level does.
+//
+// The addresses come from the level. levelAssetsLoad adds the base of whatever
+// window slot the current package loaded a species into, and writes the result
+// into enemyAnimSeq below. Same table for the reader, same one ORA in the hot
+// path; the difference is that it is now RAM that a level fills in.
+// Named as assembler lists so the rows can be CHECKED as well as emitted: a
+// step that names a frame its species does not have would otherwise walk off
+// the end of that species' slot and into whatever the level loaded next to it.
+.var RING_SHAPE    = List().add(0, 1, 2, 3,  0, 1, 2, 3)   // rotate, twice
+.var DROPPER_SHAPE = List().add(0, 1, 2, 3,  3, 2, 1, 0)   // out and back
+
+.for (var i = 0; i < RING_SHAPE.size(); i++) {
+    .if (RING_SHAPE.get(i) >= ENEMY_FRAMES) {
+        .error "a Ring animation step names a frame the Ring does not have"
+    }
+}
+.for (var i = 0; i < DROPPER_SHAPE.size(); i++) {
+    .if (DROPPER_SHAPE.get(i) >= DROPPER_FRAMES) {
+        .error "a Dropper animation step names a frame the Dropper does not have"
+    }
+}
+.if (RING_SHAPE.size() != ENEMY_ANIM_STEPS || DROPPER_SHAPE.size() != ENEMY_ANIM_STEPS) {
+    .error "an animation shape row is not ENEMY_ANIM_STEPS steps long"
+}
+
+enemyAnimShape:
+    .fill RING_SHAPE.size(), RING_SHAPE.get(i)          // SPECIES_RING
+    .fill DROPPER_SHAPE.size(), DROPPER_SHAPE.get(i)    // SPECIES_DROPPER
+enemyAnimShapeEnd:
+.if (enemyAnimShapeEnd - enemyAnimShape != SPECIES_COUNT * ENEMY_ANIM_STEPS) {
+    .error "the animation shape is not one row of ENEMY_ANIM_STEPS per species"
 }
 
 // ---------------------------------------------------------------------------

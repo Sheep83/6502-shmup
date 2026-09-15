@@ -27,18 +27,22 @@
 //   $1000-$1fff   CPU code only. The VIC sees the CHARACTER ROM here, so code
 //                 living there is invisible to it -- the stock C64
 //                 arrangement, not a trick. This is NOT VIC capacity.
-//   $2000-$217f   PLAYER bitmaps (6 x 64), pointers $80-$85: five multicolour
-//                 banking frames and one blank block for HW1. The only
-//                 multicolour sprite in the game; see src/player.asm.
-//   $2180-$27ff   free
+//   $2000-$23ff   PLAYER bitmaps (16 x 64), pointers $80-$8f: five banking
+//                 attitudes x three engine frames, plus one blank block for
+//                 HW1. Multicolour; see src/player.asm.
+//   $2400-$253f   PLAYER MUZZLE FLASH (5 x 64), pointers $90-$94: one per
+//                 banking attitude, drawn on HW1. See src/player.asm.
+//   $2540-$27ff   free, 11 blocks
 //   $2800-$2bff   screen page B          sprite pointers $2bf8-$2bff
-//   $2c00-$30ff   free
+//   $2c00-$30ff   THE LEVEL ENEMY SPRITE WINDOW (20 x 64), pointers $b0-$c3.
+//                 NOT a per-species home: the current level's enemy library is
+//                 loaded here and a level package says which slot each species
+//                 occupies. See the window constants below, level_assets.asm
+//                 and level1/stage_enemies.asm.
 //   $3100-$31ff   clip scratch, 4 blocks
 //   $3200-$357f   HUD sprite bitmaps (14 x 64), pointers $c8-$d5
-//   $3580-$367f   ENEMY frames (4 x 64), pointers $d6-$d9: the Sonic Ring's
-//                 north/east/south/west rotation. Four ALIGNED AND ADJACENT
-//                 blocks, because the animation picks one by adding an index
-//                 to the first pointer. See src/enemy.asm and src/enemy_art.asm
+//   $3580-$367f   free, 4 blocks -- the Ring's former pinned home, vacated so
+//                 that the enemy window could be one contiguous run
 //   $3680-$36bf   clip scratch, 1 block
 //   $36c0-$36ff   hostile projectile bitmap
 //   $3700-$37ff   clip scratch, 4 blocks
@@ -65,6 +69,9 @@
 // cannot name it. Restating the colour in a second place would be the bug.
 // ---------------------------------------------------------------------------
 #import "level1/stage_config.asm"
+#import "level1/stage_enemies.asm"      // the level's claim on the enemy
+                                        // sprite window; constants only, and
+                                        // needed before enemy.asm places art
 
 .const SCREEN_A       = $0400
 .const SCREEN_B       = $2800
@@ -102,6 +109,35 @@
 // CB = %111 selects $3800; the real charset stays at CB = %010 ($1000, the
 // character ROM the VIC sees in this bank). Only bits 3-1 of $d018 differ
 // between the four values below; the VM bits still name the page.
+// ---------------------------------------------------------------------------
+// THE LEVEL ENEMY SPRITE WINDOW — $2c00-$30ff, twenty blocks, pointers $b0-$c3.
+//
+// The engine owns this run; a LEVEL owns its contents. Enemy artwork is no
+// longer pinned to a per-species address -- a level package says which SLOT of
+// this window each species was loaded into and src/level_assets.asm resolves
+// that into the animation's pointer table. Nothing in a level package knows
+// where the window is, so moving it is this constant and nothing else.
+//
+// This is the large free run between screen page B below and the clip scratch
+// at $3100 above: the only contiguous run in the bank big enough for a level's
+// enemy library, which is why it is the window rather than one of the smaller
+// free runs. The Ring vacated $3580-$367f to make this ONE window instead of
+// two pinned homes.
+.const LEVEL_SPRITES        = $2c00
+.const LEVEL_SPRITE_BLOCKS  = 20
+.const LEVEL_SPRITES_END    = LEVEL_SPRITES + LEVEL_SPRITE_BLOCKS * 64
+.const LEVEL_PTR_FIRST      = LEVEL_SPRITES / 64        // $b0
+
+// A slot index is a block index inside the window; these turn one into the
+// address a level's art segment needs and the pointer the VIC wants.
+.function levelSlotAddr(slot) { .return LEVEL_SPRITES + slot * 64 }
+.function levelSlotPtr(slot)  { .return LEVEL_PTR_FIRST + slot }
+
+.if ((LEVEL_SPRITES & 63) != 0) { .error "the enemy sprite window must be 64-byte aligned" }
+.if (LEVEL_SPRITES < SCREEN_B + $400) { .error "the enemy sprite window overlaps screen page B" }
+.if (LEVEL_SPRITES_END > $3100) { .error "the enemy sprite window runs into the clip scratch at $3100" }
+.if (LEVEL_PTR_FIRST + LEVEL_SPRITE_BLOCKS > 256) { .error "the window's last block has no representable sprite pointer" }
+
 .const BLANK_CHARSET  = $3800
 .const D018_A_BLANK   = $1e             // VM = $0400, CB = $3800
 .const D018_B_BLANK   = $ae             // VM = $2800, CB = $3800
@@ -277,6 +313,9 @@ BasicUpstart2(entry)
                                         // KickAssembler resolves labels late
                                         // but constants strictly in order
 #import "enemy.asm"                     // AFTER objects.asm and collision.asm
+#import "level_assets.asm"              // AFTER enemy.asm, whose SPECIES_COUNT,
+                                        // ENEMY_FRAMES and animation tables it
+                                        // resolves into sprite pointers
 #import "clip.asm"                      // AFTER renderer.asm (CLIP_POOL_SLOTS,
                                         // MIN/MAX_SPRITE_Y, MAX_LOGICAL) and
                                         // motion.asm (logPtr). Its labels are
@@ -652,6 +691,10 @@ gameInit:
     jsr playerInit
     jsr weaponInit
     jsr collisionInit
+    ldx #LEVEL_PACKAGE_1                // resolve the resident level's window
+    jsr levelAssetsLoad                 // claims into enemyAnimSeq. BEFORE any
+                                        // enemy can be spawned or animated:
+                                        // until this runs the table is zeros
     jsr enemyInit
     jsr clipInit                        // no sprite clipped, no scratch taken
     jsr waveInit                        // no wave running, the first authored

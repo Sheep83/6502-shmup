@@ -207,6 +207,7 @@ test: build
 	python3 tests/test_turret_regression.py
 	python3 tests/test_encounter_director.py
 	python3 tests/test_player_ship.py
+	python3 tests/test_level_assets.py
 
 test-boot: build
 	python3 tests/test_boot.py
@@ -222,6 +223,9 @@ test-encounter-director: build
 
 test-player-ship: build
 	python3 tests/test_player_ship.py
+
+test-level-assets: build
+	python3 tests/test_level_assets.py
 
 # NON-DEFAULT ON PURPOSE. The composable-movement vocabulary (v1.1): stage
 # transitions, a three-stage path walked end to end, an arc and its mirror on
