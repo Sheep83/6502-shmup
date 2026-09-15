@@ -327,8 +327,20 @@ applyDamage:
     lda objType,x
     sta csKillType
     inc csKillsLo
-    bne !counted+
+    bne !soundIt+
     inc csKillsHi
+
+    // ONCE PER DEATH, NOT ONCE PER DYING FRAME. This arm is reached only on
+    // the transition to zero health -- the `beq !death+` above -- and the
+    // `lda objHP,x / beq !done+` at the top refuses to re-enter it, so the
+    // twelve frames of explosion that follow are silent. Requesting the sound
+    // from enemyDeathTick instead, where the explosion visibly runs, would
+    // restart it on every one of those frames.
+!soundIt:
+    lda #SFX_KILL
+    jsr sfxRequest                      // src/sfx.asm; preserves X, which this
+                                        // routine's own contract promises its
+                                        // caller
 
 !counted:
     inc csHitsLo

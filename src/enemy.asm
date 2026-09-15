@@ -60,6 +60,31 @@
 .const SPECIES_DROPPER   = 1 * ENEMY_ANIM_STEPS     // the Orbital Dropper
 .const SPECIES_COUNT     = 2
 
+// --- what a species can DO: the first behaviour to hang off the identity ----
+// Until now a species was purely cosmetic -- "a per-species stat block, because
+// there is no second BEHAVIOUR to hang off one" said the note above, and enemy
+// firing is that second behaviour arriving.
+//
+// CAPABILITY IS DECLARED HERE AND NOWHERE ELSE. It is a property of the
+// SPECIES, looked up from the species byte, and it is never inferred from a
+// sprite pointer, a colour, a wave, a movement program, a pool slot or an
+// animation frame -- every one of which is either shared between species or
+// changed by gameplay. A species whose entry is ENEMY_FIRE_NONE cannot fire
+// however it is authored, which is the case this table exists to make
+// possible: the encounter data may ask, and the species is what answers.
+//
+// BOTH LEVEL-1 SPECIES FIRE THE SAME STRAIGHT-DOWN SHOT, because v1 has one
+// firing mode and giving one of the two enemies an exclusive on it would be
+// content, not architecture. The table is what makes a THIRD species that
+// cannot fire, or a later one that fires differently, a row rather than a
+// redesign -- the mode is a value, not a flag.
+.const ENEMY_FIRE_NONE   = 0                        // this species never fires
+.const ENEMY_FIRE_DOWN   = 1                        // one bolt, straight down
+
+// The table itself is enemyFireModeTab, in the enemy CODE segment below --
+// data belongs in a segment, and a .byte out here would be emitted at whatever
+// address the previous file happened to leave the program counter on.
+
 // --- where each species' frames live -----------------------------------------
 // NOT PINNED ANY MORE, AND THAT IS THE POINT. These addresses used to be
 // per-species constants -- the Ring "was" $3580 and the Dropper "was" $2c00 --
@@ -309,6 +334,33 @@ enemyAnimSeqEnd:
     .error "the resolved animation table has grown into the enemy species array at $c500"
 }
 
+* = $c4e0 "enemy firing"
+
+// ===========================================================================
+// PER-OBJECT FIRING AUTHORITY. MAIN THREAD ONLY.
+// ===========================================================================
+// One byte per POOL SLOT: non-zero means THIS enemy may take a shot, zero
+// means it never will. Written once at spawn by src/waves.asm, which is the
+// only thing that knows both halves of the answer -- the SPECIES can fire at
+// all (enemyFireModeTab below) and this APPEARANCE was authored to (the
+// trigger list's fire mask) -- and read only by the director's firing tick.
+//
+// IT IS ON THE OBJECT FOR THE SAME REASON enySpecies IS, and the reason is
+// sharper here. A wave INSTANCE is freed the moment its last member is SENT,
+// not when its enemies die -- see waveRunInstance -- so an enemy spends almost
+// its whole life with no instance behind it. Authority that lived on the
+// instance would evaporate seconds before the enemy left the screen, and
+// authority read THROUGH the instance slot would be answered by whichever
+// unrelated wave was armed there next.
+//
+// objectZeroSlot clears it with the rest of the slot, so a slot freed by a
+// firing enemy and handed to a non-firing one cannot inherit the licence.
+enyFire:       .fill MAX_OBJECTS, 0     // 0 = never fires
+enyFireEnd:
+.if (enyFireEnd > $c4f0) {
+    .error "the enemy firing array has grown into the animation table at $c4f0"
+}
+
 * = $c500 "enemy species"
 enySpecies:    .fill MAX_OBJECTS, 0     // SPECIES_RING or SPECIES_DROPPER
 enySpeciesEnd:
@@ -331,6 +383,18 @@ enyStateEnd:
 .if (enyStateEnd > $c51a) { .error "the enemy state has grown into the player state at $c51a" }
 
 * = $4900 "enemy code"
+
+// --- the species firing capability table ------------------------------------
+// INDEXED BY SPECIES >> ENEMY_ANIM_SHIFT. A species value is its ROW in the
+// animation table -- 0 and 8, not 0 and 1 -- so the shift that turns a row
+// back into an index is the same one enemyAnimPtr's composition implies. Read
+// ONCE PER SPAWN by src/waves.asm, never per frame.
+enemyFireModeTab:
+    .byte ENEMY_FIRE_DOWN                           // SPECIES_RING
+    .byte ENEMY_FIRE_DOWN                           // SPECIES_DROPPER
+.if (* - enemyFireModeTab != SPECIES_COUNT) {
+    .error "the species firing table does not have one entry per species"
+}
 
 // ---------------------------------------------------------------------------
 // enemyInit — clear the despawn tally. The pool itself is objectInit's job.

@@ -1360,6 +1360,17 @@ turretDamage:
     inc trtKills                        // the kill event. This is where
                                         // TURRET_SCORE_PER_KILL would be
                                         // awarded, if a score system existed.
+
+    // THE SAME SOUND A FLYING ENEMY MAKES, and deliberately so: a turret is a
+    // thing the player shoots and destroys, and giving it its own effect would
+    // be a fourth sound earned by nothing but the fact that a different file
+    // owns its health. Requested HERE rather than from trtKills, which is a
+    // running total this file never clears -- watching a total for a change is
+    // how a once-per-event sound becomes a once-per-frame one.
+    lda #SFX_KILL
+    jsr sfxRequest                      // src/sfx.asm; preserves X, which the
+                                        // read-modify-write below still needs
+
     lda trtDeadPending
     ora turretBit,x
     sta trtDeadPending                  // the pages owe this turret a repair

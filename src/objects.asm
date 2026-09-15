@@ -148,6 +148,11 @@ objectZeroSlot:
                                         // otherwise hand its successor a
                                         // clamped Y and a scratch bitmap on its
                                         // first frame, before enemyTick ran.
+    sta enyFire,x                       // ...NOR PERMISSION TO SHOOT. A slot
+                                        // freed by an enemy the encounter
+                                        // authored to fire must not hand that
+                                        // licence to whatever lands in it next,
+                                        // least of all to a hostile projectile
     sta enySpecies,x                    // ...NOR WHICH ENEMY IT WAS. A slot
                                         // freed by a Dropper and handed to a
                                         // Ring would otherwise animate through

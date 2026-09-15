@@ -290,6 +290,14 @@ BasicUpstart2(entry)
 
 // Imported first so their constants resolve in KickAssembler's first parse.
 // Each module owns its own segment, so import order does not affect layout.
+#import "sfx.asm"                       // FIRST. Its SFX_* effect ids are
+                                        // constants, and the four files that
+                                        // request a sound -- weapon, collision,
+                                        // turrets and player -- name them;
+                                        // KickAssembler resolves constants
+                                        // strictly in import order. It imports
+                                        // nothing itself and depends on no
+                                        // other module.
 #import "hud.asm"                       // AFTER renderer.asm, which defines
                                         // spriteByte(); BEFORE renderer.asm,
                                         // whose exHud phase uses its constants
@@ -396,6 +404,10 @@ entry:
                                         // place is what stops two writers
                                         // disagreeing. ($d021 is the exception
                                         // -- it rides the aperture splits.)
+    jsr sfxInit                         // the SID to a known state and the
+                                        // master volume up, ONCE. Everything
+                                        // after this point only ever touches
+                                        // voice 3. See src/sfx.asm.
     jsr ebulletInit                     // no hostile projectiles at boot
     jsr turretInit                      // mark the authored turrets alive.
                                         // BEFORE scrollInit: that builds both
@@ -569,6 +581,15 @@ gameFrame:
     // born this frame is drawn where it was launched rather than moved first.
     // Five cycles unless a turret is actually on the aperture.
     jsr turretFireTick
+    // AT MOST ONE ENEMY BOLT, and it is deliberately the instruction after the
+    // turrets' own. The two firing sources share one projectile cap, so the
+    // order between them is a gameplay fact rather than an implementation
+    // detail: with three bolts already in the air the SECOND caller is the one
+    // refused, and turrets -- which are stationary, telegraphed and on screen
+    // for a third of the level -- are the fairer thing to let through. Neither
+    // has a quota; the loser simply loses.
+    jsr waveFireTick                    // src/waves.asm: the encounter director
+                                        // owns which enemies may shoot
 
     // THE ENCOUNTER DIRECTOR. After every object has moved and after the
     // hitscan, so an enemy created this frame is drawn where it was created
@@ -580,6 +601,25 @@ gameFrame:
     jsr hudDemoTick                     // score, lives and upgrade only: their
                                         // systems do not exist yet. Heat is fed
                                         // above, from the real weapon.
+
+    // ---- sound -----------------------------------------------------------
+    // THE ONLY AUDIO CALL IN THE ENGINE, and its position is the whole of the
+    // subsystem's timing model: every routine that can request a sound has now
+    // run -- weaponTick for the shot, collisionTick for an enemy or a turret
+    // destroyed, ebulletPlayerTick for the ship being hit -- so a sound asked
+    // for on this frame is programmed onto the SID on this frame rather than
+    // the next. Nothing below this point makes a request.
+    //
+    // MAIN THREAD, NOT THE RASTER IRQ. The executor's job is to consume an
+    // immutable schedule and write VIC registers at fixed rasters; putting a
+    // recurring sequencer inside it would add a second writer to the tightest
+    // code in the engine to no purpose, because a PAL frame is the resolution
+    // this subsystem works at anyway. It is ten cycles on a silent frame.
+    //
+    // It is ABOVE the publish block deliberately. Sound is not presentation
+    // state: the schedule is rebuilt only when something on screen changed,
+    // and a frame in which nothing moved must still advance a playing effect.
+    jsr sfxTick
 
     // ---- rebuild and publish, but only when something changed ------------
     //
@@ -691,6 +731,14 @@ gameInit:
     jsr playerInit
     jsr weaponInit
     jsr collisionInit
+    jsr sfxSilence                      // VOICE 3 ONLY, and this is the routine
+                                        // a game-over or a restart re-enters
+                                        // gameplay through. Whatever was
+                                        // playing when the last session ended
+                                        // is gated off and forgotten here, so
+                                        // no start can inherit a sound. NOT a
+                                        // whole-chip clear: that happens once,
+                                        // at boot, in sfxInit
     ldx #LEVEL_PACKAGE_1                // resolve the resident level's window
     jsr levelAssetsLoad                 // claims into enemyAnimSeq. BEFORE any
                                         // enemy can be spawned or animated:

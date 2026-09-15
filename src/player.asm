@@ -532,6 +532,16 @@ playerTakeHit:
     bne !done+
     lda #PLAYER_INVULN_TIME
     sta plyInvuln
+
+    // THE HIGHEST-PRIORITY SOUND IN THE GAME, and it cannot stutter. This
+    // routine is already the single point at which damage MEANS something, and
+    // the plyInvuln guard three lines above it -- which exists for the
+    // collision rule, not for the sound -- means the next hundred frames of
+    // blinking, and every projectile that passes through the ship during them,
+    // reach !done and make no sound at all. One hit, one wail.
+    lda #SFX_HURT
+    jsr sfxRequest                      // src/sfx.asm; preserves X and Y
+
     lda plyHits                         // saturating: that the ship was hit is
     cmp #$ff                            // the event; the exact count past 255
     beq !done+                          // is not

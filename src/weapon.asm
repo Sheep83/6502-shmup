@@ -258,6 +258,15 @@ weaponFire:
     sta shotRays
     lda #1
     sta shotFired
+
+    // THE SOUND, ON THE LOGICAL EVENT AND NOWHERE ELSE. This is the one point
+    // in the game at which a volley is known to have actually resolved -- not
+    // the trigger being held, not the muzzle flash being lit, not the cadence
+    // timer reloading. A shot refused by the cooldown or the overheat lockout
+    // branches to !refuse above and is silent, which is what makes the lockout
+    // audible as well as visible.
+    lda #SFX_FIRE
+    jsr sfxRequest                      // src/sfx.asm; preserves X and Y
 !refuse:
     rts
 

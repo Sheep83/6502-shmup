@@ -113,6 +113,7 @@ VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 .PHONY: all build d64 test
 .PHONY: test-boot test-production test-turret-regression
 .PHONY: test-encounter-director test-player-ship test-flight-paths test-ingress-egress test-clip-scratch
+.PHONY: test-sfx test-enemy-fire
 .PHONY: run run-d64 clean
 
 all: build
@@ -170,6 +171,32 @@ d64: build
 #                               subsystem interaction that a direct routine
 #                               call cannot see -- see constraint #4 in
 #                               reports/production-test-suite-rewrite.md.
+#   test_sfx.py                the sound-effects subsystem: the module is
+#                               resident CPU-only memory, every SID write a
+#                               running game performs lands in voice 3 (watched
+#                               on the bus, not read out of the source), each of
+#                               the four hook sites is caught asking for its own
+#                               effect through the real frame loop, the number
+#                               of requests equals the number of logical events
+#                               exactly, priority holds, and a quiet game writes
+#                               nothing to the chip at all. It is here rather
+#                               than in a non-default target because what it
+#                               guards is a hook in production code that a
+#                               future change could silently unwire, which is
+#                               the same reason the turret regression is here.
+#   test_enemy_fire.py         enemy firing: the species declares the
+#                               capability and the encounter declares the
+#                               opportunity, member by member through the real
+#                               spawner; a live eligible enemy fires straight
+#                               down from its own logical box through the real
+#                               frame loop while a dying one and a stale licence
+#                               on a free slot do not; turret and enemy bolts
+#                               share ONE cap of three, a refused shot is
+#                               counted, silent and lossless, and the existing
+#                               player damage path is unchanged. Here rather
+#                               than in a non-default target for the same reason
+#                               as the turret regression: what it guards is
+#                               authored content wired to production hooks.
 #   test_encounter_director.py the encounter director: an authored trigger off
 #                               worldProgress starts a wave, a SECOND wave
 #                               instance runs concurrently with the first,
@@ -208,6 +235,8 @@ test: build
 	python3 tests/test_encounter_director.py
 	python3 tests/test_player_ship.py
 	python3 tests/test_level_assets.py
+	python3 tests/test_sfx.py
+	python3 tests/test_enemy_fire.py
 
 test-boot: build
 	python3 tests/test_boot.py
@@ -226,6 +255,12 @@ test-player-ship: build
 
 test-level-assets: build
 	python3 tests/test_level_assets.py
+
+test-sfx: build
+	python3 tests/test_sfx.py
+
+test-enemy-fire: build
+	python3 tests/test_enemy_fire.py
 
 # NON-DEFAULT ON PURPOSE. The composable-movement vocabulary (v1.1): stage
 # transitions, a three-stage path walked end to end, an arc and its mirror on

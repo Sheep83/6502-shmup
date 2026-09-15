@@ -57,6 +57,50 @@
 // border, needs an authored yStep.
 // ===========================================================================
 
+// ===========================================================================
+// ENEMY FIRING — the constants, and the one idea behind them
+// ===========================================================================
+// ONE OPPORTUNITY AT A TIME, FOR THE WHOLE SCREEN. The authored mask says
+// WHICH enemies may shoot; this period says HOW OFTEN any of them gets to, and
+// it is global rather than per enemy on purpose. Give every eligible enemy its
+// own clock and the shot rate becomes a function of how many happen to be
+// alive -- a four-strong formation fires twice as often as a two-strong one
+// without anybody authoring that, and a wave flying as a rank puts four bolts
+// on one raster. One opportunity per period, handed round the pool in turn,
+// makes the rate a property of the LEVEL and the target a property of the
+// FORMATION, and no two enemy bolts can ever leave on the same frame.
+//
+// A MISSED OPPORTUNITY IS LOST, NOT QUEUED. If the scan finds nobody eligible,
+// or the shared projectile cap refuses the shot, nothing is remembered: the
+// next opportunity is a full period later. A queue would fire a stale shot
+// from an enemy that had since moved, died or left.
+.const WAVE_FIRE_PERIOD  = 48       // frames between firing opportunities:
+                                    // just under a second at 50 Hz
+
+// WHERE AN ENEMY IS ALLOWED TO SHOOT FROM. The band is tighter than the
+// renderer's admission band at both ends and each end is a fairness rule
+// rather than a technical one:
+//
+//   MIN_Y  the sprite is 21 tall and the aperture starts at 55, so 70 is the
+//          first line on which the WHOLE enemy is visible. A bolt from
+//          something the player can only half see is a bolt from nowhere.
+//   MAX_Y  below this the enemy is level with the player's own airspace and a
+//          straight-down shot is unreactable -- and it is about to leave the
+//          aperture anyway.
+.const ENEMY_FIRE_MIN_Y  = 70
+.const ENEMY_FIRE_MAX_Y  = 170      // exclusive
+.const ENEMY_FIRE_LEAD   = 24       // the ship must be at least this far below
+                                    // -- the same lead the turrets use, and for
+                                    // the same reason: a bolt spawned on top of
+                                    // the player cannot be dodged
+
+// THE MUZZLE, in the enemy's own logical coordinates. An enemy sprite is 24
+// wide and 21 tall and the bolt is 8 wide, so (24-8)/2 centres it and 18 puts
+// it at the bottom edge -- the shot leaves the belly of the thing that fired
+// it, which is what makes it read as having come FROM the enemy.
+.const ENEMY_MUZZLE_X    = 8
+.const ENEMY_MUZZLE_Y    = 18
+
 // --- how many waves may run at once ----------------------------------------
 // The arrays, the loops and the free-instance scan are all written against this
 // constant, and no state is shared between instances, so raising it costs a few
@@ -490,10 +534,40 @@
 // Droppers it is one byte here rather than a special case in the director.
 .var trigSpecies = List().add(SPECIES_RING, SPECIES_DROPPER,
                               SPECIES_RING, SPECIES_DROPPER)
+
+// WHICH MEMBERS OF THIS APPEARANCE MAY SHOOT — a bitmask over MEMBER INDEX,
+// bit 0 the first member sent, and zero for a formation that does not shoot
+// at all.
+//
+// THE MASK IS THE WHOLE OF THE AUTHORED FIRING CONTROL, and it is a mask over
+// the progression the director ALREADY RUNS rather than a new clock. wvIndex
+// counts members as they are sent; member n consults bit n; the answer is
+// copied onto the enemy and never revisited. There is no per-wave firing
+// timer, no per-enemy countdown and nothing for a wave to keep ticking after
+// it has gone.
+//
+// WHY A MASK AND NOT A RATE. Firing density in this game must be a property of
+// CONTENT, not of population -- an encoding that gave every member a rate
+// would make a four-strong wave twice as dangerous as a two-strong one for
+// free, and would put four bolts in the air on the same raster when a
+// formation flies as a rank. A mask says WHICH SILHOUETTES ON SCREEN ARE THE
+// DANGEROUS ONES, which is a thing the player can learn, and the global
+// opportunity cadence below says how often any of them gets to prove it.
+//
+// LEVEL 1, AND THE PACING IS DELIBERATE:
+//
+//     sweep   %0101   two of four, alternating along the echelon
+//     s-turn  %0010   the middle one only
+//     linger  %0101   two of three -- the pattern that HANGS in the middle of
+//                     the screen is the one that earns the most shots
+//     loop    %0000   NONE. The showpiece manoeuvre is the breathing room, and
+//                     a formation that cannot shoot is the case the whole
+//                     representation has to support.
+.var trigFire  = List().add(%00000101, %00000010, %00000101, %00000000)
 .const WAVE_TRIGGERS = 4
 
 .if (trigDelta.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS
-     || trigSpecies.size() != WAVE_TRIGGERS) {
+     || trigSpecies.size() != WAVE_TRIGGERS || trigFire.size() != WAVE_TRIGGERS) {
     .error "the trigger list is not WAVE_TRIGGERS entries on every axis"
 }
 .for (var t = 0; t < WAVE_TRIGGERS; t++) {
@@ -505,6 +579,13 @@
     // rather than a 0..n-1 index, so "less than the count" would be wrong.
     .if (trigSpecies.get(t) != SPECIES_RING && trigSpecies.get(t) != SPECIES_DROPPER) {
         .error "a trigger names a species that does not exist"
+    }
+    // A FIRE BIT THAT NAMES A MEMBER THE WAVE NEVER SENDS is an authoring
+    // mistake that is invisible in play -- the shot simply never happens and
+    // the formation reads as quieter than it was meant to be. The definition
+    // knows how many members it sends, so the assembler can say so.
+    .if ((trigFire.get(t) >> waveDefs.get(trigDef.get(t)).get(0)) != 0) {
+        .error "a trigger's fire mask names a member this wave never sends"
     }
 }
 // THE ALTERNATION ITSELF IS CHECKED, including across the wrap -- the list
@@ -534,6 +615,9 @@ wvDef:     .fill WAVE_SLOTS, 0      // which definition it is playing
 wvLeft:    .fill WAVE_SLOTS, 0      // members still to send
 wvTimer:   .fill WAVE_SLOTS, 0      // frames until the next member
 wvIndex:   .fill WAVE_SLOTS, 0      // members sent so far: drives xStep
+wvFire:    .fill WAVE_SLOTS, 0      // the authored fire mask over member
+                                    // index, latched with the species below
+                                    // and read once per member as it is sent
 wvSpecies: .fill WAVE_SLOTS, 0      // which enemy this instance is made of,
                                     // copied from the authored trigger column
                                     // when the wave was armed. Held per
@@ -558,6 +642,20 @@ wvDropped:   .byte 0                // triggers that found no free instance
 wvDeferred:  .byte 0                // spawns postponed because the pool was full
 wvSpawned:   .byte 0                // enemies actually created
 
+// --- enemy firing -----------------------------------------------------------
+// THREE BYTES FOR THE WHOLE SUBSYSTEM. There is no per-enemy clock and no
+// per-wave clock: one countdown says when the NEXT opportunity is, and one
+// cursor says where the round-robin resumes.
+wvFirePhase: .byte 0                // frames until the next firing opportunity
+wvFireCursor: .byte 0               // pool slot the next scan starts at
+
+wvShots:     .byte 0                // saturating: bolts moving enemies fired
+wvShotBlocked: .byte 0              // opportunities that FOUND an eligible
+                                    // enemy and were refused by the shared cap.
+                                    // Separate from "found nobody", because the
+                                    // two say completely different things about
+                                    // the content
+
 waveStateEnd:
 .if (waveStateEnd > $7800) { .error "the wave state has grown into the movement code at $7800" }
 .if (movementStateEnd > $77c0) {
@@ -581,6 +679,7 @@ waveInit:
     sta wvLeft,x
     sta wvTimer,x
     sta wvIndex,x
+    sta wvFire,x
     dex
     bpl !slot-
 
@@ -589,6 +688,15 @@ waveInit:
     sta wvDropped
     sta wvDeferred
     sta wvSpawned
+    sta wvShots
+    sta wvShotBlocked
+    sta wvFireCursor
+
+    // The first opportunity is a full period away, so a restart cannot begin
+    // with a shot already in the air.
+    lda #WAVE_FIRE_PERIOD
+    sta wvFirePhase
+    lda #0
 
     // The first trigger is the first delta from a standing start.
     lda waveTrigDelta
@@ -664,6 +772,8 @@ waveStartNext:
                                         // the bottom of this routine, so this is
                                         // the last moment it still names the
                                         // wave being armed.
+    lda waveTrigFire,y                  // ...and the fire mask with it, for the
+    sta wvFire,x                        // same reason and at the same moment
 
     // The member count comes from the definition, so a wave that is armed is
     // armed completely: nothing below can leave it half-configured.
@@ -759,6 +869,142 @@ waveRunInstance:
     rts                                 // enemies it made live on by
                                         // themselves -- nothing here owns them
 
+// ===========================================================================
+// ENEMY FIRING
+// ===========================================================================
+// ---------------------------------------------------------------------------
+// waveFireTick — at most ONE enemy bolt leaves the screen. MAIN THREAD.
+//
+// WHERE THIS RUNS: late in gameFrame, beside turretFireTick and for the same
+// two reasons, both of which are about correctness before cost. An enemy
+// killed by the player this frame has already had collisionTick take its
+// health to zero, so it cannot also shoot this frame; and a projectile spawned
+// now is rendered where it was launched rather than moved before it has ever
+// been seen.
+//
+// FOUR CYCLES ON AN ORDINARY FRAME. The period counter is decremented and the
+// routine returns; the pool is not walked, no enemy is examined and nothing is
+// read. One frame in WAVE_FIRE_PERIOD does the work below, and even that is a
+// walk of sixteen bytes.
+//
+// THE SCAN IS ROUND-ROBIN, resuming at wvFireCursor, and that is what keeps
+// the firing fair. Scanning from slot 0 every time would hand almost every
+// shot to whichever eligible enemy happened to hold the lowest slot -- the
+// pool allocates low-first, so that is systematically the OLDEST enemy on
+// screen, the one furthest through its path and closest to leaving. The cursor
+// advances past whoever was picked, so the licence rotates through the
+// formation.
+// ---------------------------------------------------------------------------
+waveFireTick:
+    dec wvFirePhase
+    beq !opportunity+
+    rts
+!opportunity:
+    lda #WAVE_FIRE_PERIOD               // RELOADED FIRST, exactly as
+    sta wvFirePhase                     // turretFireTick reloads: an
+                                        // opportunity that finds nobody costs a
+                                        // whole period instead of retrying
+                                        // every frame until it lands
+
+    lda plyInvuln                       // an invulnerable ship is not shot at:
+    beq !live+                          // the bolt would pass through it, and
+    rts                                 // spending the cap on it would deny a
+                                        // turret a real shot
+!live:
+    ldx wvFireCursor
+    ldy #MAX_OBJECTS                    // every slot considered exactly once
+!slot:
+    lda enyFire,x                       // THE AUTHORED LICENCE, resolved at
+    beq !next+                          // spawn: species AND encounter
+
+    lda logActive,x                     // an object at all?
+    beq !next+
+    lda objType,x                       // ...an ENEMY? enyFire was cleared when
+    cmp #TYPE_ENEMY                     // the slot was freed, so this is belt
+    bne !next+                          // and braces -- and belts fail
+    lda objHP,x
+    beq !next+                          // DYING. Health reaches zero the moment
+                                        // the player kills it and the twelve
+                                        // frames of explosion that follow are
+                                        // not a firing position
+
+    lda logY,x                          // is it meaningfully on screen?
+    cmp #ENEMY_FIRE_MIN_Y
+    bcc !next+
+    cmp #ENEMY_FIRE_MAX_Y
+    bcs !next+
+
+    clc                                 // the bolt falls: the ship has to be
+    adc #ENEMY_FIRE_LEAD                // below, and not right on top of it
+    cmp plyY
+    bcs !next+
+
+    jmp waveFireShot                    // out of branch range
+
+!next:
+    inx
+    txa
+    and #MAX_OBJECTS - 1                // sixteen slots: the wrap is a mask
+    tax
+    dey
+    bne !slot-
+    rts                                 // nobody eligible. The opportunity is
+                                        // spent, and deliberately not saved
+
+// ---------------------------------------------------------------------------
+// waveFireShot — enemy X takes the shot. Falls out of waveFireTick's scan.
+//
+// THE CURSOR MOVES PAST THIS ENEMY WHETHER OR NOT THE BOLT EXISTS, and that is
+// the anti-starvation rule: if the shared cap is full, the enemy that was
+// picked does not get to be picked again next time in preference to everyone
+// behind it.
+// ---------------------------------------------------------------------------
+waveFireShot:
+    lda logX,x                          // LOGICAL COORDINATES, nine bits. No
+    clc                                 // VIC register and no mux slot is read
+    adc #ENEMY_MUZZLE_X                 // here or anywhere in this file: where
+    sta ebSpawnXLo                      // the hardware happens to be drawing
+    lda logXHi,x                        // this enemy is not where the enemy IS
+    adc #0
+    sta ebSpawnXHi
+    lda logY,x
+    clc
+    adc #ENEMY_MUZZLE_Y
+    sta ebSpawnY
+
+    inx                                 // advance the round-robin past this
+    txa                                 // enemy before anything can fail
+    and #MAX_OBJECTS - 1
+    sta wvFireCursor
+
+    jsr ebulletSpawnDown                // THE SHARED PROJECTILE SYSTEM: the
+                                        // same pool, the same cap of three, the
+                                        // same flight and the same collision
+                                        // the turrets have always used. Carry
+                                        // set = the cap or the pool refused
+    bcs !blocked+
+
+    lda #SFX_ESHOT                      // THE SOUND FOLLOWS THE PROJECTILE, not
+    jsr sfxRequest                      // the opportunity: a refused shot is
+                                        // silent, because a sound with nothing
+                                        // on screen behind it is a lie about
+                                        // the state of the game
+
+    lda wvShots
+    cmp #$ff
+    beq !done+
+    inc wvShots
+!done:
+    rts
+
+!blocked:
+    lda wvShotBlocked
+    cmp #$ff
+    beq !counted+
+    inc wvShotBlocked
+!counted:
+    rts
+
 // ---------------------------------------------------------------------------
 // waveSpawnMember — create one enemy for instance X.
 //
@@ -838,6 +1084,40 @@ waveSpawnMember:
     ldy wvInst
     lda wvSpecies,y
     sta enySpecies,x
+
+    // ---- may THIS ONE shoot? ----------------------------------------------
+    // TWO INDEPENDENT AUTHORITIES, AND BOTH MUST SAY YES. The encounter says
+    // whether this APPEARANCE fires -- bit `member index` of the authored mask
+    // -- and the species says whether this ENEMY can fire at all. Neither can
+    // override the other, and the answer is resolved HERE, once, rather than
+    // being re-derived every frame by the firing tick.
+    lda wvFire,y                        // Y is still the instance
+    beq !noFire+                        // this formation does not shoot
+    sta wvFireBit
+    lda wvIndex,y                       // the member this is, 0-based
+    tay
+    lda wvFireBit
+!shift:
+    dey                                 // member 0 shifts nothing: dey goes
+    bmi !tested+                        // negative and falls straight through
+    lsr
+    jmp !shift-
+!tested:
+    lsr                                 // the member's own bit -> carry
+    bcc !noFire+
+
+    lda enySpecies,x                    // THE SPECIES ANSWERS SECOND
+    .for (var i = 0; i < ENEMY_ANIM_SHIFT; i++) { lsr }
+    tay                                 // species row -> species index
+    lda enemyFireModeTab,y
+    beq !noFire+                        // a species that cannot fire, in a
+                                        // wave authored to: the species wins
+    sta enyFire,x                       // the MODE, not a bare flag: a later
+    jmp !mayFire+                       // species fires differently by storing
+!noFire:                                // a different value here
+    lda #0
+    sta enyFire,x
+!mayFire:
 
     // THE ANIMATION'S CURRENT PHASE, not step 0. A new enemy is spawned by
     // waveTick AFTER objectUpdateAll has already run this frame, so its first
@@ -919,6 +1199,8 @@ waveDefBase:
 wvInst:     .byte 0                     // the wave instance, while X is a slot
 wvDefBase:  .byte 0                     // its definition's table offset
 wvCount:    .byte 0                     // fan-out repeat counter
+wvFireBit:  .byte 0                     // the authored mask, while Y is re-aimed
+                                        // at the member index that indexes it
 wvScratch:  .byte 0                     // waveDefBase's partial product
 
 // ---------------------------------------------------------------------------
@@ -964,9 +1246,11 @@ waveTrigDef:
 .for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigDef.get(t) }
 waveTrigSpecies:
 .for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigSpecies.get(t) }
+waveTrigFire:
+.for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigFire.get(t) }
 waveTrigEnd:
-.if (waveTrigEnd - waveTrigDelta != 3 * WAVE_TRIGGERS) {
-    .error "the trigger table is not three bytes per trigger"
+.if (waveTrigEnd - waveTrigDelta != 4 * WAVE_TRIGGERS) {
+    .error "the trigger table is not four bytes per trigger"
 }
 
 .if (* > $8000) { .error "the wave code has outgrown its $7c00 segment" }

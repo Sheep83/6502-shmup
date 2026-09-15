@@ -145,10 +145,17 @@ ebulletBitmapEnd:
 // can retire a projectile.
 ebCount:     .byte 0                    // live projectiles, 0..EBULLET_MAX
 
-// The spawn request: a caller fills these three bytes and calls ebulletSpawn.
+// The spawn request: a caller fills these three bytes and calls one of the two
+// spawn entry points.
 ebSpawnXLo:  .byte 0
 ebSpawnXHi:  .byte 0
 ebSpawnY:    .byte 0
+
+// WHICH TRAJECTORY THE ENTRY POINT ASKED FOR, and it is written by the entry
+// points themselves rather than by the caller: a fourth byte for a caller to
+// forget is a silent wrong-direction bug, while two named entries cannot be
+// called wrongly. 0 = straight down, non-zero = aimed at the player.
+ebSpawnAim:  .byte 0
 
 // --- diagnostics -----------------------------------------------------------
 ebFired:     .byte 0                    // projectiles that reached the world
@@ -177,10 +184,39 @@ ebulletInit:
     rts
 
 // ---------------------------------------------------------------------------
+// TWO ENTRY POINTS, ONE PROJECTILE. Everything about a hostile shot except its
+// horizontal velocity is shared, so the difference between the two firing
+// sources is one byte set before a common body rather than two spawn routines:
+//
+//     ebulletSpawn      the turrets' shot, AIMED at the player
+//     ebulletSpawnDown  a moving enemy's shot, STRAIGHT DOWN
+//
+// The cap, the pool allocation, the presentation, the lifecycle and the
+// player collision are identical and are written once. A third firing mode
+// later is another entry point and another arm of the branch below, not
+// another copy of this routine.
+// ---------------------------------------------------------------------------
+// ebulletSpawnDown — one projectile at ebSpawnX/Y, falling straight.
+//
+// THE ENEMY SHOT IS NOT AIMED, and that is a gameplay decision rather than a
+// simplification to be fixed later. A moving enemy is already a harder target
+// to read than a fixed turret: it arrives from off-screen, it is on a curve,
+// and there may be three of it. An aimed shot from something moving that fast
+// cannot be dodged by reading the enemy, only by reading the bolt after it is
+// already in flight. Straight down means the enemy's own position TELLS the
+// player where the danger will be, which is what makes the formation itself
+// the threat rather than the projectile.
+// ---------------------------------------------------------------------------
+ebulletSpawnDown:
+    lda #0
+    sta ebSpawnAim
+    jmp ebulletSpawnBody
+
+// ---------------------------------------------------------------------------
 // ebulletSpawn — one projectile at ebSpawnX/Y, aimed at the player.
 //
-// Exit: carry CLEAR and X = the slot on success; carry SET and nothing changed
-//       if the cap or the pool refused.
+// Exit (both entries): carry CLEAR and X = the slot on success; carry SET and
+//       nothing changed if the cap or the pool refused.
 //
 // THE TRAJECTORY IS FIXED AT LAUNCH and never revised: a projectile costs one
 // add per axis per frame and never looks at the player again. It also means a
@@ -191,6 +227,9 @@ ebulletInit:
 // half-built projectile can never reach a schedule.
 // ---------------------------------------------------------------------------
 ebulletSpawn:
+    lda #1
+    sta ebSpawnAim
+ebulletSpawnBody:
     lda ebCount
     cmp #EBULLET_MAX
     bcc !room+
@@ -230,8 +269,17 @@ ebulletSpawn:
     sta objTimer,x                      // a hitscan target: traceRay filters on
                                         // TYPE_ENEMY and never sees this slot
 
+    // ---- the trajectory, and the ONE thing the two entries differ on -----
+    lda ebSpawnAim
+    beq !straight+
     jsr ebulletAim                      // -> objVX,x
-
+    jmp !launch+
+!straight:
+    lda #0
+    sta objVX,x                         // objectAlloc zeroed this; saying so
+                                        // again is two bytes for a guarantee
+                                        // that does not depend on the pool
+!launch:
     jsr objectActivate                  // now it may be sorted and drawn
     inc ebCount
     lda ebFired
