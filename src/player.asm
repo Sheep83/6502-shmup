@@ -31,9 +31,13 @@
 // sorted, never occupies a schedule entry and never competes for a slot.
 // MUX_FIRST_SLOT stays 2 and MAX_SCHED stays 24.
 //
-// THE SHIP IS TWO CO-LOCATED HIRES SPRITES, a hull and a trim layer, because
-// $d01c is forced to zero engine-wide and one hires sprite is one colour. Two
-// reserved slots buy the second colour that the mux enemies cannot have.
+// THE SHIP IS ONE MULTICOLOUR SPRITE on HW0, with the muzzle flash a second
+// multicolour sprite on HW1. Multicolour is the artwork's native mode -- three
+// colours in twelve double-width pixels -- and is now what EVERY gameplay
+// sprite uses; the player is no longer special in that respect. What the two
+// reserved slots still buy is a second sprite's worth of art co-located with
+// the first, which is how the flash can be drawn at the guns without costing a
+// mux slot.
 //
 // MOVEMENT IS ONE PIXEL PER FRAME PER AXIS, read from joystick port 2, with no
 // acceleration and no momentum -- there is no velocity state in this file, by
@@ -105,15 +109,15 @@
 // two shared registers and its own. That is the artwork's native mode rather
 // than a choice -- see the art note below.
 //
-// $d025 and $d026 are GLOBAL to every sprite, and the player is the only
-// sprite in the game that is multicolour, so nothing else can read them and
-// they are written once at init. The renderer's own comment reserved them for
-// exactly this: "if gameplay ever enables multicolour for a slot, they join
-// this list on the same day."
+// TWO OF THOSE THREE ARE NOT THE PLAYER'S. $d025 and $d026 are one register
+// each for the whole machine, and every gameplay sprite is multicolour now, so
+// the craft shares its outline and its highlight with enemies and hostile
+// projectiles alike. They are SPR_MC_DARK / SPR_MC_LIGHT in src/main.asm and
+// are written once there; this file neither owns nor sets them.
+//
+// What the craft keeps for itself is pair 10, its own $d027 -- the hull.
 .const PLAYER_COL_SHIP   = 14                       // $d027, per sprite: the
                                                     // light-blue hull
-.const PLAYER_MC_OUTLINE = 0                        // $d025, shared: black
-.const PLAYER_MC_WHITE   = 1                        // $d026, shared: white
 .const PLAYER_COL_BLANK  = 0                        // HW1 draws nothing
 
 // THE HULL NO LONGER REDDENS WHEN THE GUN FIRES. It used to: firing swapped
@@ -129,13 +133,14 @@
 // entirely separate; see below.
 
 // --- the muzzle flash's colour ----------------------------------------------
-// The flash artwork uses only bit pairs 10 and 11: pair 11 is the player's
-// existing shared WHITE ($d026) -- the white-hot core -- and pair 10 is HW1's
-// OWN colour ($d028), which nothing else reads. So the flash is a write to one
-// private register and the shared pair the craft depends on is never touched.
+// The flash artwork uses only bit pairs 10 and 11: pair 11 is the shared WHITE
+// ($d026, SPR_MC_LIGHT) -- the white-hot core -- and pair 10 is HW1's OWN
+// colour ($d028), which nothing else reads. So the flash is a write to one
+// private register, and the shared pair that the craft, the enemies and the
+// projectiles all depend on is never touched.
 //
-// Pair 01 ($d025, the craft's black outline) does not appear in the artwork at
-// all; asserted against the real bytes in tests/test_player_ship.py rather than
+// Pair 01 ($d025, the shared outline) does not appear in the artwork at all;
+// asserted against the real bytes in tests/test_player_ship.py rather than
 // taken on trust.
 //
 // ONE COLOUR, HELD FOR BOTH FRAMES. An earlier version pulsed orange then red
@@ -153,11 +158,15 @@
 .const PLAYER_FLASH_Y_LIFT = 7
 
 // --- $d01c: the two bits the player owns -------------------------------------
-// Bit per sprite, 1 = multicolour. BOTH of the player's slots now: HW0 carries
-// the craft and HW1 the muzzle flash, and the supplied flash artwork is
-// multicolour too. Every gameplay and HUD slot stays hires exactly as before --
-// bits 2..7 are clear, which is what keeps this a change to the player and not
-// to the mux. The guard below is what enforces that rather than a comment.
+// Bit per sprite, 1 = multicolour. BOTH of the player's slots: HW0 carries the
+// craft and HW1 the muzzle flash, and both are authored multicolour.
+//
+// THIS IS THE PLAYER'S HALF OF $d01c AND NOT THE WHOLE REGISTER. Bits 2..7
+// belong to slots the HUD and the gameplay mux time-share, and those two
+// owners want different resolutions -- so the renderer composes the complete
+// value per raster phase, from this constant plus the mux mask. See
+// D01C_HUD_PHASE / D01C_GAMEPLAY in src/renderer.asm; the guard below is what
+// keeps this file from reaching past its own two bits into that decision.
 //
 // HW1's bit is set permanently rather than toggled with the flash: a DISABLED
 // sprite's mode is not read by anything, so there is nothing to switch off and
@@ -373,6 +382,12 @@ playerStateEnd:
 //     sprite (12 double-width pixels = 24 screen px). Multicolour is the
 //     artwork's native mode and ONE sprite is its native composition, which is
 //     why the craft stopped being two hires layers.
+//
+//     THOSE ARE THE SHEET'S COLOURS, NOT THE SCREEN'S. The outline pixels are
+//     black IN THE PNG and select bit pair 01, which the VIC draws in the
+//     shared $d025 -- SPR_MC_DARK, dark grey. Only the hull's pair 10 is this
+//     sprite's own ($d027 = PLAYER_COL_SHIP). Read the sheet's black as "the
+//     shading index", not as a colour that reaches the display.
 //   * THE SHEET'S ROWS ARE BANKING. The neutral band is mirror-symmetric to
 //     the pixel; the other two lean progressively LEFT -- in both, the right
 //     wingtip rides high while the left drops. The sheet draws one direction,
@@ -414,8 +429,8 @@ playerBitmapsEnd:
 // delivered -- no tool generates it and nothing here rewrites it. Its own
 // header documents the pixel semantics this file relies on: pair 10 is HW1's
 // private colour and pair 11 the player's shared white, and pair 01 is never
-// used, so lighting the flash cannot disturb the black the craft's outline
-// depends on.
+// used, so lighting the flash cannot disturb the shared shade the craft's
+// outline depends on.
 // ---------------------------------------------------------------------------
 * = PLAYER_FLASH_SPRITES "player muzzle flash"
 playerFlashBitmaps:
@@ -468,15 +483,9 @@ playerInit:
     lda #PLAYER_BANK_NEUTRAL            // level flight
     sta plyBank
 
-    // THE TWO SHARED MULTICOLOUR REGISTERS, written once and never again.
-    // They are global to every sprite, and the player is the only multicolour
-    // sprite in the game, so there is nothing to schedule and nothing that can
-    // dirty them. See the colour note at the top of this file.
-    lda #PLAYER_MC_OUTLINE
-    sta $d025
-    lda #PLAYER_MC_WHITE
-    sta $d026
-
+    // $d025/$d026 are NOT written here. They are shared by every multicolour
+    // sprite in the game, so they belong to no subsystem and are set once in
+    // src/main.asm's entry beside the other whole-machine sprite state.
     lda #JOY_MASK
     sta joyState                        // nothing pressed until the first read
     lda #0

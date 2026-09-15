@@ -49,9 +49,21 @@ WPN_FIRE_PERIOD = 8
 BANK_LEFT, BANK_NEUTRAL, BANK_RIGHT = 0, 2, 4
 def ptr(bank, engine=0):
     return PTR_FIRST + bank * ENGINE_FRAMES + engine
-D01C_EXPECTED = 0b00000011          # HW0 + HW1 multicolour, mux/HUD hires
+# $d01c is now COMPOSED PER RASTER PHASE, because HW2..HW7 are drawn twice a
+# frame by two owners that want opposite resolutions: the HUD's score font and
+# heat bar are hires line art, the gameplay mux is multicolour. So there is no
+# single correct value any more -- there are two, and which one is live depends
+# on where the beam is.
+D01C_HUD_PHASE = 0b00000011         # raster 4:  player MC, the HUD's six hires
+D01C_GAMEPLAY  = 0b11111111         # raster 40: player MC, the mux's six MC too
+HUD_ENABLE     = 0b11111100         # the six slots the HUD and the mux share
 COL_SHIP, COL_BLANK = 14, 0
-MC_OUTLINE, MC_WHITE = 0, 1
+MC_OUTLINE, MC_WHITE = 11, 1        # SPR_MC_DARK / SPR_MC_LIGHT: shared by
+                                    # every multicolour sprite, not the
+                                    # player's own -- see src/main.asm.
+                                    # The dark is DARK GREY, not black: it is
+                                    # shading under the hull rather than an ink
+                                    # outline around it.
 JOY_MASK, JOY_LEFT, JOY_RIGHT = 0b00011111, 0b00000100, 0b00001000
 BANK_RATE, ENGINE_RATE = 5, 4
 PLAYER_SLOT_MASK = 0b00000011
@@ -158,7 +170,7 @@ def machine():
         # THE SUPPLIED FLASH ART'S PIXEL SEMANTICS, checked against the bytes
         # the VIC will actually read. src/player.asm depends on two of these:
         # that pair 01 never appears (so lighting the flash cannot disturb
-        # $d025, the black the craft's outline is drawn in), and that every
+        # $d025, the shade the craft's outline is drawn in), and that every
         # flare is registered to a real gun barrel on the craft once the code's
         # Y lift is applied.
         fart = rd(mon, sym["playerFlashBitmaps"], 64 * FLASH_FRAMES)
@@ -221,9 +233,13 @@ def machine():
               f"{[sum(1 for b in fart[f*64:f*64+63] if b) for f in range(FLASH_FRAMES)]}")
 
         # --- sprite modes ---------------------------------------------------
+        # Sampled at gameFrame, which the main loop enters just after the frame
+        # transaction at raster 250 -- so the last write to land was the
+        # HANDOFF's, at raster 40 of this same frame.
         d01c = rd1(mon, 0xd01c)
-        check("$d01c makes BOTH player slots multicolour and no other",
-              d01c == D01C_EXPECTED, f"${d01c:02x}")
+        check("$d01c below the aperture is the GAMEPLAY composition: every "
+              "gameplay sprite multicolour",
+              d01c == D01C_GAMEPLAY, f"${d01c:02x}")
         # LOW NIBBLE ONLY. The VIC's colour registers implement four bits and
         # read back with the top four set, so $d025 holding light blue reads
         # $fe and not $0e. Masking is reading the register correctly, not
@@ -232,17 +248,38 @@ def machine():
         check("the shared multicolour registers hold the outline and highlight",
               (d025, d026) == (MC_OUTLINE, MC_WHITE), f"$d025={d025} $d026={d026}")
 
-        # Both raster phases must agree: the craft is drawn through the HUD
-        # phase AND the gameplay phase, so a mode that changed at the handoff
-        # would show as the ship switching resolution part-way down the screen.
-        seen = set()
-        for line in (0x20, 0x80, 0xd0):
-            bp = set_bp(mon, sym["gameFrame"])
-            mon.cmd("x")
-            seen.add(rd1(mon, 0xd01c))
-            mon.cmd(f"delete {bp}"); mon.cmd("delete")
-        check("$d01c is the same value however the frame is sampled",
-              seen == {D01C_EXPECTED}, f"{[hex(x) for x in seen]}")
+        # THE TWO PHASES MUST DISAGREE, AND DISAGREE IN EXACTLY ONE PLACE.
+        #
+        # This assertion used to be "$d01c is the same value however the frame
+        # is sampled", which was right while every slot but the player's was
+        # hires. It is now false BY DESIGN: the six shared slots change
+        # resolution at the handoff. Rewritten to pin what actually has to hold.
+        #
+        # exHandoff is sampled at ENTRY, before its own $d01c write, so what it
+        # reads is what exHud left at raster 4 -- the HUD phase's value, live
+        # across the HUD's whole display window. gameFrame is sampled after the
+        # handoff has run, so it reads the gameplay value.
+        bp = set_bp(mon, sym["exHandoff"])
+        mon.cmd("x")
+        d01c_hud = rd1(mon, 0xd01c)
+        mon.cmd(f"delete {bp}"); mon.cmd("delete")
+
+        check("during the HUD's display window the HUD's own six slots are "
+              "HIRES -- its score font and heat bar depend on it",
+              d01c_hud & HUD_ENABLE == 0, f"${d01c_hud:02x}")
+        check("...and that value is exactly the HUD composition",
+              d01c_hud == D01C_HUD_PHASE, f"${d01c_hud:02x}")
+        check("the handoff turns all six shared slots multicolour for the mux",
+              d01c & HUD_ENABLE == HUD_ENABLE, f"${d01c:02x}")
+
+        # The one thing that must NOT change across the handoff. HW0/HW1 are
+        # outside the mux and are displayed through both phases, so a craft
+        # whose mode changed at raster 40 would visibly switch resolution half
+        # way down itself.
+        check("the player's own two bits are multicolour in BOTH phases",
+              (d01c_hud & PLAYER_SLOT_MASK) == PLAYER_SLOT_MASK
+              and (d01c & PLAYER_SLOT_MASK) == PLAYER_SLOT_MASK,
+              f"hud=${d01c_hud:02x} gameplay=${d01c:02x}")
 
         # --- banking, through the REAL frame loop ---------------------------
         # Banking is a frame-cadence behaviour, so it is watched by stepping

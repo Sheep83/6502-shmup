@@ -25,18 +25,53 @@
 .const ENEMY_MAX_HP      = 6        // TYPE data: every enemy starts here, so
                                    // no per-object maximum is stored
 
-// The enemy bitmap, in the run between the HUD/player pool and the blank
-// charset the aperture depends on.
+// The enemy's four animation frames, in the run between the HUD pool and the
+// clip scratch block at $3680.
 //
 // PINNED, NOT DERIVED. It used to be PLAYER_SPRITES_END, which was true and
 // self-maintaining for as long as the player sat immediately below it -- and
 // silently dragged this bitmap across the bank the day the player's art moved
 // to the reclaimed $2000 run. An address that follows an unrelated asset
 // around is not a memory map, so this one states where it is.
-.const ENEMY_SPRITES     = $3640
-.const ENEMY_PTR         = ENEMY_SPRITES / 64       // $d9
-.if ((ENEMY_SPRITES & 63) != 0) { .error "the enemy bitmap must be 64-byte aligned" }
-.if (ENEMY_SPRITES + 64 > BLANK_CHARSET) { .error "the enemy bitmap runs into the blank charset" }
+//
+// FOUR CONSECUTIVE BLOCKS, AND THE ORDER IS LOAD-BEARING. The animation adds a
+// frame index to ENEMY_PTR_FIRST and stores the result straight into logPtr,
+// so the frames must be adjacent and in rotation order -- see enemyAnimPtr.
+// $3580 is the only run in the bank where four aligned blocks are free and
+// contiguous: it is the three blocks the player's old hires layers vacated,
+// plus the one the single placeholder bitmap used to occupy.
+.const ENEMY_SPRITES     = $3580
+.const ENEMY_FRAMES      = 4                        // north, east, south, west
+.const ENEMY_PTR_FIRST   = ENEMY_SPRITES / 64       // $d6; frames are $d6..$d9
+.if ((ENEMY_SPRITES & 63) != 0) { .error "the enemy frames must be 64-byte aligned" }
+.if (ENEMY_SPRITES + ENEMY_FRAMES * 64 > BLANK_CHARSET) {
+    .error "the enemy frames run into the blank charset"
+}
+.if (ENEMY_SPRITES < HUD_SPRITES_END) {
+    .error "the enemy frames overlap the HUD bitmap pool"
+}
+
+// --- the animation cadence ---------------------------------------------------
+// ENEMY_ANIM_SHIFT frames of hold per step, so a full rotation takes
+// ENEMY_FRAMES << ENEMY_ANIM_SHIFT displayed frames -- 32 at these values,
+// which is 0.64 s of PAL. Fast enough that the specular clearly travels round
+// the rim, slow enough that it reads as a spin rather than a flicker.
+//
+// A SHIFT RATHER THAN A TIMER, and that is what makes this cost no state at
+// all: the phase is derived from the renderer's free-running frameCounter
+// instead of being counted. See enemyAnimPtr.
+.const ENEMY_ANIM_SHIFT  = 3                        // 1 << 3 = 8 frames a step
+
+// THE LOW BYTE OF frameCounter MUST CONTAIN A WHOLE NUMBER OF CYCLES, or the
+// animation would stutter once every 256 frames when that byte wraps mid-step.
+// 256 / 32 = 8 exactly here. This is the assertion that lets enemyAnimPtr read
+// one byte and ignore the high one.
+.if (mod(256, ENEMY_FRAMES << ENEMY_ANIM_SHIFT) != 0) {
+    .error "a frameCounter low-byte wrap would land mid-cycle and stutter the spin"
+}
+.if ((ENEMY_FRAMES & (ENEMY_FRAMES - 1)) != 0) {
+    .error "ENEMY_FRAMES must be a power of two: the phase is masked, not compared"
+}
 
 // ===========================================================================
 // LIFECYCLE BOUNDS — WHERE AN ENEMY MAY EXIST, NOT WHERE IT MAY BE SEEN
@@ -113,63 +148,48 @@
 // resolves constants strictly in import order.
 
 // ===========================================================================
-// Art. Authored as multicolour, flattened to hires at ASSEMBLY time.
+// Art. Authored multicolour, EMITTED AS AUTHORED.
 // ===========================================================================
-// The engine forces $d01c to zero, so every hardware sprite is hires including
-// the mux slots. Each two-bit pair of the source becomes two lit pixels if it
-// named any of the three colours and two blank pixels if it was background.
+// The mux slots are multicolour from the handoff at raster 40 onwards (see
+// D01C_GAMEPLAY in src/renderer.asm), so the bytes below reach the VIC meaning
+// exactly what the artist drew:
 //
-// That is a silhouette, not a recolour: the shading is lost and the shape is
-// kept. It is the honest conversion for a one-layer sprite -- the player
-// affords two layers because it owns two reserved hardware sprites, and a mux
-// enemy owns one.
+//     pair 00   transparent
+//     pair 01   $d025, SPR_MC_DARK   -- shared dark grey, the shading
+//     pair 10   $d027+n              -- THIS enemy's own colour
+//     pair 11   $d026, SPR_MC_LIGHT  -- shared white, the highlights
+//
+// PAIR 10 IS WHY EVERY ENEMY CAN STILL LOOK DIFFERENT. It is the only one of
+// the three that is per-sprite, and the ring's rim accent is drawn in it, so
+// wmBaseCol's authored wave colour still reaches the screen exactly as it did
+// when the enemy was a single placeholder bitmap. The animation changes which
+// FRAME is shown; it never touches logCol.
+//
+// NOTHING ABOUT CLIPPING CHANGES. src/clip.asm shifts whole ROWS of three
+// bytes when an enemy straddles an aperture edge; it never looks inside a byte,
+// so a multicolour row clips exactly as a hires one did. It takes its source
+// from logPtr, so it follows the animation to whichever frame is live without
+// knowing the enemy is animated at all.
+* = ENEMY_SPRITES "enemy frames"
+#import "enemy_art.asm"                 // sonicRingFrames, four 64-byte frames
 
-// One multicolour byte to one hires byte: every non-background pair lit.
-.function enemyHires(b) {
-    .var v = 0
-    .for (var p = 0; p < 4; p++) {
-        .var sh = 6 - 2 * p
-        .if (((b >> sh) & 3) != 0) { .eval v = v | (3 << sh) }
-    }
-    .return v
+// The names the rest of the engine knew this art by, kept pointing at the same
+// things they always meant: the first frame's bytes, and the address the art
+// ends at. src/ebullet.asm places the projectile above enemyBitmapEnd.
+.label enemyBitmap    = sonicRing_north
+.label enemyBitmapEnd = sonicRingFramesEnd
+
+.if (sonicRingFramesEnd - sonicRingFrames != ENEMY_FRAMES * 64) {
+    .error "the enemy art is not ENEMY_FRAMES blocks of 64 bytes"
 }
-
-.var enemyMC = List()
-.eval enemyMC.add($00,$28,$00)
-.eval enemyMC.add($00,$aa,$00)
-.eval enemyMC.add($00,$be,$00)
-.eval enemyMC.add($02,$be,$80)
-.eval enemyMC.add($02,$7d,$80)
-.eval enemyMC.add($0a,$7d,$a0)
-.eval enemyMC.add($29,$69,$68)
-.eval enemyMC.add($a5,$aa,$5a)
-.eval enemyMC.add($96,$be,$96)
-.eval enemyMC.add($06,$ff,$90)
-.eval enemyMC.add($06,$eb,$90)
-.eval enemyMC.add($06,$aa,$90)
-.eval enemyMC.add($01,$aa,$40)
-.eval enemyMC.add($01,$69,$40)
-.eval enemyMC.add($00,$69,$00)
-.eval enemyMC.add($00,$7d,$00)
-.eval enemyMC.add($01,$41,$40)
-.eval enemyMC.add($05,$00,$50)
-.eval enemyMC.add($14,$00,$14)
-.eval enemyMC.add($00,$00,$00)
-.eval enemyMC.add($00,$00,$00)
-
-.if (enemyMC.size() != 21 * 3) { .error "the enemy bitmap must be 21 rows of 3 bytes" }
-
-* = ENEMY_SPRITES "enemy bitmap"
-enemyBitmap:
-.for (var r = 0; r < 21; r++) {
-    .for (var c = 0; c < 3; c++) {
-        .byte enemyHires(enemyMC.get(r * 3 + c))
-    }
-}
-    .byte $00                           // 64th padding byte
-enemyBitmapEnd:
-.if (enemyBitmapEnd - enemyBitmap != 64) { .error "the enemy bitmap must be exactly 64 bytes" }
-.if (enemyBitmapEnd > BLANK_CHARSET) { .error "the enemy bitmap has run into the blank charset" }
+// THE FRAMES MUST BE IN ROTATION ORDER AND ADJACENT, because enemyAnimPtr
+// selects one by adding an index to ENEMY_PTR_FIRST rather than by looking up
+// a table. Checked against the labels themselves so that reordering the art
+// file is a build error rather than a scrambled spin.
+.if (sonicRing_north != ENEMY_SPRITES + 0 * 64) { .error "frame 0 is not north" }
+.if (sonicRing_east  != ENEMY_SPRITES + 1 * 64) { .error "frame 1 is not east"  }
+.if (sonicRing_south != ENEMY_SPRITES + 2 * 64) { .error "frame 2 is not south" }
+.if (sonicRing_west  != ENEMY_SPRITES + 3 * 64) { .error "frame 3 is not west"  }
 
 // ===========================================================================
 // State. MAIN THREAD ONLY, three bytes in a hole below the player's state.
@@ -197,10 +217,56 @@ enemyInit:
     rts
 
 // ---------------------------------------------------------------------------
+// enemyAnimPtr — the sprite pointer every enemy should be showing THIS frame.
+// Exit: A = the pointer. X and Y preserved, no memory written.
+//
+// ONE GLOBAL PHASE, NOT PER-OBJECT STATE, and it costs no state at all.
+//
+// The phase is DERIVED from the renderer's frameCounter rather than counted in
+// a timer of this file's own. That is the whole trick: frameCounter already
+// advances exactly once per displayed frame, in exFrame, so shifting it right
+// by ENEMY_ANIM_SHIFT and masking to ENEMY_FRAMES gives a phase that steps on
+// a fixed cadence for free -- no byte of state, no per-frame decrement, and
+// nothing that can drift out of step with the display if a frame is ever
+// skipped. The assertion beside ENEMY_ANIM_SHIFT is what allows reading only
+// the LOW byte: 256 is a whole number of cycles, so the wrap is seamless.
+//
+// LOCKSTEP IS A DECISION, not an accident of the implementation. Every ring on
+// screen spins in phase, which for a field of identical rings reads as one
+// mechanism rather than as clutter. The moment an enemy type genuinely needs
+// its own phase -- a second species, or a stagger -- this becomes a per-object
+// byte and callers change not at all, because they already ask a routine
+// rather than compute it themselves. That is the only reason this is a
+// subroutine and not eight inline instructions.
+// ---------------------------------------------------------------------------
+enemyAnimPtr:
+    lda frameCounter                    // low byte only: see the wrap assertion
+    .for (var i = 0; i < ENEMY_ANIM_SHIFT; i++) {
+        lsr                             // /2 per shift: hold each frame for
+    }                                   // 1 << ENEMY_ANIM_SHIFT displayed frames
+    and #ENEMY_FRAMES - 1               // a mask, not a compare: ENEMY_FRAMES
+                                        // is asserted a power of two
+    clc
+    adc #ENEMY_PTR_FIRST                // the frames are adjacent and in
+    rts                                 // rotation order, so this IS the lookup
+
+// ---------------------------------------------------------------------------
 // enemyTick — one frame of ONE enemy. MAIN THREAD.
 // Entry/exit: X = the object's slot, PRESERVED across the free.
 // ---------------------------------------------------------------------------
 enemyTick:
+    // ---- the spin, and it is the FIRST thing so that it is unconditional ---
+    // Every enemy gets this frame's phase written into its logPtr, alive or
+    // dying. Presentation only: logPtr is the sprite POINTER, so this changes
+    // which of the four frames the VIC fetches and nothing else. Movement,
+    // collision, HP, firing and the despawn rules below never read it.
+    //
+    // A dying ring keeps spinning deliberately -- the death is a colour ramp
+    // over the same silhouette, and freezing the rotation half way through it
+    // would read as the animation having broken rather than the enemy having.
+    jsr enemyAnimPtr
+    sta logPtr,x
+
     // ---- dying enemies run their death out and do not move ----------------
     // A dying enemy stays renderable but stops following its path: an explosion
     // that keeps flying reads as a live enemy the player cannot kill.
@@ -322,26 +388,23 @@ enemyTick:
 // ---------------------------------------------------------------------------
 // enemyFlashTick — one frame of the hit flash. Entry/exit: X = slot, preserved.
 //
-// The timer is decremented FIRST and the remaining value chooses the colour,
-// so a four-frame flash shows white, white, white, yellow and then restores.
+// ONE COLOUR HELD FOR THE WHOLE WINDOW, where this used to walk a two-stage
+// white-then-yellow ladder. The ladder existed to read as a hot flash cooling
+// back toward the body colour, which needed the flash to START at a brightness
+// the body could cool FROM. HIT_COL_FLASH is a hue rather than a brightness --
+// see the note in src/collision.asm -- so a second stage would only muddy the
+// one frame it occupied. The timing is unchanged: HIT_FLASH_TIME is 4, the
+// colour is held for three frames, and the fourth restores.
 // ---------------------------------------------------------------------------
 enemyFlashTick:
-    dec objTimer,x
-    lda objTimer,x
-    cmp #2
-    bcs !white+
-    cmp #1
-    beq !yellow+
-    jsr enemyBaseColour                 // expired: back to the spawn colour
-    rts
-!white:
-    lda #HIT_COL_WHITE
+    dec objTimer,x                      // DEC sets Z on the result, so the
+    beq !expired+                       // expiry test needs no reload
+    lda #HIT_COL_FLASH
     sta logCol,x
     rts
-!yellow:
-    lda #HIT_COL_YELLOW
-    sta logCol,x
-    rts
+!expired:
+    jmp enemyBaseColour                 // back to the spawn colour; its rts
+                                        // is ours, and X is preserved
 
 // ---------------------------------------------------------------------------
 // enemyDeathTick — one frame of dying. Entry/exit: X = slot, preserved.

@@ -31,6 +31,18 @@
 .const MUX_SLOTS      = 6
 .const MUX_LAST_SLOT  = MUX_FIRST_SLOT + MUX_SLOTS - 1     // 7
 
+// The mux's six slots as a bit per sprite, for the mode registers that take
+// one. Derived rather than written out, so raising MUX_SLOTS moves it.
+//
+// It is numerically EQUAL to HUD_ENABLE, and that is not a coincidence worth
+// hiding: the HUD and the gameplay mux time-share exactly the same six
+// hardware sprites, which is the whole reason the handoff at raster 40 exists.
+// They stay separate names because they answer different questions -- "which
+// slots does the mux own" and "which slots does the HUD switch on" -- and a
+// future HUD that used five of the six would break the equality without
+// breaking either meaning.
+.const MUX_SLOT_MASK  = ((1 << MUX_SLOTS) - 1) << MUX_FIRST_SLOT    // %11111100
+
 // --- what the player's two reserved slots require of everybody else ---------
 // HW0/HW1 are programmed once per frame by exHud and then left alone, so the
 // MODE registers the other phases write must leave the player's bits in the
@@ -41,10 +53,10 @@
 //
 // So it is asserted rather than relied upon. What the player needs:
 //   $d017 = 0 in bits 0/1   no Y expand      (both phases write $00 outright)
-//   $d01c = PLAYER_D01C      player HW0 is   (both phases write the same
-//                           multicolour,     value: the player is drawn
-//                           the mux hires    through both and its mode
-//                                            may not change at the handoff)
+//   $d01c = 1 in bits 0/1   the craft and    both phases set them; the phases
+//                           its muzzle       differ only in the MUX bits, so
+//                           flash are        the player's own mode is the same
+//                           multicolour      value at raster 4 and raster 40
 //   $d01d = 0 in bits 0/1   no X expand      HUD_D01D, and $00 at the handoff
 //   $d01b = 0 in bits 0/1   in front of the  HUD_D01B, and $00 at the handoff
 //                           playfield
@@ -56,6 +68,50 @@
 .if ((HUD_ENABLE & PLAYER_SLOT_MASK) != 0) { .error "the HUD's $d015 names a player slot" }
 .if ((HUD_D010 & PLAYER_SLOT_MASK) != 0) { .error "the HUD's $d010 names a player slot" }
 .if (MUX_FIRST_SLOT < 2) { .error "the gameplay mux has been given a slot reserved for the player" }
+
+// --- $d01c: SPRITE RESOLUTION IS A PER-PHASE DECISION ------------------------
+// ===========================================================================
+// $d01c is ONE register with a bit per hardware sprite, but HW2..HW7 are drawn
+// twice per frame by two different owners -- the HUD across rasters 17..37 and
+// the gameplay mux from raster 55 down -- and those two owners want OPPOSITE
+// answers for the same six bits.
+//
+//   GAMEPLAY WANTS MULTICOLOUR. Every gameplay sprite (the craft, its muzzle
+//   flash, enemies, hostile projectiles) is authored in multicolour and reads
+//   the shared SPR_MC_DARK/SPR_MC_LIGHT pair. Half the horizontal resolution
+//   buys a third and fourth colour per sprite, which for a 24x21 cell that has
+//   to read as a machine at speed is the better trade.
+//
+//   THE HUD WANTS HIRES, and must have it. Its six sprites are a lives row, a
+//   48-pixel heat bar composed of two adjacent sprites, and a six-digit score
+//   in an 8-pixel font -- all of which are one-colour line art whose whole
+//   legibility is horizontal resolution. Multicolour would halve the score
+//   font's width and merge its digits.
+//
+// THAT IS SAFE ONLY BECAUSE THE SPLIT IS TEMPORAL, NOT SPATIAL. The VIC reads
+// MxMC as it renders each sprite's pixels on each line, not once per frame, so
+// a write that lands between the HUD's last displayed line (37) and the mux's
+// first (55) is seen by the mux and not by the HUD. The handoff at raster 40 is
+// exactly that window, and it is already the phase whose entire job is handing
+// these six slots from one owner to the other. So the mode rides with them.
+//
+// The player's own two bits are set in BOTH values and never change: HW0/HW1
+// are outside the mux, are programmed once at raster 4, and are displayed
+// across the whole frame. A craft that changed resolution at raster 40 would
+// visibly switch half way down itself.
+.const D01C_HUD_PHASE = PLAYER_D01C                        // %00000011
+.const D01C_GAMEPLAY  = PLAYER_D01C | MUX_SLOT_MASK        // %11111111
+
+// The HUD phase must not leave a single one of its own slots in multicolour.
+// Asserted rather than trusted, in the same spirit as the four checks above:
+// the failure is not a crash but a score readout that has silently lost half
+// its horizontal resolution, which is the kind of thing that ships.
+.if ((D01C_HUD_PHASE & HUD_ENABLE) != 0) {
+    .error "the HUD phase's $d01c would draw a HUD sprite in multicolour"
+}
+.if ((D01C_GAMEPLAY & MUX_SLOT_MASK) != MUX_SLOT_MASK) {
+    .error "the gameplay phase's $d01c leaves a mux slot in hires"
+}
 
 // --- the reuse rule ---------------------------------------------------------
 // A VIC sprite with Y = n occupies rasters n .. n+20 (21 lines). The physical
@@ -1259,10 +1315,11 @@ exSetD018:
 // 59 -- through the raster-40 handoff and into the aperture. It is written to
 // zero here, explicitly, rather than left alone.
 //
-// $d025/$d026 are not written here because they are STATIC: the player is the
-// only multicolour sprite in the game and src/player.asm sets them once at
-// init. Every HUD sprite is still hires -- $d01c carries the player's bit 0
-// and nothing else. The HUD deliberately DOES dirty $d01b and
+// $d025/$d026 are not written here because they are STATIC: every multicolour
+// sprite in the game shares one shade and one white, and src/main.asm sets
+// them once at init beside the other global sprite modes. This phase leaves
+// the HUD's own six slots HIRES, so no sprite it programs reads them at all --
+// see D01C_HUD_PHASE. The HUD deliberately DOES dirty $d01b and
 // $d01d (see hud.asm), which is what makes the handoff's restoration a real
 // test rather than a vacuous one -- if the handoff forgot either register,
 // gameplay would inherit "behind graphics" and a double-width sprite.
@@ -1346,8 +1403,11 @@ plPtr1Store:
     sta $d010                           // 0/1, composed in a register
     lda #$00
     sta $d017                           // NEVER non-zero: see above
-    lda #PLAYER_D01C                    // the player's HW0 is MULTICOLOUR; every
-    sta $d01c                           // HUD and gameplay slot stays hires
+    lda #D01C_HUD_PHASE                 // the player's two slots multicolour,
+    sta $d01c                           // the HUD's six HIRES -- its score font
+                                        // and heat bar are line art and need
+                                        // every column. The handoff at raster
+                                        // 40 turns the six back on for the mux.
     lda #HUD_D01B
     sta $d01b
     lda #HUD_D01D
@@ -1388,12 +1448,13 @@ plPtr1Store:
 // GLOBAL sprite modes, which no batch writes.
 //
 // $d025/$d026, the shared multicolour registers, are deliberately NOT written
-// here. Every GAMEPLAY sprite is still hires -- $d01c is written with
-// PLAYER_D01C, which carries the player's bit 0 and no mux bit -- so no slot
-// this phase programs can read them. They are not unused any more, though:
-// the player's HW0 is multicolour and reads both, and because they are static
-// and it is the only multicolour sprite, src/player.asm writes them once at
-// init rather than either phase writing them every frame.
+// here -- but every slot this phase hands over now READS them, because
+// D01C_GAMEPLAY puts all six mux slots into multicolour. They are not written
+// per frame because they are STATIC: one shade and one white, shared by the
+// craft, the muzzle flash, every enemy and every hostile projectile, set once
+// at init in src/main.asm. A phase that rewrote them every frame would be
+// spending cycles restating a constant, and would invite the idea that a
+// sprite could have its OWN pair 01 -- which the hardware does not offer.
 //
 // $d015 is NOT written here either -- it is written after batch 0 has finished
 // programming the slots (see the arming tail). Enabling a slot before its Y is
@@ -1414,10 +1475,13 @@ exHandoff:
                                         // slot's lifetime at 21 lines
     sta $d01b                           // sprites in front of the playfield
     sta $d01d                           // no X expand: X is a 9-bit position
-    lda #PLAYER_D01C                    // ...and the SAME value as the HUD phase
-    sta $d01c                           // wrote: the player is drawn through
-                                        // both, so its mode may not change at
-                                        // the handoff. Gameplay stays hires.
+    lda #D01C_GAMEPLAY                  // EVERY gameplay sprite multicolour: the
+    sta $d01c                           // six mux slots this phase is handing
+                                        // over, plus the player's two, which
+                                        // keep the mode raster 4 gave them.
+                                        // This is the write the HUD's hires
+                                        // score font cannot see -- it is four
+                                        // rasters past the HUD's last line.
 
     lda #0
     sta curBatch                        // batch 0 is THIS phase's to run, and

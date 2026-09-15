@@ -58,11 +58,51 @@
 }
 
 // ---------------------------------------------------------------------------
-// The bitmap. One shared 8x8 dart, hires, used by every projectile.
+// The bitmap. One shared MULTICOLOUR bolt, used by every projectile.
 // ---------------------------------------------------------------------------
 // It sits directly after the enemy's bitmap because a sprite pointer is an
 // address divided by 64 and $36c0 is the next aligned slot. The guards below
 // pin it between the enemy bitmap and the blank charset.
+//
+// REDRAWN, NOT CONVERTED, and this is the one place in the engine where going
+// multicolour genuinely COST resolution. The old dart was eight hires pixels
+// of a single colour in byte 0; multicolour halves that to four double-width
+// pixels, and mechanically folding pairs of columns together would have left a
+// four-pixel smudge with no room for an edge. So the shape was drawn again for
+// the mode it now runs in, at the same eight screen pixels wide and the same
+// seven rows tall -- the hitbox constants above describe that footprint and are
+// unchanged.
+//
+// WHAT THE FOUR PIXELS BUY, given there are only four of them:
+//
+//     pair 01  SPR_MC_DARK   a dark-grey edge that CLOSES all the way round
+//     pair 11  SPR_MC_LIGHT  a white-hot core down the middle
+//     pair 10  EBULLET_COL   the yellow body, this sprite's own $d027
+//
+// The closed outline is the point. A hostile bolt has to be readable the
+// instant it appears, over terrain that is grey and white ($d021/$d022/$d023 =
+// 12/15/11) -- and a bare yellow blob loses its edge against the light grey
+// while a bare white one loses its core. The shade all the way round separates
+// it from the terrain, and the white core keeps it bright enough to read as
+// something hot rather than as a hole.
+//
+// The edge is dark grey, which is also the terrain's own $d023, so it is the
+// YELLOW that does the separating here and the edge that does the shaping.
+// That is why the bolt is drawn with a body colour at all rather than as a
+// white core in a dark shell.
+//
+//     ..KK..          K = pair 01, dark-grey edge
+//     KKYYKK          Y = pair 10, $d027 yellow
+//     KKWWKK          W = pair 11, white core
+//     KKWWKK
+//     KKWWKK
+//     KKYYKK
+//     ..KK..
+//
+// SYMMETRIC TOP TO BOTTOM on purpose. The old dart tapered, which read as a
+// direction -- and these are fired downward at the player but are also the
+// thing the player is dodging sideways, so an arrow shape implied a heading it
+// does not always have. A capsule reads as "ordnance" at any angle.
 .const EBULLET_SPRITE   = $36c0
 .const EBULLET_PTR      = EBULLET_SPRITE / 64
 
@@ -78,13 +118,13 @@
 
 * = EBULLET_SPRITE "projectile bitmap"
 ebulletBitmap:
-    .byte $3c,$00,$00
-    .byte $ff,$00,$00
-    .byte $ff,$00,$00
-    .byte $3c,$00,$00
-    .byte $3c,$00,$00
-    .byte $18,$00,$00
-    .byte $18,$00,$00
+    .byte $14,$00,$00               // ..KK..
+    .byte $69,$00,$00               // KKYYKK
+    .byte $7d,$00,$00               // KKWWKK
+    .byte $7d,$00,$00               // KKWWKK
+    .byte $7d,$00,$00               // KKWWKK
+    .byte $69,$00,$00               // KKYYKK
+    .byte $14,$00,$00               // ..KK..
     .byte $00,$00,$00
     .fill 39, $00
     .byte $00                           // the 64th byte the VIC never fetches

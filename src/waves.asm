@@ -789,8 +789,16 @@ waveSpawnMember:
     ldy wvDefBase
 
     // ---- presentation ------------------------------------------------------
-    lda #ENEMY_PTR
+    // THE SPIN'S CURRENT PHASE, not frame 0. A new enemy is spawned by waveTick
+    // AFTER objectUpdateAll has already run this frame, so its first enemyTick
+    // is a frame away -- seed it with frame 0 and it would show the wrong frame
+    // for that one frame and then snap into phase with every other ring. Asking
+    // the same routine enemyTick asks means it is simply born in step.
+    jsr enemyAnimPtr                    // A = this frame's pointer, X preserved
     sta logPtr,x
+    ldy wvDefBase                       // enemyAnimPtr does not touch Y, but the
+                                        // reload keeps this block readable as
+                                        // "Y indexes the wave definition"
     lda waveDefTable + 7,y
     sta logCol,x
     sta wmBaseCol,x                     // what a hit flash returns to

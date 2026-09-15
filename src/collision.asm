@@ -37,12 +37,49 @@
 .const HITBOX_W        = 24         // hit iff enemyX <= rayX <= enemyX+23
 .const HITBOX_X_OFF    = 0          // the box starts at logX itself
 .const SHOT_DAMAGE     = 1          // per cannon hit; enemies start at 6 HP
-.const HIT_FLASH_TIME  = 4          // frames of white flash on a survivable hit
+.const HIT_FLASH_TIME  = 4          // frames of flash on a survivable hit
 .const DEATH_TIME      = 12         // frames of explosion before the slot frees
 
-// Hit-flash and explosion colours, walked by enemyTick.
-.const HIT_COL_WHITE   = 1
-.const HIT_COL_YELLOW  = 7
+// ---------------------------------------------------------------------------
+// THE HIT FLASH, AND WHY IT IS PURPLE
+// ---------------------------------------------------------------------------
+// The flash writes logCol, which is the enemy's $d027 -- multicolour PAIR 10,
+// the body. It is the only one of the enemy's three colours that is per-sprite;
+// pair 01 and pair 11 are the shared SPR_MC_DARK/SPR_MC_LIGHT and belong to
+// every sprite on screen at once, so a flash CANNOT touch them. Whatever is
+// chosen here has to read as an impact while the dark-grey shading and the
+// white highlights stay exactly where they were.
+//
+// It used to be WHITE, which worked only while the enemy was hires: one colour
+// for the whole sprite meant white turned the entire thing white. In
+// multicolour that same write recolours the body to a white the highlights are
+// ALREADY drawn in, so the two merge, the shape loses its internal definition,
+// and the flash reads as the enemy smearing rather than being hit.
+//
+// So the colour was chosen by elimination against everything else on screen:
+//
+//     dark grey, white    pinned as the shared pair -- unavailable
+//     cyan, yellow,       the four authored wave colours: an enemy would
+//     light red,          flash to the colour it already is, which for that
+//     light green         wave is no flash at all
+//     yellow, orange, red the death ramp below -- a survivable hit must never
+//                         look like the start of an explosion
+//     grey, light grey,   the terrain's own three colours: the enemy would
+//     dark grey           flash INTO the background (and it is the shared
+//                         shading besides)
+//     light blue          the player's hull
+//     black, blue, brown  too dark or too muddy to read as a flash at all
+//
+// That leaves purple and green, and green is one step from the light-green
+// wave -- those enemies would barely register a hit. PURPLE is the only hue
+// that appears nowhere else in the game, which is exactly what a damage signal
+// wants: nothing on screen can be mistaken for it, whatever the enemy's own
+// colour happens to be.
+.const HIT_COL_FLASH   = 4          // purple: see above
+
+// The death ramp, walked by enemyDeathTick. Warm and descending -- a hot
+// initial blast cooling through orange to a red breakup -- which is what keeps
+// it distinguishable from the single cold flash above.
 .const DEATH_COL_1     = 7          // yellow initial blast
 .const DEATH_COL_2     = 8          // orange middle blast
 .const DEATH_COL_3     = 2          // red final breakup
@@ -271,7 +308,7 @@ applyDamage:
     // ---- a survivable hit: start the flash -------------------------------
     lda #HIT_FLASH_TIME
     sta objTimer,x
-    lda #HIT_COL_WHITE
+    lda #HIT_COL_FLASH
     sta logCol,x                        // LOGICAL colour. The renderer copies
                                         // it into the schedule and the executor
                                         // writes $d027-$d02e; gameplay never

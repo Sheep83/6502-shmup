@@ -35,9 +35,10 @@
 //   $2c00-$30ff   free
 //   $3100-$31ff   clip scratch, 4 blocks
 //   $3200-$357f   HUD sprite bitmaps (14 x 64), pointers $c8-$d5
-//   $3580-$363f   free (3 blocks) -- the player's two hires layers lived here
-//                 until the blue ship made it one multicolour sprite at $2000
-//   $3640-$367f   enemy bitmap
+//   $3580-$367f   ENEMY frames (4 x 64), pointers $d6-$d9: the Sonic Ring's
+//                 north/east/south/west rotation. Four ALIGNED AND ADJACENT
+//                 blocks, because the animation picks one by adding an index
+//                 to the first pointer. See src/enemy.asm and src/enemy_art.asm
 //   $3680-$36bf   clip scratch, 1 block
 //   $36c0-$36ff   hostile projectile bitmap
 //   $3700-$37ff   clip scratch, 4 blocks
@@ -158,6 +159,45 @@
 // must not be able to disagree with the raster that displays it.
 .const APERTURE_D021  = TERRAIN_BACKGROUND_COLOUR
 .const BORDER_D021    = 0               // the open top/bottom border. BLACK.
+
+// ---------------------------------------------------------------------------
+// THE SHARED MULTICOLOUR PAIR — $D025 / $D026
+// ---------------------------------------------------------------------------
+// A multicolour sprite draws four colours: transparent, $d025, its own
+// $d027+n, and $d026. TWO of those four are ONE register each for the whole
+// machine -- not one per sprite -- so every multicolour sprite in the game
+// necessarily agrees about them. There is no version of this where the craft
+// has one outline colour and an enemy has another.
+//
+// They live HERE, with the other engine-wide VIC constants, rather than in any
+// one sprite's file, because every gameplay sprite now reads them: the craft,
+// its muzzle flash, every enemy and every hostile projectile. They were the
+// player's while the player was the only multicolour sprite; they are not any
+// more, and a constant owned by a module that is merely the FIRST to use it is
+// how a shared resource ends up with a misleading name.
+//
+// DARK GREY AND WHITE. The dark is a SHADE, not an ink: it is there to sit
+// under a sprite's own colour as shadow and to part it from the background,
+// not to cartoon it. Dark grey rather than black is the canonical choice --
+// black gave every craft a hard graphic edge that read as sticker art against
+// the soft grey playfield, and the softer shade lets the sprite's own $d027 be
+// the thing the eye lands on.
+//
+// THE COST IS WORTH NAMING, because it is the one thing that could go wrong
+// here. The playfield is authored in greys ($d021 = 12, $d022 = 15, $d023 = 11
+// -- see src/level1/stage_config.asm), and $d023 is this exact colour, so a
+// sprite's shading and the terrain's darkest detail are drawn in the same ink.
+// Sprites stay legible because the SHADE is never the whole sprite: it is an
+// inner edge around a body drawn in the sprite's own colour, over a highlight
+// in white, and those two carry the silhouette. Take the body colour away --
+// as the death ramp very nearly does -- and this edge stops separating
+// anything.
+//
+// What each sprite keeps for itself is pair 10, its $d027+n -- which is why an
+// enemy can carry its wave's colour (wmBaseCol) and a projectile its own, while
+// sharing this pair with everything else on screen.
+.const SPR_MC_DARK    = 11              // $d025, pair 01: the shading/outline
+.const SPR_MC_LIGHT   = 1               // $d026, pair 11: the highlight
 
 // $D011 without the fine scroll: DEN=1, RSEL=0, RST8=0.
 // RSEL=0 (24 rows) is deliberate. Scrolling 25 matrix rows through a 24-row
@@ -285,10 +325,28 @@ entry:
     lda #$00
     sta $d020
     sta $d021
-    sta $d01c                           // all sprites hires
     sta $d017                           // no Y expand
     sta $d01d                           // no X expand
     sta $d01b                           // sprites in front
+
+    // ---- the global sprite mode and the shared multicolour pair -----------
+    // $d01c is set to the GAMEPLAY composition, not to zero. It is a defined
+    // pre-display state and nothing more: the renderer recomposes it twice per
+    // frame from raster 4 onwards (D01C_HUD_PHASE / D01C_GAMEPLAY), so this
+    // value survives only until the first exHud. It is written anyway because
+    // "whatever the register happened to hold at reset" is not a state this
+    // engine leaves anything in, and because the gameplay composition is the
+    // honest default now that every gameplay sprite is multicolour.
+    lda #D01C_GAMEPLAY
+    sta $d01c
+    // $d025/$d026 ARE the final word, though -- nothing writes them again.
+    // They are global to every sprite rather than owned by any one of them,
+    // which is why they are set here beside the other whole-machine sprite
+    // state instead of inside one subsystem's init.
+    lda #SPR_MC_DARK
+    sta $d025
+    lda #SPR_MC_LIGHT
+    sta $d026
 
     jsr clearCharset                    // MUST precede any display: it is both
                                         // the aperture mask and the idle byte

@@ -13,10 +13,14 @@ a pointer or a schedule:
   about the geometry the VIC is actually programmed with;
 * the entry's pointer names a SCRATCH block, and always one belonging to the
   pool that matches schedCurrent -- never the pool the main thread is filling;
-* the scratch bytes are the canonical enemy bitmap shifted by exactly the right
-  number of rows, with the off-aperture rows blank. This is checked against the
-  canonical art read out of the machine, at every clip amount observed, which
-  is what makes the row mapping a measurement rather than a claim;
+* the scratch bytes are ONE OF THE ENEMY'S ANIMATION FRAMES shifted by exactly
+  the right number of rows, with the off-aperture rows blank. This is checked
+  against all four frames read out of the machine, at every clip amount
+  observed, which is what makes the row mapping a measurement rather than a
+  claim. The frame is not pinned because the enemy spins: the clipper takes its
+  source from logPtr, so which frame it copies depends on when the sample
+  landed, and requiring a particular one would be testing the animation's phase
+  rather than the clipper's arithmetic;
 * clipping walks one row at a time and monotonically;
 * an enemy entirely outside the aperture is scheduled no entry and given no
   block;
@@ -36,6 +40,7 @@ MAX_OBJECTS, MAX_LOGICAL, MAX_SCHED = 16, 32, 24
 TYPE_ENEMY = 1
 MIN_SPRITE_Y, MAX_SPRITE_Y, SPRITE_H = 55, 226, 21
 CLIP_POOL_SLOTS = 6
+ENEMY_FRAMES = 4                # the enemy spins: four frames, any may be clipped
 POOL = [0x0340, 0x0380, 0x03c0, 0x3100, 0x3140, 0x3180,
         0x31c0, 0x3680, 0x3700, 0x3740, 0x3780, 0x37c0]
 PTR_OF = {a // 64: a for a in POOL}
@@ -59,9 +64,15 @@ def main():
 
         # The canonical art, read out of the machine: the clipped bytes below
         # are compared against THIS, not against a copy of the source list.
-        canon = rd(mon, sym["enemyBitmap"], 63)
-        check("the canonical enemy bitmap was read from the machine",
-              len(canon) == 63 and any(canon))
+        # ALL FOUR FRAMES -- the enemy animates, so the clipper's source is
+        # whichever frame logPtr named on the frame the sample was taken.
+        canon = [rd(mon, sym["sonicRingFrames"] + f * 64, 63)
+                 for f in range(ENEMY_FRAMES)]
+        check("all four enemy animation frames were read from the machine",
+              len(canon) == ENEMY_FRAMES
+              and all(len(c) == 63 and any(c) for c in canon))
+        check("...and they are four DISTINCT frames, not one repeated",
+              len({tuple(c) for c in canon}) == ENEMY_FRAMES)
 
         bp = set_bp(mon, sym["gameFrame"])
 
@@ -128,16 +139,22 @@ def main():
                         continue
 
                     blk = rd(mon, PTR_OF[sp[e]], 63)
-                    # Find the single shift that reproduces these bytes.
+                    # Find the single (frame, shift) that reproduces these
+                    # bytes. Any of the four frames is a legal source; what is
+                    # being measured is that the shift is exact and the blanked
+                    # rows are the right ones.
                     hit = None
                     for c in range(1, SPRITE_H):
                         vis, bl = (SPRITE_H - c) * 3, c * 3
-                        if edge_top:
-                            want = canon[bl:] + [0] * bl
-                        else:
-                            want = [0] * bl + canon[:vis]
-                        if blk == want:
-                            hit = c
+                        for src in canon:
+                            if edge_top:
+                                want = src[bl:] + [0] * bl
+                            else:
+                                want = [0] * bl + src[:vis]
+                            if blk == want:
+                                hit = c
+                                break
+                        if hit is not None:
                             break
                     if hit is None:
                         bad_bitmap.append((sid[e], sy[e], blk[:6]))
@@ -175,7 +192,7 @@ def main():
               top_ok >= WANT, f"{top_ok} entries")
         check("clipped entries were verified at the BOTTOM edge",
               bot_ok >= WANT, f"{bot_ok} entries")
-        check("every scratch bitmap is the canonical art shifted by exactly "
+        check("every scratch bitmap is one of the enemy's frames shifted by exactly "
               "the right rows, with the off-aperture rows blank",
               not bad_bitmap, f"{bad_bitmap[:3]}")
         check("every clipped entry is scheduled at the aperture boundary, not "
