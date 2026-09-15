@@ -25,11 +25,18 @@
 .const ENEMY_MAX_HP      = 6        // TYPE data: every enemy starts here, so
                                    // no per-object maximum is stored
 
-// The enemy bitmap goes in the last free 64-byte block of VIC bank 0, between
-// the player's art and the blank charset the aperture depends on.
-.const ENEMY_SPRITES     = PLAYER_SPRITES_END
-.const ENEMY_PTR         = ENEMY_SPRITES / 64
+// The enemy bitmap, in the run between the HUD/player pool and the blank
+// charset the aperture depends on.
+//
+// PINNED, NOT DERIVED. It used to be PLAYER_SPRITES_END, which was true and
+// self-maintaining for as long as the player sat immediately below it -- and
+// silently dragged this bitmap across the bank the day the player's art moved
+// to the reclaimed $2000 run. An address that follows an unrelated asset
+// around is not a memory map, so this one states where it is.
+.const ENEMY_SPRITES     = $3640
+.const ENEMY_PTR         = ENEMY_SPRITES / 64       // $d9
 .if ((ENEMY_SPRITES & 63) != 0) { .error "the enemy bitmap must be 64-byte aligned" }
+.if (ENEMY_SPRITES + 64 > BLANK_CHARSET) { .error "the enemy bitmap runs into the blank charset" }
 
 // ===========================================================================
 // LIFECYCLE BOUNDS — WHERE AN ENEMY MAY EXIST, NOT WHERE IT MAY BE SEEN
@@ -176,7 +183,7 @@ enyScratch:    .byte 0                  // enemyTick's one spare byte: the clip
                                         // arithmetic needs logY back after the
                                         // compare that classified it
 enyStateEnd:
-.if (enyStateEnd > $c520) { .error "the enemy state has grown into the player state at $c520" }
+.if (enyStateEnd > $c51a) { .error "the enemy state has grown into the player state at $c51a" }
 
 * = $4900 "enemy code"
 

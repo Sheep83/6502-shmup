@@ -112,7 +112,7 @@ VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 
 .PHONY: all build d64 test
 .PHONY: test-boot test-production test-turret-regression
-.PHONY: test-encounter-director test-flight-paths test-ingress-egress test-clip-scratch
+.PHONY: test-encounter-director test-player-ship test-flight-paths test-ingress-egress test-clip-scratch
 .PHONY: run run-d64 clean
 
 all: build
@@ -206,6 +206,7 @@ test: build
 	python3 tests/test_production.py
 	python3 tests/test_turret_regression.py
 	python3 tests/test_encounter_director.py
+	python3 tests/test_player_ship.py
 
 test-boot: build
 	python3 tests/test_boot.py
@@ -218,6 +219,9 @@ test-turret-regression: build
 
 test-encounter-director: build
 	python3 tests/test_encounter_director.py
+
+test-player-ship: build
+	python3 tests/test_player_ship.py
 
 # NON-DEFAULT ON PURPOSE. The composable-movement vocabulary (v1.1): stage
 # transitions, a three-stage path walked end to end, an arc and its mirror on

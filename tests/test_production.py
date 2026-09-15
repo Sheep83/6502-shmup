@@ -168,18 +168,57 @@ def main():
         # both deterministic and immune to host warp speed.
         JOY_RIGHT = 0b00001000           # active-low CIA convention, see
                                           # src/player.asm's JOY_RIGHT test
+        # BOTH ENDS SAMPLED AT THE SAME POINT IN THE FRAME. The first draft read
+        # x0 wherever the machine happened to be stopped and x1 at a gameFrame
+        # entry, so the two bracketed either four or five playerTick runs
+        # depending on whether the starting stop was before or after that
+        # frame's movement -- the same build measured dx 5 and then dx 4 on
+        # consecutive runs. Sampling x0 at a gameFrame entry too makes the
+        # interval exactly the number of frames stepped.
         poke(mon, sym["joyHold"], 1)
         poke(mon, sym["joyState"], 0xff & ~JOY_RIGHT)
-        x0 = rd(mon, sym["plyX"], 2)
+        # MEASURED AGAINST THE FRAME COUNTER, not against the number of steps
+        # requested. step_n guarantees DISTINCT frames, not CONSECUTIVE ones --
+        # under load the monitor can miss a stop, and an earlier draft that
+        # asserted "one pixel per step" duly failed with a delta of 0 and then
+        # of 2 on a machine whose movement was provably exactly one pixel a
+        # frame throughout. Carrying the frame number makes the interval
+        # self-describing and the assertion exact either way.
+        # A COHERENT SAMPLE, or none. frameCounter and plyX are two separate
+        # monitor commands, and `x` returns on a prompt echo rather than on the
+        # actual stop -- so on a machine that did not really halt, the pair can
+        # straddle a frame boundary and report plyX from before a move with the
+        # frame number from after it. That reads as a frame in which the player
+        # did not move, and it is the harness, not the game: the same build
+        # steps sixty frames with dx equal to the frames elapsed every time.
+        # Reading the frame number either side of plyX detects the straddle.
+        def coherent(tries=6):
+            for _ in range(tries):
+                f0 = rd(mon, sym["frameCounter"], 2)
+                x = rd(mon, sym["plyX"], 2)
+                f1 = rd(mon, sym["frameCounter"], 2)
+                if f0 == f1:
+                    return (f0, x)
+            return (f0, x)                  # give up; the check will show it
+
         bp = set_bp(mon, sym["gameFrame"])
-        step_n(mon, sym["frameCounter"], 5, lambda: None)
+        xs = step_n(mon, sym["frameCounter"], 6, coherent)
         mon.cmd(f"delete {bp}")
         mon.cmd("delete")
-        x1 = rd(mon, sym["plyX"], 2)
         poke(mon, sym["joyHold"], 0)
-        dx = (x1[0] | x1[1] << 8) - (x0[0] | x0[1] << 8)
+        fr = lambda s: s[0][0] | s[0][1] << 8
+        px = lambda s: s[1][0] | s[1][1] << 8
+        dframes = (fr(xs[-1]) - fr(xs[0])) & 0xffff
+        dx = px(xs[-1]) - px(xs[0])
         check("the player actually moves under real input",
-              dx == 5, f"{x0} -> {x1} (dx {dx})")
+              dx > 0, f"x {px(xs[0])} -> {px(xs[-1])} over {dframes} frames")
+        check("...at exactly one pixel per frame, the movement model's rate",
+              dx == dframes, f"moved {dx} px in {dframes} frames")
+        offenders = [(((fr(b) - fr(a)) & 0xffff), px(b) - px(a))
+                     for a, b in zip(xs, xs[1:])
+                     if px(b) - px(a) != ((fr(b) - fr(a)) & 0xffff)]
+        check("...on every single sampled interval", not offenders,
+              f"(frames, px) mismatches: {offenders}")
 
         # playerTakeHit is a self-contained state routine -- it sets plyInvuln
         # and increments plyHits and nothing else, with no dependency on frame
@@ -201,17 +240,32 @@ def main():
             rd1(mon, sym["plyInvuln"]), rd1(mon, sym["plyPresEnable"])))
         mon.cmd(f"delete {bp}")
         mon.cmd("delete")
+        # HW1 IS NO LONGER ALWAYS ON. It carries the muzzle flash now and is
+        # enabled only for the two frames after an accepted shot, so the legal
+        # values are "nothing", "the craft" and "the craft plus its flash".
+        # What must never appear is a bit outside the player's own two slots:
+        # that would mean the player had reached into the gameplay mux.
         illegal = [(i, p) for i, p in presence
-                   if p not in (0, PLAYER_SLOT_MASK)]
-        check("plyPresEnable is always 0 or both reserved slots -- "
-              "never a stray bit", not illegal, f"{illegal[:3]}")
+                   if p & ~PLAYER_SLOT_MASK & 0xff]
+        check("plyPresEnable never sets a bit outside the player's two slots",
+              not illegal, f"{illegal[:3]}")
+        # HW1 is an OVERLAY on the craft, so it can never be the only slot lit:
+        # any non-zero enable must include HW0. That is what makes "the player
+        # is hidden" a single test rather than two that could disagree.
+        orphan = [(i, bin(p)) for i, p in presence if p and not p & 0b1]
+        check("HW1 is never enabled without the craft it overlays",
+              not orphan, f"{orphan[:3]}")
         blinked = any(p == 0 for i, p in presence if i > 0)
         check("the player actually blinked while invulnerable "
               "(dark frames are the feature, not a fault)", blinked)
+        # SOLID NOW MEANS THE CRAFT'S OWN SLOT, not both. HW1 stopped being a
+        # permanently-enabled second layer when it became the muzzle flash: it
+        # is lit only for the two frames after an accepted shot, so a ship at
+        # rest ends the blink with HW0 alone.
         final_invuln, final_pres = presence[-1]
         check("invulnerability expired and the ship ended up SOLID",
-              final_invuln == 0 and final_pres == PLAYER_SLOT_MASK,
-              f"invuln {final_invuln} pres {final_pres}")
+              final_invuln == 0 and final_pres & 0b1,
+              f"invuln {final_invuln} pres {bin(final_pres)}")
 
         # --- G: renderer sanity, under this same ordinary load --------------
         print("\n--- G. renderer sanity (ordinary load, not re-certification) ---")

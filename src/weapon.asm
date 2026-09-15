@@ -130,14 +130,10 @@ weaponInit:
 // routine so that cross-frame relationship cannot be split apart.
 // ---------------------------------------------------------------------------
 weaponTick:
-    lda wpnCooldown                     // 1. the cadence, and the muzzle flash
+    lda wpnCooldown                     // 1. the cadence
     beq !noCd+
     dec wpnCooldown
 !noCd:
-    lda plyMuzzle
-    beq !noMuzzle+
-    dec plyMuzzle
-!noMuzzle:
 
     lda #0
     sta shotFired                       // true for one frame only, and only
@@ -237,9 +233,6 @@ weaponFire:
 
     lda #WPN_FIRE_PERIOD                // arm the cadence before resolving
     sta wpnCooldown                     // anything: this is what heats the gun
-    lda #PLAYER_MUZZLE_TIME
-    sta plyMuzzle                       // the player decides what that looks
-                                        // like; see playerEmit
 
     // ---- the shot event -------------------------------------------------
     // Both rays leave the ship on the same frame, at the same Y, one per

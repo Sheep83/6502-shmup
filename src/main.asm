@@ -27,12 +27,16 @@
 //   $1000-$1fff   CPU code only. The VIC sees the CHARACTER ROM here, so code
 //                 living there is invisible to it -- the stock C64
 //                 arrangement, not a trick. This is NOT VIC capacity.
-//   $2000-$27ff   free
+//   $2000-$217f   PLAYER bitmaps (6 x 64), pointers $80-$85: five multicolour
+//                 banking frames and one blank block for HW1. The only
+//                 multicolour sprite in the game; see src/player.asm.
+//   $2180-$27ff   free
 //   $2800-$2bff   screen page B          sprite pointers $2bf8-$2bff
 //   $2c00-$30ff   free
 //   $3100-$31ff   clip scratch, 4 blocks
 //   $3200-$357f   HUD sprite bitmaps (14 x 64), pointers $c8-$d5
-//   $3580-$363f   player bitmaps (3 x 64), pointers $d6-$d8
+//   $3580-$363f   free (3 blocks) -- the player's two hires layers lived here
+//                 until the blue ship made it one multicolour sprite at $2000
 //   $3640-$367f   enemy bitmap
 //   $3680-$36bf   clip scratch, 1 block
 //   $36c0-$36ff   hostile projectile bitmap
@@ -406,10 +410,10 @@ gameFrame:
     jsr weaponTick                      // cadence, heat, overheat, shot event
     jsr weaponHudFeed                   // real heat -> the HUD's logical heat
 
-    // AFTER weaponTick, and that ordering is the muzzle flash. weaponTick sets
-    // plyMuzzle when a volley resolves and playerEmit turns it into a pointer
-    // and a colour, so a shot fired this frame is published this frame rather
-    // than one frame late.
+    // AFTER weaponTick, and that ordering is the muzzle flash. weaponFire sets
+    // shotFired when a volley resolves and playerEmit turns it into a lit HW1,
+    // so a shot fired this frame is published this frame rather than one frame
+    // late.
     jsr playerEmit                      // -> plyPres, and plyDirty if it changed
 
     // ---- the logical object pool -----------------------------------------

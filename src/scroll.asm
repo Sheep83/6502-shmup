@@ -195,7 +195,14 @@ scrollStateEnd:
 // module out does not merely make room for the arithmetic, it HANDS BACK the
 // whole $1a00-$1bff hole to the subsystem that will actually need VIC-visible
 // space. The state moved out for the same reason a few lines above.
-* = $4200 "scroller"
+// $4300 AND NOT $4200. The scroller's own code is unchanged and its address is
+// arbitrary -- nothing outside this file names it, it is position-independent,
+// and it sits well outside VIC bank 0. It moved down one page to give the
+// PLAYER module the room its banking frames needed: five bank states times
+// three engine frames is more pointer arithmetic and more presentation state
+// than the 512 bytes below $4200 could hold. The scroller still has over 240
+// bytes of slack before the weapon at $4600.
+* = $4300 "scroller"
 
 // ===========================================================================
 // scrollInit — both pages built, page A displayed, frame 0 published.

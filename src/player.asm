@@ -44,47 +44,159 @@
 // Bit per slot, for $d015 and $d010. The renderer composes this into the
 // complete values it writes; nothing here touches a register.
 .const PLAYER_SLOT_MASK = %00000011                 // HW0 | HW1
+.const PLAYER_HW0_BIT   = %00000001                // the craft alone: HW1 is
+                                                   // only enabled while the
+                                                   // muzzle flash is running
 
 // --- bitmaps ----------------------------------------------------------------
-// Immediately after the HUD's pool and derived from it, so a HUD that grows
-// takes the player with it instead of silently overlapping. Pointers $d6/$d7:
-// disjoint from the gameplay pool ($80..$8f) and from the HUD's ($c8..$d5), so
-// a test can always tell which subsystem a pointer came from.
-.const PLAYER_SPRITES   = HUD_SPRITES_END           // $3580
-.const PLAYER_BLOCKS    = 3
-.const PLAYER_BASE_BMP  = PLAYER_SPRITES + 0 * 64
-.const PLAYER_TRIM_BMP  = PLAYER_SPRITES + 1 * 64
-.const PLAYER_FIRE_BMP  = PLAYER_SPRITES + 2 * 64
-.const PLAYER_SPRITES_END = PLAYER_SPRITES + PLAYER_BLOCKS * 64   // $3640
-.const PLAYER_PTR_FIRST = PLAYER_SPRITES / 64       // $d6
-.const PLAYER_PTR_BASE  = PLAYER_PTR_FIRST + 0
-.const PLAYER_PTR_TRIM  = PLAYER_PTR_FIRST + 1
-// The muzzle flash is a HULL-ONLY change: the firing bitmap differs from the
-// resting one on rows 0-2 and nowhere else, and every differing pixel is a hull
-// pixel. So the trim layer keeps PLAYER_PTR_TRIM and only the base pointer
-// moves, which costs ONE extra 64-byte block rather than two.
-.const PLAYER_PTR_FIRE  = PLAYER_PTR_FIRST + 2
+// SIX 64-byte blocks in the reclaimed $2000 VIC0 run: five banking frames and
+// one blank. The run is free capacity the bank surgery left behind, it is
+// 64-byte aligned at its start, and it is nowhere near the HUD pool, the
+// enemy art or the clip scratch -- so the pointers ($80..$85) are also
+// unmistakably the player's when read out of a debugger.
+//
+// FIVE FRAMES, HARD LEFT TO HARD RIGHT, IN BANK ORDER. Keeping them adjacent
+// and ordered is what lets playerEmit turn a signed lean into a pointer with
+// one add and no table.
+.const PLAYER_SPRITES   = $2000
+.const PLAYER_ENGINE_FRAMES = 3                     // flame full, small, out
+.const PLAYER_BANK_FRAMES   = 5                     // hard left .. hard right
+.const PLAYER_BLOCKS    = PLAYER_BANK_FRAMES * PLAYER_ENGINE_FRAMES + 1
+.const PLAYER_SPRITES_END = PLAYER_SPRITES + PLAYER_BLOCKS * 64   // $2400
+.const PLAYER_PTR_FIRST = PLAYER_SPRITES / 64       // $80
+// BANK-MAJOR: pointer = FIRST + bank * PLAYER_ENGINE_FRAMES + engine, with
+// bank 0..4 running hard left to hard right. Laying the grid out this way is
+// what lets playerEmit turn a signed lean and an engine phase into a pointer
+// with a shift and two adds.
+.const PLAYER_PTR_NEUTRAL = PLAYER_PTR_FIRST + 2 * PLAYER_ENGINE_FRAMES
+// HW1 DRAWS NOTHING, and points at 64 bytes of zero to do it. The craft is a
+// single multicolour sprite -- see the art note below -- so the second
+// reserved slot has no content of its own for the first time. It is kept
+// ENABLED and co-located rather than switched off, because every existing
+// invariant that mentions the player names both slots: PLAYER_SLOT_MASK, the
+// $d015 composition, the $d010 pair and the renderer's reservation. Leaving
+// the pair intact keeps this a presentation change and nothing else, and
+// leaves HW1 free for a muzzle-flash or detail overlay later.
+.const PLAYER_PTR_BLANK = PLAYER_PTR_FIRST + PLAYER_BLOCKS - 1
+
+// --- the muzzle flash, on HW1 ------------------------------------------------
+// FIVE blocks in the next free run above the ship's, one per banking attitude:
+// the supplied artwork leans its streak with the craft, so the flash is chosen
+// by the SAME bank index the hull is and needs no per-bank transformation of
+// its own. There is deliberately no engine/animation axis here -- the flash is
+// two frames long and both use one bitmap.
+.const PLAYER_FLASH_SPRITES = PLAYER_SPRITES_END        // $2400
+.const PLAYER_FLASH_FRAMES  = PLAYER_BANK_FRAMES        // 5, one per attitude
+.const PLAYER_FLASH_END     = PLAYER_FLASH_SPRITES + PLAYER_FLASH_FRAMES * 64
+.const PLAYER_PTR_FLASH     = PLAYER_FLASH_SPRITES / 64 // $90
+
+.if ((PLAYER_FLASH_SPRITES & 63) != 0) { .error "the muzzle flash blocks must be 64-byte aligned" }
+.if (PLAYER_FLASH_SPRITES < PLAYER_SPRITES_END) { .error "the muzzle flash overlaps the ship's own frames" }
+.if (PLAYER_FLASH_END > SCREEN_B) { .error "the muzzle flash runs past the free $2000 run into screen page B" }
 
 .if ((PLAYER_SPRITES & 63) != 0) { .error "the player sprite block must be 64-byte aligned" }
-.if (PLAYER_SPRITES < HUD_SPRITES_END) { .error "player bitmaps overlap the HUD bitmap pool" }
-.if (PLAYER_SPRITES + PLAYER_BLOCKS * 64 > BLANK_CHARSET) {
-    .error "player bitmaps run into the blank charset at $3800"
-}
+.if (PLAYER_SPRITES_END > SCREEN_B) { .error "player bitmaps run past the free $2000 run into screen page B" }
 .if (PLAYER_PTR_FIRST < HUD_PTR_FIRST + HUD_BLOCKS && PLAYER_PTR_FIRST + PLAYER_BLOCKS > HUD_PTR_FIRST) {
     .error "player and HUD sprite pointers overlap"
 }
 
 // --- colours ----------------------------------------------------------------
-// Two hires layers carry two colours. The silhouette is what a player
-// recognises and it is preserved exactly; the internal shading a multicolour
-// ship would have had is not available at all with $d01c forced to zero.
-.const PLAYER_COL_BASE  = 14                        // light blue hull
-.const PLAYER_COL_TRIM  = 15                        // light grey centre stripe
-                                                    // and exhaust
-// The HULL flashes red for the muzzle window and the trim keeps its colour:
-// flashing both layers reads as the whole ship changing colour rather than as
-// a gun firing.
-.const PLAYER_COL_MUZZLE = 2                        // red
+// THE CRAFT IS ONE MULTICOLOUR SPRITE, so it carries three colours at once:
+// two shared registers and its own. That is the artwork's native mode rather
+// than a choice -- see the art note below.
+//
+// $d025 and $d026 are GLOBAL to every sprite, and the player is the only
+// sprite in the game that is multicolour, so nothing else can read them and
+// they are written once at init. The renderer's own comment reserved them for
+// exactly this: "if gameplay ever enables multicolour for a slot, they join
+// this list on the same day."
+.const PLAYER_COL_SHIP   = 14                       // $d027, per sprite: the
+                                                    // light-blue hull
+.const PLAYER_MC_OUTLINE = 0                        // $d025, shared: black
+.const PLAYER_MC_WHITE   = 1                        // $d026, shared: white
+.const PLAYER_COL_BLANK  = 0                        // HW1 draws nothing
+
+// THE HULL NO LONGER REDDENS WHEN THE GUN FIRES. It used to: firing swapped
+// $d027 to red for PLAYER_MUZZLE_TIME frames, so the whole craft changed colour
+// on every shot. With the supplied muzzle-flash artwork now drawn at the guns
+// on HW1, that hull-wide tint was reading as the ship being hit rather than
+// firing, and it has been removed at the author's request. The gun flashes;
+// the craft does not.
+//
+// plyMuzzle, PLAYER_MUZZLE_TIME and the weapon's write to them went with it --
+// nothing else read that timer, so leaving it would have left a counter ticking
+// down for no reader. The flash on HW1 runs off shotFired and plyFlash and is
+// entirely separate; see below.
+
+// --- the muzzle flash's colour ----------------------------------------------
+// The flash artwork uses only bit pairs 10 and 11: pair 11 is the player's
+// existing shared WHITE ($d026) -- the white-hot core -- and pair 10 is HW1's
+// OWN colour ($d028), which nothing else reads. So the flash is a write to one
+// private register and the shared pair the craft depends on is never touched.
+//
+// Pair 01 ($d025, the craft's black outline) does not appear in the artwork at
+// all; asserted against the real bytes in tests/test_player_ship.py rather than
+// taken on trust.
+//
+// ONE COLOUR, HELD FOR BOTH FRAMES. An earlier version pulsed orange then red
+// across the two frames. The supplied bold artwork draws its own hot core in
+// the shared white and asks for a flat red underneath it, so the pulse is gone
+// and $d028 holds red for the whole flash. This is HW1's private register: the
+// craft's own $d027 is not touched by firing at all any more.
+.const PLAYER_COL_FLASH   = 2                       // red, both frames
+.const PLAYER_FLASH_TIME  = 2                       // visible PAL frames
+
+// How far above the craft HW1 sits. The supplied artwork is drawn for this
+// offset and no other: each frame carries TWO flares whose stems end exactly
+// one row above a wing-gun barrel of the matching banked craft, measured with
+// this lift applied. Change it and the flares leave the guns.
+.const PLAYER_FLASH_Y_LIFT = 7
+
+// --- $d01c: the two bits the player owns -------------------------------------
+// Bit per sprite, 1 = multicolour. BOTH of the player's slots now: HW0 carries
+// the craft and HW1 the muzzle flash, and the supplied flash artwork is
+// multicolour too. Every gameplay and HUD slot stays hires exactly as before --
+// bits 2..7 are clear, which is what keeps this a change to the player and not
+// to the mux. The guard below is what enforces that rather than a comment.
+//
+// HW1's bit is set permanently rather than toggled with the flash: a DISABLED
+// sprite's mode is not read by anything, so there is nothing to switch off and
+// no frame on which the two could disagree.
+.const PLAYER_D01C = %00000011
+.if ((PLAYER_D01C & ~PLAYER_SLOT_MASK) != 0) {
+    .error "only the player's own reserved slots may be switched to multicolour"
+}
+
+// --- banking ----------------------------------------------------------------
+// A signed lean, -PLAYER_BANK_MAX (hard left) to +PLAYER_BANK_MAX (hard
+// right), which indexes the five frames directly.
+//
+// WHY A LEAN COUNTER AND NOT THE STICK DIRECTLY. There is no horizontal
+// velocity in this game to bank from -- movement is one pixel per frame per
+// axis with no acceleration and no momentum (see playerTick), so the stick is
+// the only horizontal signal that exists. Reading it straight would snap the
+// craft between hard left and hard right on the frame the stick moved, and
+// would flicker on a diagonal. The counter walks one stage every
+// PLAYER_BANK_RATE frames instead, so the ship rolls into and out of a turn,
+// and a stick centred for one frame does not reset it -- which is the
+// momentum the movement model does not have, supplied by the presentation
+// rather than faked into the physics.
+// UNSIGNED 0..4, not a signed lean around zero. Hard left is 0, level flight
+// is 2, hard right is 4 -- which is also the frame's row in the bank-major
+// grid, so playerEmit multiplies it by three and adds the engine phase with no
+// sign handling and no temporary.
+.const PLAYER_BANK_LEFT    = 0
+.const PLAYER_BANK_NEUTRAL = 2
+.const PLAYER_BANK_RIGHT   = PLAYER_BANK_FRAMES - 1     // 4
+.const PLAYER_BANK_RATE    = 5                          // frames per stage
+
+// --- the engine flame -------------------------------------------------------
+// The three cells of a band differ ONLY in their bottom two rows -- the
+// exhaust full, small, then out -- so they are an animation to cycle rather
+// than more bank stages. Four frames a step gives a ~12 frame loop, which
+// reads as a flicker rather than a strobe and is nowhere near the PAL frame
+// rate the brief asked this to stay away from.
+.const PLAYER_ENGINE_RATE = 4                       // frames per flame step
 
 // --- the cannons ------------------------------------------------------------
 // Horizontal ray offsets from the player's sprite X. They are not arbitrary:
@@ -92,7 +204,6 @@
 // how the art and the hitscan stay agreed about where the guns are.
 .const PLAYER_CANNON_L  = 4
 .const PLAYER_CANNON_R  = 19
-.const PLAYER_MUZZLE_TIME = 3                       // frames the flash is held
 
 // --- taking a hit -----------------------------------------------------------
 // A hit costs the player an invulnerability window, during which the ship
@@ -123,6 +234,12 @@
 .const PLAYER_MIN_Y     = 55
 .const PLAYER_MAX_Y     = 226
 
+// The muzzle flash sits PLAYER_FLASH_Y_LIFT lines above the craft, and
+// playerEmit subtracts without a borrow check. This is what makes that safe.
+.if (PLAYER_MIN_Y < PLAYER_FLASH_Y_LIFT) {
+    .error "the player can fly high enough that the muzzle flash Y would borrow"
+}
+
 // X. The 24-pixel ship just touches the left and right side borders, which are
 // NOT opened (only the vertical border is), so it slides under the border edge
 // rather than past it.
@@ -147,7 +264,16 @@
 // ===========================================================================
 // State. Outside VIC bank 0, with everything else the main thread owns.
 // ===========================================================================
-* = $c520 "player state"
+// $c519 AND NOT $c520. The enemy state above ends at $c518 -- it shrank when
+// src/waves.asm took over spawning and left its cursor and timer behind -- so
+// six bytes sat unused between the two blocks. The banking and engine state
+// this slice adds spends two of them.
+//
+// PINNED, NOT DERIVED. It would be tidier-looking to write `* = enyStateEnd`
+// and never think about it again, and that is exactly the pattern that moved
+// the enemy BITMAP across VIC bank 0 when the player's art moved (see
+// src/enemy.asm). The guard below is what keeps the two honest instead.
+* = $c51a "player state"
 
 // --- logical state ----------------------------------------------------------
 // Deliberately small: position, the two timers that change how the ship looks,
@@ -159,11 +285,19 @@ plyVisible:  .byte 1                     // 0 hides the ship without changing it
                                          // position: the shape respawn blink and
                                          // the post-death hold will both need
 
-// Frames of muzzle flash left. Written by src/weapon.asm when a volley
-// resolves, counted down there too, and read by playerEmit below -- the ship's
-// ART is player presentation, so the weapon says "I fired" and the player
-// decides what that looks like.
-plyMuzzle:   .byte 0
+// --- banking presentation ---------------------------------------------------
+// Signed, -PLAYER_BANK_MAX..+PLAYER_BANK_MAX. Presentation only: nothing in
+// the movement, collision or weapon path reads either byte, which is what
+// makes this a change to how the ship LOOKS and not to how it flies.
+plyBank:     .byte PLAYER_BANK_NEUTRAL   // 0..4, hard left .. hard right
+plyBankTimer:.byte 0                     // frames until the lean may step
+plyEngine:   .byte 0                     // engine flame phase, 0..2
+plyEngineTimer: .byte 0                  // frames until the flame may step
+
+// The muzzle flash's whole state: visible frames remaining, PLAYER_FLASH_TIME
+// down to 0. Presentation only -- nothing in the weapon, collision or movement
+// path reads it, and the weapon does not know it exists.
+plyFlash:    .byte 0
 
 // Frames of invulnerability left. NON-ZERO IS THE WHOLE OF "cannot be hit":
 // src/ebullet.asm refuses to test a projectile against the ship while this is
@@ -228,96 +362,73 @@ playerStateEnd:
 .if (playerStateEnd > $c540) { .error "the player state has grown into the scroll state at $c540" }
 
 // ===========================================================================
-// The ship: multicolour source art, split into two hires layers at ASSEMBLY
-// time.
+// The ship: fifteen multicolour frames, straight from the sprite sheet.
 // ===========================================================================
-// $d01c is forced to zero by exHud and again by exHandoff, so every sprite is
-// hires. The source bitmaps below are multicolour and are split by one rule:
+// WHAT THE ARTWORK IS, established from the pixels rather than assumed:
 //
-//     multicolour pair 10          -> LAYER 0, the hull
-//     multicolour pairs 01 and 11  -> LAYER 1, the trim
-//     pair 00                      -> transparent in both
+//   * THREE COLOURS PLUS TRANSPARENT -- a black outline, a medium-blue hull
+//     and white highlights -- in cells twelve pixels wide. A hires sprite
+//     carries ONE colour, so no pair of overlaid hires sprites can express
+//     three; twelve pixels and three colours is exactly one C64 MULTICOLOUR
+//     sprite (12 double-width pixels = 24 screen px). Multicolour is the
+//     artwork's native mode and ONE sprite is its native composition, which is
+//     why the craft stopped being two hires layers.
+//   * THE SHEET'S ROWS ARE BANKING. The neutral band is mirror-symmetric to
+//     the pixel; the other two lean progressively LEFT -- in both, the right
+//     wingtip rides high while the left drops. The sheet draws one direction,
+//     so the right-hand banks are horizontal mirrors.
+//   * THE SHEET'S COLUMNS ARE THE ENGINE. The three cells of a band differ
+//     only in their bottom two rows: the exhaust flame full, small, then out.
 //
-// A multicolour pixel is two hires pixels wide at the same bit position, so
-// the split preserves the SHAPE exactly -- same 24x21 cell, same silhouette,
-// same proportions. The two layers are disjoint by construction (each pair
-// goes to exactly one), which is what lets them be drawn as two co-located
-// sprites without either punching a hole in the other.
+// Five bank states times three engine frames is fifteen blocks, plus one
+// blank for HW1.
 //
-// The visible result: a light-blue hull with a continuous light-grey stripe
-// from the nose, down the fuselage, out through the two exhaust flames. The
-// exhausts are the two rows that exist ONLY on the overlay, so a frame that
-// lost HW1 is obvious at a glance rather than subtly wrong.
-.var playerMC = List()
-.eval playerMC.add($00,$28,$00,  $00,$28,$00,  $00,$aa,$00,  $00,$be,$00)
-.eval playerMC.add($02,$be,$80,  $02,$be,$80,  $0a,$be,$a0,  $0a,$96,$a0)
-.eval playerMC.add($2a,$96,$a8,  $2a,$96,$a8,  $aa,$96,$aa,  $aa,$96,$aa)
-.eval playerMC.add($2a,$96,$a8,  $2a,$aa,$a8,  $0a,$96,$a0,  $0a,$96,$a0)
-.eval playerMC.add($0a,$82,$a0,  $02,$82,$80,  $02,$82,$80,  $03,$c3,$c0)
-.eval playerMC.add($03,$c3,$c0)
-
-.if (playerMC.size() != 21 * 3) { .error "the player source bitmap must be 21 rows of 3 bytes" }
-
-// The firing ship. It differs from the resting one on rows 0, 1 and 2 only --
-// four muzzle blocks at the nose, two per cannon -- and every differing pixel
-// is pair 10, the hull, which is why only a hull layer is emitted from it.
-.var playerFireMC = List()
-.eval playerFireMC.add($08,$28,$20,  $02,$28,$80,  $08,$aa,$20,  $00,$be,$00)
-.eval playerFireMC.add($02,$be,$80,  $02,$be,$80,  $0a,$be,$a0,  $0a,$96,$a0)
-.eval playerFireMC.add($2a,$96,$a8,  $2a,$96,$a8,  $aa,$96,$aa,  $aa,$96,$aa)
-.eval playerFireMC.add($2a,$96,$a8,  $2a,$aa,$a8,  $0a,$96,$a0,  $0a,$96,$a0)
-.eval playerFireMC.add($0a,$82,$a0,  $02,$82,$80,  $02,$82,$80,  $03,$c3,$c0)
-.eval playerFireMC.add($03,$c3,$c0)
-
-.if (playerFireMC.size() != 21 * 3) { .error "the firing source bitmap must be 21 rows of 3 bytes" }
-
-// Which multicolour pair values a layer keeps, as a bit per pair value.
-.const PLY_SEL_HULL = (1 << 2)                      // pair 10
-.const PLY_SEL_TRIM = (1 << 1) | (1 << 3)           // pairs 01 and 11
-
-// One multicolour byte (four pairs) to one hires byte, keeping only the pairs
-// `sel` names and expanding each kept pair to both of its pixels.
-.function plyLayerByte(b, sel) {
-    .var v = 0
-    .for (var p = 0; p < 4; p++) {
-        .var sh = 6 - 2 * p
-        .var pair = (b >> sh) & 3
-        .if (pair != 0 && ((sel >> pair) & 1) != 0) { .eval v = v | (3 << sh) }
-    }
-    .return v
-}
-
-// One emitter, three blocks: resting hull, trim, firing hull. The trim block
-// serves both the resting and the firing ship because the two source bitmaps
-// have identical trim pixels -- asserted below rather than assumed.
-.var plyBlocks = List()
-.eval plyBlocks.add(List().add(0, PLY_SEL_HULL))    // $d6  resting hull
-.eval plyBlocks.add(List().add(0, PLY_SEL_TRIM))    // $d7  trim, shared
-.eval plyBlocks.add(List().add(1, PLY_SEL_HULL))    // $d8  firing hull
-
-.for (var r = 0; r < 21 * 3; r++) {
-    .if (plyLayerByte(playerMC.get(r), PLY_SEL_TRIM)
-         != plyLayerByte(playerFireMC.get(r), PLY_SEL_TRIM)) {
-        .error "the firing bitmap changes a TRIM pixel, so it needs its own trim block"
-    }
-}
-
+// READ BY PALETTE INDEX, NOT RGB. The sheet has TWO black entries -- index 0,
+// the opaque black these outlines are drawn in, and index 255, the
+// transparency key, which is also (0,0,0). Opening it as RGB merges the two
+// and turns every outline pixel into background.
+//
+// The bytes live in src/player_art.asm, generated by tools/gen_player_ship.py
+// straight from the PNG and verified against it pixel for pixel. The assembler
+// reads the generated file; the build runs no converter and the game has no
+// runtime dependency on one.
 * = PLAYER_SPRITES "player bitmaps"
 playerBitmaps:
-.for (var b = 0; b < PLAYER_BLOCKS; b++) {
-    .var src = plyBlocks.get(b).get(0)
-    .var sel = plyBlocks.get(b).get(1)
-    .for (var r = 0; r < 21; r++) {
-        .for (var c = 0; c < 3; c++) {
-            .var byte = (src == 0) ? playerMC.get(r * 3 + c) : playerFireMC.get(r * 3 + c)
-            .byte plyLayerByte(byte, sel)
-        }
-    }
-    .byte $00                                       // 64th padding byte
-}
+#import "player_art.asm"
+
+// The blank sixteenth of the allocation: HW1's bitmap, and the block a real
+// muzzle-flash overlay would occupy if one is ever drawn for this ship.
+playerBlankBitmap:
+    .fill 64, 0
+
 playerBitmapsEnd:
 .if (playerBitmapsEnd - playerBitmaps != PLAYER_BLOCKS * 64) {
     .error "player bitmaps must be exactly PLAYER_BLOCKS x 64 bytes"
+}
+
+// ---------------------------------------------------------------------------
+// The muzzle flash: five supplied multicolour sprites, one per banking
+// attitude, in the same bank order as the craft's own frames.
+//
+// src/player_muzzle_flash.asm is SUPPLIED ARTWORK and is checked in exactly as
+// delivered -- no tool generates it and nothing here rewrites it. Its own
+// header documents the pixel semantics this file relies on: pair 10 is HW1's
+// private colour and pair 11 the player's shared white, and pair 01 is never
+// used, so lighting the flash cannot disturb the black the craft's outline
+// depends on.
+// ---------------------------------------------------------------------------
+* = PLAYER_FLASH_SPRITES "player muzzle flash"
+playerFlashBitmaps:
+#import "player_muzzle_flash.asm"
+playerFlashBitmapsEnd:
+.if (playerFlashBitmapsEnd - playerFlashBitmaps != PLAYER_FLASH_FRAMES * 64) {
+    .error "the muzzle flash must be exactly PLAYER_FLASH_FRAMES x 64 bytes"
+}
+.if (playerFlashBitmaps != PLAYER_PTR_FLASH * 64) {
+    .error "the muzzle flash is not where PLAYER_PTR_FLASH points"
+}
+.if (playerBlankBitmap != PLAYER_PTR_BLANK * 64) {
+    .error "the blank block is not where PLAYER_PTR_BLANK points"
 }
 
 // ===========================================================================
@@ -350,7 +461,22 @@ playerInit:
     sta plyVisible
     sta plyDirty
     lda #0
-    sta plyMuzzle
+    sta plyBankTimer
+    sta plyEngine                       // flame at full
+    sta plyEngineTimer
+    sta plyFlash                        // no shot, no flash
+    lda #PLAYER_BANK_NEUTRAL            // level flight
+    sta plyBank
+
+    // THE TWO SHARED MULTICOLOUR REGISTERS, written once and never again.
+    // They are global to every sprite, and the player is the only multicolour
+    // sprite in the game, so there is nothing to schedule and nothing that can
+    // dirty them. See the colour note at the top of this file.
+    lda #PLAYER_MC_OUTLINE
+    sta $d025
+    lda #PLAYER_MC_WHITE
+    sta $d026
+
     lda #JOY_MASK
     sta joyState                        // nothing pressed until the first read
     lda #0
@@ -446,8 +572,84 @@ playerInvulnTick:
 // system, or by a test poking the machine -- can leave the ship outside the
 // range the renderer is promised.
 // ---------------------------------------------------------------------------
+// playerBankTick — one frame of the banking lean. PRESENTATION ONLY.
+//
+// Walks plyBank one stage towards where the stick is pointing, no faster than
+// one stage every PLAYER_BANK_RATE frames. It reads joyState and writes
+// plyBank and its timer, and nothing else: no position, no velocity, no
+// clamp, no weapon. Removing this routine would change how the ship looks and
+// nothing about how it flies.
+//
+// THE DEAD-BAND IS THE TIMER, not a threshold. There is no horizontal velocity
+// to compare against zero -- the stick is either held or it is not -- so the
+// twitch this has to avoid is the stick being centred for a frame or two
+// during a direction change or on a diagonal. A lean that takes five frames
+// to move one stage simply does not notice that, and rolls back out over the
+// same five frames per stage when the stick really is released.
+// ---------------------------------------------------------------------------
+playerBankTick:
+    // ---- the engine flame, on its own clock -------------------------------
+    // Independent of the lean: the exhaust flickers whether or not the craft
+    // is turning, so the two cadences do not share a timer.
+    lda plyEngineTimer
+    beq !flameStep+
+    dec plyEngineTimer
+    jmp !flameDone+
+!flameStep:
+    lda #PLAYER_ENGINE_RATE - 1
+    sta plyEngineTimer
+    ldx plyEngine
+    inx
+    cpx #PLAYER_ENGINE_FRAMES
+    bcc !flameStore+
+    ldx #0
+!flameStore:
+    stx plyEngine
+!flameDone:
+
+    lda plyBankTimer                    // not yet time to move a stage
+    beq !due+
+    dec plyBankTimer
+    rts
+!due:
+    // ---- where does the stick want the ship to be leaning? ----------------
+    // Active low, so a CLEAR bit is a held direction. Left wins a
+    // simultaneous left+right, which the hardware allows and a worn stick
+    // produces: the alternative is a frame of level flight in the middle of a
+    // turn.
+    ldx #PLAYER_BANK_NEUTRAL
+    lda joyState
+    and #JOY_LEFT
+    bne !notLeft+
+    ldx #PLAYER_BANK_LEFT
+    jmp !haveTarget+
+!notLeft:
+    lda joyState
+    and #JOY_RIGHT
+    bne !haveTarget+
+    ldx #PLAYER_BANK_RIGHT
+!haveTarget:
+
+    // ---- one stage towards it --------------------------------------------
+    // Unsigned, so the direction is a plain carry test.
+    cpx plyBank
+    beq !settled+                       // already there: leave the timer at
+                                        // zero so the next change is immediate
+    lda #PLAYER_BANK_RATE
+    sta plyBankTimer
+    bcc !stepDown+                      // target < current
+    inc plyBank
+    rts
+!stepDown:
+    dec plyBank
+!settled:
+    rts
+
+// ---------------------------------------------------------------------------
 playerTick:
     jsr playerInvulnTick
+    jsr playerBankTick                  // presentation only; reads joyState,
+                                        // writes plyBank, touches no position
 
     lda plyX                            // remember the position we came in with,
     sta pt_x                            // so the dirty test below is exact
@@ -568,27 +770,89 @@ playerEmit:
     sta plyPresX1
     lda plyY
     sta plyPresY0
+    // HW1 SITS SEVEN LINES ABOVE THE CRAFT. The flash artwork draws its two
+    // flares low in its own block so that, lifted by this much, each one lands
+    // on a wing-gun barrel of the craft underneath -- the registration is the
+    // artwork's, and this offset is the half of it that lives in code.
+    // plyY can never be below PLAYER_MIN_Y, so the subtraction cannot borrow --
+    // asserted at assembly time rather than guarded at run time.
+    sec
+    sbc #PLAYER_FLASH_Y_LIFT
     sta plyPresY1
     // THE MUZZLE FLASH IS A PRESENTATION CHOICE, MADE HERE.
     //
-    // The weapon sets plyMuzzle and knows nothing else about how a shot looks.
-    // Swapping the base pointer and the hull colour for those frames goes out
-    // through the block the renderer already publishes, so firing costs no new
-    // sprite, no new slot and no renderer change -- and the block compare at
-    // the bottom of this routine notices it without being told.
-    ldx #PLAYER_PTR_BASE
-    ldy #PLAYER_COL_BASE
-    lda plyMuzzle
-    beq !resting+
-    ldx #PLAYER_PTR_FIRE
-    ldy #PLAYER_COL_MUZZLE
-!resting:
-    stx plyPresPtr0
-    sty plyPresCol0
-    lda #PLAYER_PTR_TRIM
-    sta plyPresPtr1
-    lda #PLAYER_COL_TRIM
+    // The weapon announces shotFired and knows nothing else about how a shot
+    // looks. Turning that into a lit sprite goes out through the block the
+    // renderer already publishes, so firing costs no new slot and no renderer
+    // change -- and the block compare at the bottom of this routine notices it
+    // without being told.
+    // ---- HW0: which banking frame, and in which colour --------------------
+    // THE POINTER COMES FROM THE LEAN, THE COLOUR FROM THE MUZZLE, and the two
+    // are independent by construction. The five frames are adjacent and in
+    // bank order, so a signed lean of -2..+2 becomes a pointer with one add.
+    // frame = FIRST + bank * ENGINE_FRAMES + engine, and ENGINE_FRAMES is 3,
+    // so the multiply is one shift and one add of the value itself.
+    lda plyBank                         // 0..4
+    asl                                 // 2n
+    clc
+    adc plyBank                         // 3n
+    clc
+    adc plyEngine
+    clc
+    adc #PLAYER_PTR_FIRST
+    sta plyPresPtr0
+
+    // THE HULL COLOUR IS NOW CONSTANT. Firing used to redden it; it does not
+    // any more, and the craft's only colour changes are the ones taking a hit
+    // causes. The muzzle flash is HW1's business alone, below.
+    lda #PLAYER_COL_SHIP
+    sta plyPresCol0
+
+    // ---- HW1: the muzzle flash --------------------------------------------
+    // THE TRIGGER IS shotFired, AND THAT IS THE POINT. It is set by weaponFire
+    // only on a shot the weapon actually ACCEPTED -- past the overheat test,
+    // past the cooldown, with the cadence already armed -- and weaponTick
+    // clears it at the top of every frame. playerEmit runs after weaponTick in
+    // gameFrame, so it sees this frame's event and no other.
+    //
+    // Reading the fire BUTTON here instead would flash every frame the trigger
+    // was held, at sixty a second, for shots the weapon refused. The weapon's
+    // cadence, heat and lockout are untouched by any of this: nothing below
+    // writes one byte the weapon owns.
+    lda shotFired
+    beq !noNewShot+
+    lda #PLAYER_FLASH_TIME
+    sta plyFlash
+!noNewShot:
+
+    lda plyFlash
+    beq !dark+
+
+    // ONE COLOUR FOR THE WHOLE FLASH. The count still decides WHETHER HW1 is
+    // lit, but no longer what colour it is: the artwork carries its own bright
+    // core in the shared white, so $d028 just holds red underneath it for both
+    // frames. No branch on the count, and the same bitmap for both frames.
+    lda #PLAYER_COL_FLASH
     sta plyPresCol1
+
+    // The flash leans with the craft: one frame per banking attitude, in the
+    // same bank order as the hull, so the bank index selects both.
+    lda plyBank                         // 0..4
+    clc
+    adc #PLAYER_PTR_FLASH
+    sta plyPresPtr1
+
+    jmp !hw1Done+
+
+!dark:
+    // No flash: HW1 points at the blank block and is switched off below. The
+    // pointer is still written so the published block is a pure function of
+    // the state, never a leftover from the last shot.
+    lda #PLAYER_PTR_BLANK
+    sta plyPresPtr1
+    lda #PLAYER_COL_BLANK
+    sta plyPresCol1
+!hw1Done:
 
     // $d010. Both layers share one X, so their two bits always agree -- but
     // both are written from the same test rather than one being copied from the
@@ -600,12 +864,32 @@ playerEmit:
 !noMsb:
     sta plyPresD010
 
+    // $d015. HW0 whenever the craft is visible; HW1 ONLY while the flash is
+    // running, so an idle player costs no second sprite and nothing is ever
+    // enabled over the blank block.
+    //
+    // The invulnerability blink still gates BOTH, because it gates this test:
+    // a blinking ship that kept flashing would be the one frame where the
+    // player is invisible and their gun is not.
     lda #0
     ldy plyVisible
+    beq !hidden+
+    lda #PLAYER_HW0_BIT
+    ldy plyFlash                        // the count for the frame JUST emitted
     beq !hidden+
     lda #PLAYER_SLOT_MASK
 !hidden:
     sta plyPresEnable
+
+    // ...AND ONLY NOW IS THE FRAME SPENT. The count is decremented after the
+    // enable above has read it, not when the pointer and colour were chosen:
+    // doing it there emitted the red frame and then disabled the sprite for
+    // it in the same pass, so the sting was one frame long and the second
+    // never appeared.
+    lda plyFlash
+    beq !flashSpent+
+    dec plyFlash
+!flashSpent:
 
     // ---- did the block change? ------------------------------------------
     ldx #PLY_PRES_BYTES - 1

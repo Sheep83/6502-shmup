@@ -41,7 +41,10 @@
 //
 // So it is asserted rather than relied upon. What the player needs:
 //   $d017 = 0 in bits 0/1   no Y expand      (both phases write $00 outright)
-//   $d01c = 0 in bits 0/1   hires            (both phases write $00 outright)
+//   $d01c = PLAYER_D01C      player HW0 is   (both phases write the same
+//                           multicolour,     value: the player is drawn
+//                           the mux hires    through both and its mode
+//                                            may not change at the handoff)
 //   $d01d = 0 in bits 0/1   no X expand      HUD_D01D, and $00 at the handoff
 //   $d01b = 0 in bits 0/1   in front of the  HUD_D01B, and $00 at the handoff
 //                           playfield
@@ -1256,8 +1259,10 @@ exSetD018:
 // 59 -- through the raster-40 handoff and into the aperture. It is written to
 // zero here, explicitly, rather than left alone.
 //
-// $d025/$d026 are not written because they cannot be read: $d01c is forced to
-// zero, so every HUD sprite is hires. The HUD deliberately DOES dirty $d01b and
+// $d025/$d026 are not written here because they are STATIC: the player is the
+// only multicolour sprite in the game and src/player.asm sets them once at
+// init. Every HUD sprite is still hires -- $d01c carries the player's bit 0
+// and nothing else. The HUD deliberately DOES dirty $d01b and
 // $d01d (see hud.asm), which is what makes the handoff's restoration a real
 // test rather than a vacuous one -- if the handoff forgot either register,
 // gameplay would inherit "behind graphics" and a double-width sprite.
@@ -1341,7 +1346,8 @@ plPtr1Store:
     sta $d010                           // 0/1, composed in a register
     lda #$00
     sta $d017                           // NEVER non-zero: see above
-    sta $d01c                           // hires, so $d025/$d026 are unreachable
+    lda #PLAYER_D01C                    // the player's HW0 is MULTICOLOUR; every
+    sta $d01c                           // HUD and gameplay slot stays hires
     lda #HUD_D01B
     sta $d01b
     lda #HUD_D01D
@@ -1381,10 +1387,13 @@ plPtr1Store:
 // code path for programming a slot and not two. The registers below are the
 // GLOBAL sprite modes, which no batch writes.
 //
-// $d025/$d026, the shared multicolour registers, are deliberately NOT written.
-// $d01c is forced to 0 here, so every gameplay sprite is hires and cannot read
-// them; they are unreachable rather than merely unused. If gameplay ever
-// enables multicolour for a slot, they join this list on the same day.
+// $d025/$d026, the shared multicolour registers, are deliberately NOT written
+// here. Every GAMEPLAY sprite is still hires -- $d01c is written with
+// PLAYER_D01C, which carries the player's bit 0 and no mux bit -- so no slot
+// this phase programs can read them. They are not unused any more, though:
+// the player's HW0 is multicolour and reads both, and because they are static
+// and it is the only multicolour sprite, src/player.asm writes them once at
+// init rather than either phase writing them every frame.
 //
 // $d015 is NOT written here either -- it is written after batch 0 has finished
 // programming the slots (see the arming tail). Enabling a slot before its Y is
@@ -1404,8 +1413,11 @@ exHandoff:
     sta $d017                           // no Y expand: the reuse rule sizes a
                                         // slot's lifetime at 21 lines
     sta $d01b                           // sprites in front of the playfield
-    sta $d01c                           // all gameplay sprites hires
     sta $d01d                           // no X expand: X is a 9-bit position
+    lda #PLAYER_D01C                    // ...and the SAME value as the HUD phase
+    sta $d01c                           // wrote: the player is drawn through
+                                        // both, so its mode may not change at
+                                        // the handoff. Gameplay stays hires.
 
     lda #0
     sta curBatch                        // batch 0 is THIS phase's to run, and
