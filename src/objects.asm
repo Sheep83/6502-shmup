@@ -148,6 +148,13 @@ objectZeroSlot:
                                         // otherwise hand its successor a
                                         // clamped Y and a scratch bitmap on its
                                         // first frame, before enemyTick ran.
+    sta enySpecies,x                    // ...NOR WHICH ENEMY IT WAS. A slot
+                                        // freed by a Dropper and handed to a
+                                        // Ring would otherwise animate through
+                                        // the Dropper's frames until its
+                                        // spawner overwrote this -- and a
+                                        // future species with BEHAVIOUR
+                                        // attached would inherit that too.
     // ...NOR ITS TRAJECTORY. src/movement.asm's per-object arrays are indexed
     // by this same slot and merely live elsewhere in memory, this block having
     // run up against the collision state at $c5f3. The clearing belongs HERE:

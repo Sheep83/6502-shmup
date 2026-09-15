@@ -15,12 +15,13 @@ a pointer or a schedule:
   pool that matches schedCurrent -- never the pool the main thread is filling;
 * the scratch bytes are ONE OF THE ENEMY'S ANIMATION FRAMES shifted by exactly
   the right number of rows, with the off-aperture rows blank. This is checked
-  against all four frames read out of the machine, at every clip amount
-  observed, which is what makes the row mapping a measurement rather than a
-  claim. The frame is not pinned because the enemy spins: the clipper takes its
-  source from logPtr, so which frame it copies depends on when the sample
-  landed, and requiring a particular one would be testing the animation's phase
-  rather than the clipper's arithmetic;
+  against every frame of BOTH enemy species read out of the machine, at every
+  clip amount observed, which is what makes the row mapping a measurement
+  rather than a claim. Neither the frame nor the species is pinned: the clipper
+  takes its source from logPtr, so what it copies depends on which kind of
+  enemy was clipped and when the sample landed. Requiring a particular one
+  would be testing the animation's phase and the wave schedule rather than the
+  clipper's arithmetic;
 * clipping walks one row at a time and monotonically;
 * an enemy entirely outside the aperture is scheduled no entry and given no
   block;
@@ -40,7 +41,13 @@ MAX_OBJECTS, MAX_LOGICAL, MAX_SCHED = 16, 32, 24
 TYPE_ENEMY = 1
 MIN_SPRITE_Y, MAX_SPRITE_Y, SPRITE_H = 55, 226, 21
 CLIP_POOL_SLOTS = 6
-ENEMY_FRAMES = 4                # the enemy spins: four frames, any may be clipped
+# The longest run of identical logY a LEGALLY MOVING clipped enemy can show.
+# Velocity is in quarter pixels, so the slowest non-zero speed advances logY
+# once every four frames; anything longer than that means it is not moving.
+LOGY_HOLD_MAX = 5
+ENEMY_FRAMES = 4                # frames per species...
+SPECIES = ("sonicRingFrames", "orbitalDropperFrames")   # ...and two species now,
+                                # either of which may be the one being clipped
 POOL = [0x0340, 0x0380, 0x03c0, 0x3100, 0x3140, 0x3180,
         0x31c0, 0x3680, 0x3700, 0x3740, 0x3780, 0x37c0]
 PTR_OF = {a // 64: a for a in POOL}
@@ -64,15 +71,21 @@ def main():
 
         # The canonical art, read out of the machine: the clipped bytes below
         # are compared against THIS, not against a copy of the source list.
-        # ALL FOUR FRAMES -- the enemy animates, so the clipper's source is
-        # whichever frame logPtr named on the frame the sample was taken.
-        canon = [rd(mon, sym["sonicRingFrames"] + f * 64, 63)
-                 for f in range(ENEMY_FRAMES)]
-        check("all four enemy animation frames were read from the machine",
-              len(canon) == ENEMY_FRAMES
+        # EVERY FRAME OF EVERY SPECIES -- enemies animate AND there are two
+        # kinds of them now, so the clipper's source is whichever frame of
+        # whichever species logPtr named when the sample was taken.
+        canon = [rd(mon, sym[s] + f * 64, 63)
+                 for s in SPECIES for f in range(ENEMY_FRAMES)]
+        check("every animation frame of both enemy species was read from the "
+              "machine",
+              len(canon) == len(SPECIES) * ENEMY_FRAMES
               and all(len(c) == 63 and any(c) for c in canon))
-        check("...and they are four DISTINCT frames, not one repeated",
-              len({tuple(c) for c in canon}) == ENEMY_FRAMES)
+        # The Dropper ping-pongs through a frame twice per cycle, so its frames
+        # need only be distinct WITHIN a species, not across the whole set.
+        for s, name in enumerate(SPECIES):
+            grp = canon[s * ENEMY_FRAMES:(s + 1) * ENEMY_FRAMES]
+            check(f"...{name} is {ENEMY_FRAMES} DISTINCT frames, not one repeated",
+                  len({tuple(c) for c in grp}) == ENEMY_FRAMES)
 
         bp = set_bp(mon, sym["gameFrame"])
 
@@ -82,6 +95,7 @@ def main():
         runs = {}           # slot -> list of successive clip amounts
         mono_bad = []
         logy_frozen = []
+        frozen_run = {}       # slot -> [logY, clip, consecutive samples]
         hidden_scheduled = []
         used_max = 0
         seen_frames = 0
@@ -108,11 +122,31 @@ def main():
 
             # TRUE Y IS UNTOUCHED: a clipped enemy is one whose logY is outside
             # the admission band, and it must keep moving while clamped.
-            if prev is not None:
-                for i in live:
-                    if clips[i] and prev[0][i] == TYPE_ENEMY and prev[2][i]:
-                        if ys[i] == prev[1][i] and clips[i] == prev[2][i]:
-                            logy_frozen.append((i, ys[i]))
+            #
+            # MEASURED OVER A WINDOW, NOT FRAME TO FRAME. Velocity is in QUARTER
+            # pixels (src/movement.asm), so logY legitimately holds the same
+            # value for several frames while the sub-pixel accumulator fills --
+            # at the slowest legal non-zero speed, one quarter-pixel a frame,
+            # it advances once every four. The S-turn does exactly this as it
+            # crosses the top boundary: its first arc has unwound the heading to
+            # 5 or 6 by then, which is vy=3, so logY holds for two frames at a
+            # time at precisely the Y values that are clipped.
+            #
+            # Comparing consecutive frames therefore flags ordinary motion. What
+            # is actually being tested is that a clamped enemy is not FROZEN, so
+            # the run of identical logY is bounded instead: longer than any legal
+            # velocity could produce means vy is genuinely zero.
+            for i in live:
+                if clips[i]:
+                    run = frozen_run.get(i)
+                    if run and run[0] == ys[i] and run[1] == clips[i]:
+                        run[2] += 1
+                        if run[2] > LOGY_HOLD_MAX:
+                            logy_frozen.append((i, ys[i], run[2]))
+                    else:
+                        frozen_run[i] = [ys[i], clips[i], 1]
+                else:
+                    frozen_run.pop(i, None)
 
             if any(clips[i] for i in live):
                 cur = rd1(mon, sym["schedCurrent"])

@@ -478,16 +478,43 @@
 // The period is 48+4+38+36 = 126 coarse rows, about twenty seconds.
 .var trigDelta = List().add(48, 4, 38, 36)
 .var trigDef   = List().add(WAVE_DEF_SWEEP, WAVE_DEF_S, WAVE_DEF_LINGER, WAVE_DEF_LOOP)
+
+// WHICH ENEMY THE WAVE IS MADE OF, and it is an AUTHORED COLUMN rather than
+// arithmetic on the cursor. Every member of one wave is the same species; the
+// next authored wave is the other one.
+//
+// A third parallel column rather than `cursor AND 1` because the alternation is
+// CONTENT, not a rule. Written down, it can be read at a glance, it survives
+// someone inserting a fifth trigger (which `AND 1` would silently invert for
+// every wave after it), and the day a particular pattern should always be
+// Droppers it is one byte here rather than a special case in the director.
+.var trigSpecies = List().add(SPECIES_RING, SPECIES_DROPPER,
+                              SPECIES_RING, SPECIES_DROPPER)
 .const WAVE_TRIGGERS = 4
 
-.if (trigDelta.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS) {
-    .error "the trigger list is not WAVE_TRIGGERS entries on both axes"
+.if (trigDelta.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS
+     || trigSpecies.size() != WAVE_TRIGGERS) {
+    .error "the trigger list is not WAVE_TRIGGERS entries on every axis"
 }
 .for (var t = 0; t < WAVE_TRIGGERS; t++) {
     .if (trigDelta.get(t) < 1) {
         .error "a trigger delta of zero would fire every frame for ever"
     }
     .if (trigDef.get(t) >= WAVE_DEFS) { .error "a trigger names a wave definition that does not exist" }
+    // Membership, not a range: a species value is its animation ROW OFFSET
+    // rather than a 0..n-1 index, so "less than the count" would be wrong.
+    .if (trigSpecies.get(t) != SPECIES_RING && trigSpecies.get(t) != SPECIES_DROPPER) {
+        .error "a trigger names a species that does not exist"
+    }
+}
+// THE ALTERNATION ITSELF IS CHECKED, including across the wrap -- the list
+// repeats for ever, so the last entry's neighbour is the first. This is the
+// assertion that makes "every other wave is a Dropper" a property of the build
+// rather than of someone having counted carefully.
+.for (var t = 0; t < WAVE_TRIGGERS; t++) {
+    .if (trigSpecies.get(t) == trigSpecies.get(mod(t + 1, WAVE_TRIGGERS))) {
+        .error "two consecutive authored waves use the same enemy species"
+    }
 }
 
 // ===========================================================================
@@ -507,6 +534,15 @@ wvDef:     .fill WAVE_SLOTS, 0      // which definition it is playing
 wvLeft:    .fill WAVE_SLOTS, 0      // members still to send
 wvTimer:   .fill WAVE_SLOTS, 0      // frames until the next member
 wvIndex:   .fill WAVE_SLOTS, 0      // members sent so far: drives xStep
+wvSpecies: .fill WAVE_SLOTS, 0      // which enemy this instance is made of,
+                                    // copied from the authored trigger column
+                                    // when the wave was armed. Held per
+                                    // INSTANCE rather than read from the
+                                    // trigger cursor at spawn time because the
+                                    // cursor has already moved on: a wave
+                                    // sends its members over many frames, and
+                                    // the next trigger may fire before the
+                                    // last of them is out.
 
 // --- the director ------------------------------------------------------------
 wvNextTrig:  .byte 0                // cursor into the trigger list
@@ -623,6 +659,11 @@ waveStartNext:
     ldy wvNextTrig
     lda waveTrigDef,y
     sta wvDef,x
+    lda waveTrigSpecies,y               // the authored species, latched onto the
+    sta wvSpecies,x                     // INSTANCE now. The cursor advances at
+                                        // the bottom of this routine, so this is
+                                        // the last moment it still names the
+                                        // wave being armed.
 
     // The member count comes from the definition, so a wave that is armed is
     // armed completely: nothing below can leave it half-configured.
@@ -789,16 +830,24 @@ waveSpawnMember:
     ldy wvDefBase
 
     // ---- presentation ------------------------------------------------------
-    // THE SPIN'S CURRENT PHASE, not frame 0. A new enemy is spawned by waveTick
-    // AFTER objectUpdateAll has already run this frame, so its first enemyTick
-    // is a frame away -- seed it with frame 0 and it would show the wrong frame
-    // for that one frame and then snap into phase with every other ring. Asking
-    // the same routine enemyTick asks means it is simply born in step.
+    // SPECIES FIRST, because the frame depends on it. The instance's authored
+    // species is COPIED onto the object here and never consulted again: from
+    // this instruction on the enemy owns its own identity, and the instance
+    // slot behind it may be freed and re-armed by a different authored wave
+    // without touching it.
+    ldy wvInst
+    lda wvSpecies,y
+    sta enySpecies,x
+
+    // THE ANIMATION'S CURRENT PHASE, not step 0. A new enemy is spawned by
+    // waveTick AFTER objectUpdateAll has already run this frame, so its first
+    // enemyTick is a frame away -- seed it with step 0 and it would show the
+    // wrong frame for that one frame and then snap into phase with every other
+    // enemy. Asking the same routine enemyTick asks means it is born in step.
     jsr enemyAnimPtr                    // A = this frame's pointer, X preserved
     sta logPtr,x
-    ldy wvDefBase                       // enemyAnimPtr does not touch Y, but the
-                                        // reload keeps this block readable as
-                                        // "Y indexes the wave definition"
+    ldy wvDefBase                       // enemyAnimPtr clobbers Y, so the wave
+                                        // definition index is reloaded here
     lda waveDefTable + 7,y
     sta logCol,x
     sta wmBaseCol,x                     // what a hit flash returns to
@@ -913,9 +962,11 @@ waveTrigDelta:
 .for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigDelta.get(t) }
 waveTrigDef:
 .for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigDef.get(t) }
+waveTrigSpecies:
+.for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigSpecies.get(t) }
 waveTrigEnd:
-.if (waveTrigEnd - waveTrigDelta != 2 * WAVE_TRIGGERS) {
-    .error "the trigger table is not two bytes per trigger"
+.if (waveTrigEnd - waveTrigDelta != 3 * WAVE_TRIGGERS) {
+    .error "the trigger table is not three bytes per trigger"
 }
 
 .if (* > $8000) { .error "the wave code has outgrown its $7c00 segment" }

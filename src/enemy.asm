@@ -25,52 +25,112 @@
 .const ENEMY_MAX_HP      = 6        // TYPE data: every enemy starts here, so
                                    // no per-object maximum is stored
 
-// The enemy's four animation frames, in the run between the HUD pool and the
-// clip scratch block at $3680.
+// ===========================================================================
+// ENEMY SPECIES — the one thing that distinguishes the two enemies
+// ===========================================================================
+// The animation's step count has to be named before the species are, because a
+// species' value is derived from it. The cadence itself is documented further
+// down, beside ENEMY_ANIM_SHIFT.
+.const ENEMY_ANIM_STEPS  = 8        // steps in a full animation sequence
+
+// There are two enemy PRESENTATIONS and, so far, exactly one enemy BEHAVIOUR.
+// The species byte is what says which artwork an object wears, and it is a
+// stored, explicit value rather than something inferred.
 //
-// PINNED, NOT DERIVED. It used to be PLAYER_SPRITES_END, which was true and
-// self-maintaining for as long as the player sat immediately below it -- and
-// silently dragged this bitmap across the bank the day the player's art moved
-// to the reclaimed $2000 run. An address that follows an unrelated asset
-// around is not a memory map, so this one states where it is.
+// NOTHING MAY DERIVE SPECIES FROM ANYTHING ELSE -- not the sprite pointer, not
+// the colour, not the wave slot, not the position, not the movement mode, not
+// the object index. Every one of those is either reused, authored per wave, or
+// changed by gameplay, and a species read out of one of them would flip under
+// a maintainer who had no reason to suspect it. The byte exists so that when
+// the Dropper eventually grows behaviour of its own -- token drops -- there is
+// something to branch on that was true at spawn and stays true.
 //
-// FOUR CONSECUTIVE BLOCKS, AND THE ORDER IS LOAD-BEARING. The animation adds a
-// frame index to ENEMY_PTR_FIRST and stores the result straight into logPtr,
-// so the frames must be adjacent and in rotation order -- see enemyAnimPtr.
-// $3580 is the only run in the bank where four aligned blocks are free and
-// contiguous: it is the three blocks the player's old hires layers vacated,
-// plus the one the single placeholder bitmap used to occupy.
+// TWO VALUES, AND NO FRAMEWORK. There is no type table, no vtable, no
+// per-species stat block, because there is no second BEHAVIOUR to hang off one
+// yet. When there is, this constant is what it indexes.
+//
+// THE VALUE OF A SPECIES IS ITS ROW IN THE ANIMATION TABLE, which is why
+// SPECIES_DROPPER is 8 and not 1. enemyAnimPtr runs once per enemy per frame
+// and composes its table index as `step OR species`; a species that is already
+// a row offset makes that a single ORA straight out of memory, where a 0/1
+// species would need a shift or a branch on the hottest per-enemy path there
+// is. Everything else treats these as opaque identities -- compare against the
+// CONSTANT, never against a literal, and nothing has to know.
+.const SPECIES_RING      = 0 * ENEMY_ANIM_STEPS     // the Sonic Ring
+.const SPECIES_DROPPER   = 1 * ENEMY_ANIM_STEPS     // the Orbital Dropper
+.const SPECIES_COUNT     = 2
+
+// --- where each species' frames live -----------------------------------------
+// PINNED, NOT DERIVED. An address that follows an unrelated asset around is not
+// a memory map, so each of these states where it is and asserts it.
+//
+// FOUR CONSECUTIVE BLOCKS EACH, AND THE ORDER IS LOAD-BEARING. The animation
+// turns a step into a POINTER through a table of absolute pointer values, and
+// those tables are written as "first + n" -- so the frames of a species must be
+// adjacent and in the authored order. The label assertions below are what make
+// reordering an art file a build error rather than a scrambled animation.
+//
+// The Ring sits in the run between the HUD pool and the clip scratch block at
+// $3680: the three blocks the player's old hires layers vacated, plus the one
+// the original single placeholder bitmap occupied. The Dropper takes the first
+// four blocks of the large free run at $2c00.
 .const ENEMY_SPRITES     = $3580
 .const ENEMY_FRAMES      = 4                        // north, east, south, west
 .const ENEMY_PTR_FIRST   = ENEMY_SPRITES / 64       // $d6; frames are $d6..$d9
-.if ((ENEMY_SPRITES & 63) != 0) { .error "the enemy frames must be 64-byte aligned" }
+
+.const DROPPER_SPRITES   = $2c00
+.const DROPPER_FRAMES    = 4                        // wide, f-right, f, f-left
+.const DROPPER_PTR_FIRST = DROPPER_SPRITES / 64     // $b0; frames are $b0..$b3
+
+.if ((ENEMY_SPRITES & 63) != 0) { .error "the Ring frames must be 64-byte aligned" }
+.if ((DROPPER_SPRITES & 63) != 0) { .error "the Dropper frames must be 64-byte aligned" }
 .if (ENEMY_SPRITES + ENEMY_FRAMES * 64 > BLANK_CHARSET) {
-    .error "the enemy frames run into the blank charset"
+    .error "the Ring frames run into the blank charset"
 }
 .if (ENEMY_SPRITES < HUD_SPRITES_END) {
-    .error "the enemy frames overlap the HUD bitmap pool"
+    .error "the Ring frames overlap the HUD bitmap pool"
+}
+// The Dropper sits in the $2c00 free run, between screen page B below it and
+// the clip scratch at $3100 above.
+.if (DROPPER_SPRITES < SCREEN_B + $400) {
+    .error "the Dropper frames overlap screen page B"
+}
+.if (DROPPER_SPRITES + DROPPER_FRAMES * 64 > $3100) {
+    .error "the Dropper frames run into the clip scratch at $3100"
 }
 
 // --- the animation cadence ---------------------------------------------------
-// ENEMY_ANIM_SHIFT frames of hold per step, so a full rotation takes
-// ENEMY_FRAMES << ENEMY_ANIM_SHIFT displayed frames -- 32 at these values,
-// which is 0.64 s of PAL. Fast enough that the specular clearly travels round
-// the rim, slow enough that it reads as a spin rather than a flicker.
+// ENEMY_ANIM_SHIFT frames of hold per step, and ENEMY_ANIM_STEPS steps in the
+// sequence a species walks -- so a full cycle is 64 displayed frames, 1.28 s of
+// PAL. Fast enough to read as motion, slow enough not to flicker.
 //
 // A SHIFT RATHER THAN A TIMER, and that is what makes this cost no state at
 // all: the phase is derived from the renderer's free-running frameCounter
 // instead of being counted. See enemyAnimPtr.
 .const ENEMY_ANIM_SHIFT  = 3                        // 1 << 3 = 8 frames a step
 
-// THE LOW BYTE OF frameCounter MUST CONTAIN A WHOLE NUMBER OF CYCLES, or the
-// animation would stutter once every 256 frames when that byte wraps mid-step.
-// 256 / 32 = 8 exactly here. This is the assertion that lets enemyAnimPtr read
-// one byte and ignore the high one.
-.if (mod(256, ENEMY_FRAMES << ENEMY_ANIM_SHIFT) != 0) {
-    .error "a frameCounter low-byte wrap would land mid-cycle and stutter the spin"
+// EIGHT STEPS FOR A FOUR-FRAME ANIMATION, and the spare four are what let a
+// species choose its own path through its frames. The Ring simply rotates
+// twice; the Dropper ping-pongs. See ENEMY_ANIM_SEQ below.
+//
+// WHY EIGHT AND NOT SIX. The Dropper's natural ping-pong is six steps --
+// 0,1,2,3,2,1 -- but six can never divide the 256-frame wrap of frameCounter's
+// low byte, because 6 has a factor of 3 and 256 is a power of two. A six-step
+// sequence would therefore jog by one step every 256 frames, for ever. Eight
+// steps divides cleanly, and the two spare steps are spent DWELLING at the two
+// turnarounds, which is what a satellite crossing a sphere actually does: it
+// appears to slow and reverse at the extremes and to move fastest through the
+// middle. The alternative -- six steps plus a byte of counter state and a
+// once-per-frame tick -- buys strict uniformity of dwell at the cost of the
+// stateless design, and looks worse rather than better.
+.if (mod(256, ENEMY_ANIM_STEPS << ENEMY_ANIM_SHIFT) != 0) {
+    .error "a frameCounter low-byte wrap would land mid-cycle and jog the animation"
 }
-.if ((ENEMY_FRAMES & (ENEMY_FRAMES - 1)) != 0) {
-    .error "ENEMY_FRAMES must be a power of two: the phase is masked, not compared"
+.if ((ENEMY_ANIM_STEPS & (ENEMY_ANIM_STEPS - 1)) != 0) {
+    .error "ENEMY_ANIM_STEPS must be a power of two: the phase is masked, not compared"
+}
+.if (SPECIES_COUNT != 2) {
+    .error "the species values are animation row offsets: adding a third means extending the table and this check"
 }
 
 // ===========================================================================
@@ -159,37 +219,80 @@
 //     pair 10   $d027+n              -- THIS enemy's own colour
 //     pair 11   $d026, SPR_MC_LIGHT  -- shared white, the highlights
 //
-// PAIR 10 IS WHY EVERY ENEMY CAN STILL LOOK DIFFERENT. It is the only one of
-// the three that is per-sprite, and the ring's rim accent is drawn in it, so
-// wmBaseCol's authored wave colour still reaches the screen exactly as it did
-// when the enemy was a single placeholder bitmap. The animation changes which
-// FRAME is shown; it never touches logCol.
+// PAIR 10 IS WHY EVERY ENEMY CAN STILL LOOK DIFFERENT, AND IT IS WHY A SECOND
+// SPECIES COSTS THE COLOUR ARCHITECTURE NOTHING. It is the only one of the
+// three that is per-sprite. On the Ring it draws the rim accent; on the
+// Dropper it draws the satellites. Either way the authored wave colour in
+// wmBaseCol reaches the screen through exactly the path it always did, and
+// neither species needs a colour of its own. The animation changes which FRAME
+// is shown; it never touches logCol.
 //
-// NOTHING ABOUT CLIPPING CHANGES. src/clip.asm shifts whole ROWS of three
-// bytes when an enemy straddles an aperture edge; it never looks inside a byte,
-// so a multicolour row clips exactly as a hires one did. It takes its source
-// from logPtr, so it follows the animation to whichever frame is live without
-// knowing the enemy is animated at all.
+// NOTHING ABOUT CLIPPING CHANGES, FOR EITHER SPECIES. src/clip.asm shifts whole
+// ROWS of three bytes when an enemy straddles an aperture edge; it never looks
+// inside a byte, and it takes its source address from logPtr. So it follows
+// whichever species and whichever frame is live without knowing either exists.
 * = ENEMY_SPRITES "enemy frames"
 #import "enemy_art.asm"                 // sonicRingFrames, four 64-byte frames
 
-// The names the rest of the engine knew this art by, kept pointing at the same
-// things they always meant: the first frame's bytes, and the address the art
-// ends at. src/ebullet.asm places the projectile above enemyBitmapEnd.
+* = DROPPER_SPRITES "dropper frames"
+#import "enemy_dropper_art.asm"         // orbitalDropperFrames, four frames
+
+// The names the rest of the engine knew the Ring's art by, kept pointing at the
+// same things they always meant: the first frame's bytes, and the address that
+// art ends at. src/ebullet.asm places the projectile above enemyBitmapEnd.
 .label enemyBitmap    = sonicRing_north
 .label enemyBitmapEnd = sonicRingFramesEnd
 
 .if (sonicRingFramesEnd - sonicRingFrames != ENEMY_FRAMES * 64) {
-    .error "the enemy art is not ENEMY_FRAMES blocks of 64 bytes"
+    .error "the Ring art is not ENEMY_FRAMES blocks of 64 bytes"
 }
-// THE FRAMES MUST BE IN ROTATION ORDER AND ADJACENT, because enemyAnimPtr
-// selects one by adding an index to ENEMY_PTR_FIRST rather than by looking up
-// a table. Checked against the labels themselves so that reordering the art
-// file is a build error rather than a scrambled spin.
-.if (sonicRing_north != ENEMY_SPRITES + 0 * 64) { .error "frame 0 is not north" }
-.if (sonicRing_east  != ENEMY_SPRITES + 1 * 64) { .error "frame 1 is not east"  }
-.if (sonicRing_south != ENEMY_SPRITES + 2 * 64) { .error "frame 2 is not south" }
-.if (sonicRing_west  != ENEMY_SPRITES + 3 * 64) { .error "frame 3 is not west"  }
+.if (orbitalDropperFramesEnd - orbitalDropperFrames != DROPPER_FRAMES * 64) {
+    .error "the Dropper art is not DROPPER_FRAMES blocks of 64 bytes"
+}
+// THE FRAMES MUST BE ADJACENT AND IN THE AUTHORED ORDER, because the sequence
+// tables below are written as "first + n" rather than as a list of addresses.
+// Checked against the labels themselves so that reordering an art file is a
+// build error rather than a scrambled animation.
+.if (sonicRing_north != ENEMY_SPRITES + 0 * 64) { .error "Ring frame 0 is not north" }
+.if (sonicRing_east  != ENEMY_SPRITES + 1 * 64) { .error "Ring frame 1 is not east"  }
+.if (sonicRing_south != ENEMY_SPRITES + 2 * 64) { .error "Ring frame 2 is not south" }
+.if (sonicRing_west  != ENEMY_SPRITES + 3 * 64) { .error "Ring frame 3 is not west"  }
+.if (orbitalDropper_0_wide        != DROPPER_SPRITES + 0 * 64) { .error "Dropper frame 0 is not wide" }
+.if (orbitalDropper_1_front_right != DROPPER_SPRITES + 1 * 64) { .error "Dropper frame 1 is not front-right" }
+.if (orbitalDropper_2_front       != DROPPER_SPRITES + 2 * 64) { .error "Dropper frame 2 is not front" }
+.if (orbitalDropper_3_front_left  != DROPPER_SPRITES + 3 * 64) { .error "Dropper frame 3 is not front-left" }
+
+// ===========================================================================
+// PER-OBJECT SPECIES. MAIN THREAD ONLY.
+// ===========================================================================
+// One byte per POOL SLOT, written at spawn and then never again for that
+// object's life. That is the whole of the type system, and the placement is
+// what gives it the property that matters:
+//
+//     ONCE SPAWNED, AN ENEMY'S SPECIES IS STABLE FOR ITS LIFETIME.
+//
+// It is stored on the OBJECT and not looked up through the wave that made it,
+// because wave INSTANCES are a pool of two slots that are recycled: an enemy
+// routinely outlives the instance that spawned it, and that slot is then
+// re-armed by a different authored wave. An enemy that asked "what species is
+// my wave?" would change appearance mid-flight the moment the next trigger
+// reused its slot. Copying the byte at spawn severs that link entirely.
+//
+// It lives in the hole between the clip state and the enemy state rather than
+// in the object pool's own block, because that block ends at $c5f2 and the
+// collision state begins at $c5f3 -- there is no room there for another
+// sixteen-byte array, and growing into a neighbour is exactly the silent
+// overwrite the segment guards exist to prevent.
+//
+// objectZeroSlot clears it with the rest of the slot, so a reused slot cannot
+// inherit the previous occupant's species. That is the pool's invariant and
+// this array is subject to it like every other per-object field.
+* = $c500 "enemy species"
+enySpecies:    .fill MAX_OBJECTS, 0     // SPECIES_RING or SPECIES_DROPPER
+enySpeciesEnd:
+.if (enySpeciesEnd > $c517) {
+    .error "the enemy species array has grown into the enemy state at $c517"
+}
 
 // ===========================================================================
 // State. MAIN THREAD ONLY, three bytes in a hole below the player's state.
@@ -217,38 +320,104 @@ enemyInit:
     rts
 
 // ---------------------------------------------------------------------------
-// enemyAnimPtr — the sprite pointer every enemy should be showing THIS frame.
-// Exit: A = the pointer. X and Y preserved, no memory written.
+// THE ANIMATION SEQUENCES — one row of ENEMY_ANIM_STEPS pointers per species.
 //
-// ONE GLOBAL PHASE, NOT PER-OBJECT STATE, and it costs no state at all.
+// A TABLE OF POINTERS, NOT OF FRAME INDICES, so the lookup IS the answer: the
+// caller stores what it reads straight into logPtr with no arithmetic. It also
+// means the two species need not agree about anything -- not their frame
+// count, not their base address, not the path they take through their frames.
+//
+// THE RING ROTATES. Its four frames are a true rotation, so 3 follows 2 and 0
+// follows 3 with no discontinuity; eight steps is simply two revolutions, and
+// a full table cycle shows two complete spins.
+//
+// THE DROPPER PING-PONGS, and must. Its frames are not a rotation but a
+// SWEEP: the satellite crosses from the right edge (frame 1) through centre
+// (2) to the left (3), with frame 0 the opposite extreme where both satellites
+// sit at the rim. Wrapping 3 straight back to 0 would jump the satellite from
+// one side of the orb to the other in a single step -- a teleport. Playing the
+// sequence back down again is what completes the apparent orbit, exactly as
+// the artwork's own note says.
+//
+// THE DOUBLED ENDPOINTS ARE DELIBERATE. A strict ping-pong is six steps and
+// six can never divide the 256-frame wrap (see the ENEMY_ANIM_STEPS note), so
+// the two spare steps are spent holding each turnaround for one extra beat.
+// That is also what the motion being depicted actually does: a satellite
+// crossing a sphere appears to slow, stop and reverse at the edges while
+// moving fastest through the middle. The dwell reads as the turn, not as a
+// stall.
+// ---------------------------------------------------------------------------
+enemyAnimSeq:
+    // SPECIES_RING: rotate, twice per table cycle.
+    .byte ENEMY_PTR_FIRST + 0, ENEMY_PTR_FIRST + 1
+    .byte ENEMY_PTR_FIRST + 2, ENEMY_PTR_FIRST + 3
+    .byte ENEMY_PTR_FIRST + 0, ENEMY_PTR_FIRST + 1
+    .byte ENEMY_PTR_FIRST + 2, ENEMY_PTR_FIRST + 3
+    // SPECIES_DROPPER: out and back, dwelling at each end.
+    .byte DROPPER_PTR_FIRST + 0, DROPPER_PTR_FIRST + 1
+    .byte DROPPER_PTR_FIRST + 2, DROPPER_PTR_FIRST + 3
+    .byte DROPPER_PTR_FIRST + 3, DROPPER_PTR_FIRST + 2
+    .byte DROPPER_PTR_FIRST + 1, DROPPER_PTR_FIRST + 0
+enemyAnimSeqEnd:
+.if (enemyAnimSeqEnd - enemyAnimSeq != SPECIES_COUNT * ENEMY_ANIM_STEPS) {
+    .error "the animation table is not one row of ENEMY_ANIM_STEPS per species"
+}
+
+// ---------------------------------------------------------------------------
+// enemyAnimPtr — the sprite pointer THIS enemy should be showing this frame.
+// Entry: X = the object's pool slot.
+// Exit:  A = the pointer. X preserved, Y clobbered, no memory written.
+//
+// ONE GLOBAL PHASE SHARED BY BOTH SPECIES, and it costs no state at all.
 //
 // The phase is DERIVED from the renderer's frameCounter rather than counted in
 // a timer of this file's own. That is the whole trick: frameCounter already
 // advances exactly once per displayed frame, in exFrame, so shifting it right
-// by ENEMY_ANIM_SHIFT and masking to ENEMY_FRAMES gives a phase that steps on
-// a fixed cadence for free -- no byte of state, no per-frame decrement, and
-// nothing that can drift out of step with the display if a frame is ever
-// skipped. The assertion beside ENEMY_ANIM_SHIFT is what allows reading only
-// the LOW byte: 256 is a whole number of cycles, so the wrap is seamless.
+// by ENEMY_ANIM_SHIFT and masking to ENEMY_ANIM_STEPS gives a step that
+// advances on a fixed cadence for free -- no byte of state, no per-frame
+// decrement, and nothing that can drift out of step with the display if a
+// frame is ever skipped. The assertion beside ENEMY_ANIM_STEPS is what allows
+// reading only the LOW byte: 256 is a whole number of cycles, so the wrap is
+// seamless.
 //
-// LOCKSTEP IS A DECISION, not an accident of the implementation. Every ring on
-// screen spins in phase, which for a field of identical rings reads as one
-// mechanism rather than as clutter. The moment an enemy type genuinely needs
-// its own phase -- a second species, or a stagger -- this becomes a per-object
-// byte and callers change not at all, because they already ask a routine
-// rather than compute it themselves. That is the only reason this is a
-// subroutine and not eight inline instructions.
+// SPECIES SELECTS THE ROW, THE PHASE SELECTS THE COLUMN. Both species step
+// together on the same beat; they differ only in what their row of the table
+// says to show. That is why a second enemy cost no new timing machinery.
+//
+// LOCKSTEP IS A DECISION, not an accident. Every enemy of a species is at the
+// same point of its animation, which reads as one mechanism rather than as
+// clutter. Giving a species -- or an object -- its own phase later means
+// replacing the derivation below with a stored byte, and no caller changes,
+// because callers already ask a routine rather than compute it themselves.
 // ---------------------------------------------------------------------------
-enemyAnimPtr:
+// THE BODY IS A MACRO BECAUSE enemyTick CANNOT AFFORD THE CALL. This runs once
+// per live enemy per displayed frame, and jsr plus rts is twelve cycles of pure
+// overhead on top of a twenty-two cycle body -- more than a third of the cost,
+// paid seven times a frame at peak population. The main thread routinely uses
+// over 255 of a PAL frame's 312 raster lines, so that overhead is not free
+// margin; it is margin the scroller's publication is already competing for.
+//
+// So the hot caller expands it inline and the rare one (waveSpawnMember, a few
+// times a second) keeps the subroutine. One definition either way, which is the
+// whole reason this is a macro rather than a copied block of instructions.
+.macro enemyAnimPtrBody() {
     lda frameCounter                    // low byte only: see the wrap assertion
     .for (var i = 0; i < ENEMY_ANIM_SHIFT; i++) {
-        lsr                             // /2 per shift: hold each frame for
+        lsr                             // /2 per shift: hold each step for
     }                                   // 1 << ENEMY_ANIM_SHIFT displayed frames
-    and #ENEMY_FRAMES - 1               // a mask, not a compare: ENEMY_FRAMES
+    and #ENEMY_ANIM_STEPS - 1           // a mask, not a compare: the step count
                                         // is asserted a power of two
-    clc
-    adc #ENEMY_PTR_FIRST                // the frames are adjacent and in
-    rts                                 // rotation order, so this IS the lookup
+    ora enySpecies,x                    // the species IS its row offset, and the
+                                        // step is the low bits, so one ORA
+                                        // composes the whole table index -- no
+                                        // shift, no branch, no add
+    tay
+    lda enemyAnimSeq,y                  // the table holds POINTERS: this is the
+}                                       // complete answer, not a frame number
+
+enemyAnimPtr:
+    enemyAnimPtrBody()
+    rts
 
 // ---------------------------------------------------------------------------
 // enemyTick — one frame of ONE enemy. MAIN THREAD.
@@ -264,7 +433,7 @@ enemyTick:
     // A dying ring keeps spinning deliberately -- the death is a colour ramp
     // over the same silhouette, and freezing the rotation half way through it
     // would read as the animation having broken rather than the enemy having.
-    jsr enemyAnimPtr
+    enemyAnimPtrBody()                  // INLINE, not jsr: see the macro's note
     sta logPtr,x
 
     // ---- dying enemies run their death out and do not move ----------------
