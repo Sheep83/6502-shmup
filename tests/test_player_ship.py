@@ -371,6 +371,15 @@ def machine():
         print("\n--- the muzzle flash ---")
 
         def fire(frames, bank=None, bits=JOY_FIRE):
+            # THE CRAFT CAN DIE NOW, and a dead one neither fires nor lights
+            # HW1 -- by design, see reports/player-death-fireball-collision.md.
+            # These captures are about the MUZZLE FLASH, so they start from a
+            # craft that is definitely alive; without this a hostile bolt
+            # landing mid-capture turns an artwork assertion into a lottery.
+            for f in ("plyDead", "plyBoomFrame", "plyBoomTimer", "plyFatal"):
+                poke(mon, sym[f], 0)
+            poke(mon, sym["plyVisible"], 1)
+            poke(mon, sym["hudLives"], 200)
             if bank is not None:
                 poke(mon, sym["plyBank"], bank)
             poke(mon, sym["joyHold"], 1)

@@ -223,6 +223,12 @@ weaponCool:
 // this routine if one is ever added.
 // ---------------------------------------------------------------------------
 weaponFire:
+    // A DEAD CRAFT DOES NOT SHOOT, and refusing here rather than in four
+    // places is the whole of it: everything a volley causes -- the hitscan,
+    // the cadence reload, shotFired, the muzzle flash playerEmit derives from
+    // it and the player-fire SFX -- is downstream of this one branch.
+    lda plyDead
+    bne !refuse+
     lda wpnOverheated
     bne !refuse+
     lda wpnCooldown

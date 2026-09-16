@@ -116,7 +116,17 @@ class Vice:
     left loaded in memory for the session's lifetime and never touched on
     disk.
     """
-    def __init__(self, port, prg, warp=True):
+    def __init__(self, port, prg, warp=True, start_game=True):
+        """start_game: drive the restored lifecycle from ATTRACT into GAME.
+
+        THE MACHINE NO LONGER BOOTS INTO GAMEPLAY. src/gamestate.asm restores the
+        old shooter's outer loop, so a cold boot lands on the attract screen and
+        waits for fire -- and every test in this suite that predates it assumes
+        the game is already running. Pressing fire here, once, in the one place
+        that owns bringing a machine up, keeps all of them testing exactly what
+        they tested before. A test that wants the lifecycle itself passes
+        start_game=False and drives it by hand.
+        """
         self.port, self.proc, self.mon = port, None, None
         try:
             # -console: an automated suite must never open a window (it
@@ -151,9 +161,52 @@ class Vice:
                 time.sleep(0.3)
             else:
                 raise RuntimeError("VICE monitor never became responsive")
+            if start_game:
+                self._boot_to_game()
         except Exception:
             self.close()
             raise
+    def _boot_to_game(self):
+        """ATTRACT -> GAME, through the real input path the player uses.
+
+        Fire is PRESSED and then RELEASED because the restored attract loop
+        gates the start on the release -- the old game's own debounce, which
+        exists so one press cannot also reach the game's first frame.
+        """
+        sym = symbols(SYM)
+        mon = self.mon
+        poke(mon, sym["joyHold"], 1)
+        # THE MACHINE IS HALTED HERE. Every monitor command stops the emulator,
+        # so the responsiveness probe above left it standing still -- sleeping
+        # would advance nothing at all. Each press and release has to be carried
+        # by a real run of frames.
+        for _ in range(8):
+            poke(mon, sym["joyState"], 0xef)        # fire down
+            free_run(mon, sym["frameCounter"], 1)
+            mon.cmd("delete")
+            poke(mon, sym["joyState"], 0xff)        # ...and up: the gate opens
+            free_run(mon, sym["frameCounter"], 1)
+            mon.cmd("delete")
+            if rd1(mon, sym["gsState"]) == 1:       # GS_PLAYING
+                break
+        else:
+            raise RuntimeError(
+                "the lifecycle never reached PLAYING: gsState = "
+                f"{rd1(mon, sym['gsState'])}")
+        poke(mon, sym["joyState"], 0xff)
+        poke(mon, sym["joyHold"], 0)                # tests own the stick again
+
+        # A STOCK THE TEST CANNOT EXHAUST, and this restores an assumption
+        # rather than inventing one. Before the lifecycle existed the ship could
+        # not die: playerTakeHit only granted invulnerability, so a stationary
+        # ship under fire blinked forever and every test in this suite was
+        # written against a game that never ends. Lives are real now, and in
+        # warp a parked ship loses five of them in a fraction of a probe --
+        # after which the machine is sitting on the attract screen and the test
+        # is measuring nothing. A test that wants to watch a game END drives the
+        # lifecycle itself with start_game=False.
+        poke(mon, sym["hudLives"], 250)
+
     def close(self):
         if self.mon: self.mon.close(); self.mon = None
         if self.proc:

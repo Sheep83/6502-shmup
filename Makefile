@@ -113,7 +113,7 @@ VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 .PHONY: all build d64 test
 .PHONY: test-boot test-production test-turret-regression
 .PHONY: test-encounter-director test-player-ship test-flight-paths test-ingress-egress test-clip-scratch
-.PHONY: test-sfx test-enemy-fire test-pickup
+.PHONY: test-sfx test-enemy-fire test-pickup test-lifecycle test-player-death
 .PHONY: run run-d64 clean
 
 all: build
@@ -207,6 +207,22 @@ d64: build
 #                               slot comes back whole, a stale slot collects
 #                               nothing, the hostile cap is untouched and a full
 #                               pool refuses cleanly.
+#   test_lifecycle.py          the restored outer loop: attract cycling on the
+#                               old 250-frame timer, the old fire-release start
+#                               gate, a fresh game, ordinary vs terminal death,
+#                               the old game-over hold, score qualification and
+#                               insertion on the old rules, edge-triggered
+#                               initials entry, the return to attract on the
+#                               scores page, and a second game that is fresh
+#                               while the table persists.
+#   test_player_death.py       the death pass: a dead craft cannot be steered
+#                               or fired and leaves HW1 dark, the eight-frame
+#                               fireball runs once on HW0 and never loops,
+#                               ordinary death respawns with its invulnerability
+#                               blink, terminal death hides HW0 and reaches
+#                               GAME OVER, and ramming a LIVE enemy damages the
+#                               player through the existing playerTakeHit path
+#                               while a dying enemy, a bolt and a token do not.
 #   test_encounter_director.py the encounter director: an authored trigger off
 #                               worldProgress starts a wave, a SECOND wave
 #                               instance runs concurrently with the first,
@@ -248,6 +264,8 @@ test: build
 	python3 tests/test_sfx.py
 	python3 tests/test_enemy_fire.py
 	python3 tests/test_pickup.py
+	python3 tests/test_lifecycle.py
+	python3 tests/test_player_death.py
 
 test-boot: build
 	python3 tests/test_boot.py
@@ -275,6 +293,12 @@ test-enemy-fire: build
 
 test-pickup: build
 	python3 tests/test_pickup.py
+
+test-lifecycle: build
+	python3 tests/test_lifecycle.py
+
+test-player-death: build
+	python3 tests/test_player_death.py
 
 # NON-DEFAULT ON PURPOSE. The composable-movement vocabulary (v1.1): stage
 # transitions, a three-stage path walked end to end, an arc and its mirror on

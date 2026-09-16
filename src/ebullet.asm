@@ -446,8 +446,12 @@ ebulletPlayerTick:
     rts
 !scan:
     lda plyInvuln                       // an invulnerable ship is not a target,
-    beq !live+                          // and the projectile flies through it
+    beq !notInvuln+                     // and the projectile flies through it
     rts
+!notInvuln:
+    lda plyDead                         // ...and neither is a dying one: the
+    beq !live+                          // craft is already destroyed, and
+    rts                                 // playerTakeHit would refuse anyway
 !live:
     ldx #0
 !slot:

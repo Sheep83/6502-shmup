@@ -236,10 +236,14 @@ pickupStateEnd:
 }
 
 // ===========================================================================
-// Code. MAIN THREAD ONLY. In the free run between the collision code that
-// ends at $4cea and main at $5000.
+// Code. MAIN THREAD ONLY. In the free run below main at $5000.
+//
+// MOVED DOWN ONE PAGE from $4d00 when src/collision.asm grew past it: the
+// player-versus-enemy body collision landed in that module and pushed its
+// segment to $4d46. Nothing about this module cares where it sits, and the
+// guard below is what says so.
 // ===========================================================================
-* = $4d00 "pickup code"
+* = $4e00 "pickup code"
 
 // ---------------------------------------------------------------------------
 // pickupInit — no tokens collected, no history. Called ONCE, from entry.

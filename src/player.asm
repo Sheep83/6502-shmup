@@ -149,6 +149,41 @@
 // and $d028 holds red for the whole flash. This is HW1's private register: the
 // craft's own $d027 is not touched by firing at all any more.
 .const PLAYER_COL_FLASH   = 2                       // red, both frames
+// --- the death fireball's timing -------------------------------------------
+// SIX PAL FRAMES PER ART FRAME, eight art frames: 48 frames, 0.96 s of
+// explosion. The hold is a separate counter from the frame index rather than
+// one countdown divided by six, because a divide by six on a 6502 costs more
+// than the byte it would save -- and because "which frame" and "how long it
+// has been up" are two different facts that a later tuning pass will want to
+// change independently.
+.const PLAYER_BOOM_HOLD   = 6                      // PAL frames per art frame
+
+// --- the death fireball's blocks --------------------------------------------
+// Declared HERE, with the ship's and the muzzle's, because a sprite's address
+// is player presentation and KickAssembler resolves .const strictly in import
+// order -- player.asm is parsed long before the artwork file that fills them.
+// The bytes, the palette note and the overlap guard against the token bitmap
+// live in src/player_boom_art.asm.
+//
+// $25c0 is the free run between the collectible token's bitmap and screen page
+// B: resident player art, sitting with the ship at $2000 and the muzzle at
+// $2400 rather than in the level enemy window a level package owns.
+.const PLAYER_BOOM_SPRITES = $25c0
+.const PLAYER_BOOM_FRAMES  = 8
+.const PLAYER_BOOM_END     = PLAYER_BOOM_SPRITES + PLAYER_BOOM_FRAMES * 64
+.const PLAYER_PTR_BOOM     = PLAYER_BOOM_SPRITES / 64       // $97
+.const PLAYER_COL_BOOM     = 2                              // red, in HW0's own
+                                                            // $d027 while it burns
+.if ((PLAYER_BOOM_SPRITES & 63) != 0) {
+    .error "the fireball blocks must be 64-byte aligned"
+}
+.if (PLAYER_BOOM_SPRITES < PLAYER_FLASH_END) {
+    .error "the fireball overlaps the muzzle flash frames"
+}
+.if (PLAYER_BOOM_END > SCREEN_B) {
+    .error "the fireball runs past the free $2000 run into screen page B"
+}
+
 .const PLAYER_FLASH_TIME  = 2                       // visible PAL frames
 
 // How far above the craft HW1 sits. The supplied artwork is drawn for this
@@ -320,6 +355,38 @@ plyFlash:    .byte 0
 // the stick being touched.
 plyInvuln:   .byte 0
 
+// THE LAST LIFE HAS BEEN LOST and the death presentation is running. The
+// lifecycle is NOT entered on the collision frame: the hit that empties the
+// stock sets this, the ordinary invulnerability blink plays out as the fatal
+// presentation, and playerFatalTick hands over only when it finishes. That is
+// the old game's shape -- it too held its explosion before GAME OVER -- and it
+// is why the player's own death behaviour did not have to change at all.
+plyFatal:    .byte 0
+
+// ---------------------------------------------------------------------------
+// THE DEATH PHASE. Non-zero from the instant the craft is killed until its
+// explosion has finished burning, and it is the one byte that answers "is the
+// player dead RIGHT NOW" for everything that has to care:
+//
+//   playerTick     stops reading the stick, so a corpse cannot be steered
+//   weaponFire     refuses the volley, so there is no hitscan, no shotFired,
+//                  no player-fire SFX and therefore no muzzle flash either
+//   playerEmit     draws the fireball on HW0 instead of the ship
+//   ebulletPlayerTick / playerBodyTick
+//                  ignore a player who is already dying
+//
+// IT IS SET FOR EVERY DEATH, not only the last one. The old behaviour -- a
+// fully controllable ship flying about inside its own death animation, and
+// still firing -- came from there being no such state at all: the only thing a
+// hit did was start an invulnerability blink.
+plyDead:     .byte 0
+
+// Which fireball frame is on screen, 0..PLAYER_BOOM_FRAMES-1, and how many PAL
+// frames it has been there. plyBoomFrame reaching PLAYER_BOOM_FRAMES is what
+// ENDS the explosion -- it is never wrapped, so the animation cannot loop.
+plyBoomFrame: .byte 0
+plyBoomTimer: .byte 0
+
 // Hits taken, saturating. The only thing published about damage, and the hook
 // a lives system would read. Nothing reads it yet.
 plyHits:     .byte 0
@@ -466,6 +533,15 @@ playerFlashBitmapsEnd:
 // playerInit — the ship at its start position, visible, and dirty.
 // ---------------------------------------------------------------------------
 playerInit:
+    lda #0
+    sta plyFatal                        // a new game never starts mid-death
+    sta plyDead                         // ...nor mid-explosion
+    sta plyBoomFrame
+    sta plyBoomTimer
+    lda #1
+    sta plyVisible                      // ...nor invisible, which is how the
+                                        // last death left HW0
+    lda #0
     lda #<PLAYER_START_X
     sta plyX
     lda #>PLAYER_START_X
@@ -530,8 +606,8 @@ readInput:
 playerTakeHit:
     lda plyInvuln
     bne !done+
-    lda #PLAYER_INVULN_TIME
-    sta plyInvuln
+    lda plyDead                         // already dying: the explosion is the
+    bne !done+                          // consequence and it is already running
 
     // THE HIGHEST-PRIORITY SOUND IN THE GAME, and it cannot stutter. This
     // routine is already the single point at which damage MEANS something, and
@@ -544,10 +620,123 @@ playerTakeHit:
 
     lda plyHits                         // saturating: that the ship was hit is
     cmp #$ff                            // the event; the exact count past 255
-    beq !done+                          // is not
+    beq !lives+                         // is not
     inc plyHits
+
+    // ---- the stock ------------------------------------------------------
+    // LIVES GET A REAL OWNER HERE. src/hud.asm's placeholder used to cycle
+    // hudLives on a timer and its own note demanded that whatever came to own
+    // the value REPLACE that block rather than run beside it; this is that
+    // owner, and the demo lives are gone. One writer, one truth.
+!lives:
+    lda hudLives
+    beq !done+                          // already terminal: the fatal window is
+                                        // running and a stray hit changes
+                                        // nothing
+    dec hudLives
+    lda hudDirty
+    ora #HUD_DIRTY_LIVES
+    sta hudDirty
+    // ---- the craft dies -------------------------------------------------
+    // THE INVULNERABILITY WINDOW IS NO LONGER STARTED HERE. It used to be the
+    // whole of "being hit": a hundred frames of blinking on an intact ship.
+    // The ship is now destroyed, the fireball is the presentation, and the
+    // invulnerability belongs to the RESPAWN at the other end of it -- which
+    // is where playerDeathTick starts it.
+    lda #1
+    sta plyDead
+    lda #0
+    sta plyBoomFrame                    // the explosion starts at its first
+    sta plyBoomTimer                    // frame, however it was reached
+    sta plyFlash                        // AND THE MUZZLE GOES OUT. A shot
+                                        // resolved on the frame of the killing
+                                        // blow would otherwise leave HW1 lit
+                                        // over the wreckage for two frames.
+    lda #1
+    sta plyVisible                      // solid for the whole explosion; the
+                                        // blink belongs to the respawn
+
+    lda hudLives
+    bne !done+
+    lda #1
+    sta plyFatal                        // the last one. The explosion runs in
+                                        // full either way; only where it ENDS
+                                        // differs.
 !done:
     rts
+
+// ---------------------------------------------------------------------------
+// playerDeathTick — one frame of dying. Called from playerTick INSTEAD OF the
+// movement block, which is what makes a dead craft uncontrollable.
+//
+// Six frames per art frame, eight art frames, and then one of two endings that
+// differ only in where they leave the player -- never in what was shown.
+// ---------------------------------------------------------------------------
+playerDeathTick:
+    inc plyBoomTimer
+    lda plyBoomTimer
+    cmp #PLAYER_BOOM_HOLD
+    bcc !burning+                       // this art frame still has time to run
+
+    lda #0
+    sta plyBoomTimer
+    inc plyBoomFrame
+    lda plyBoomFrame
+    cmp #PLAYER_BOOM_FRAMES
+    bcc !burning+                       // ...and so does the explosion
+
+    // ---- the fire is out -------------------------------------------------
+    lda #0
+    sta plyDead                         // controls come back -- or do not, if
+                                        // this was the last life
+    sta plyBoomFrame
+    sta plyBoomTimer
+
+    lda plyFatal
+    bne !gone+
+
+    // RESPAWN, through the behaviour that was already here: the craft
+    // reappears where it died and is briefly invulnerable, and playerInvulnTick
+    // blinks it for the whole window. That blink is the RESPAWN's, and it is
+    // the one piece of the old death presentation worth keeping.
+    lda #1
+    sta plyVisible
+    lda #PLAYER_INVULN_TIME
+    sta plyInvuln
+    rts
+
+!gone:
+    lda #0
+    sta plyVisible                      // HW0 off and it stays off: there is no
+    rts                                 // respawn, and playerFatalTick hands
+                                        // the lifecycle over from here
+
+!burning:
+    lda #1
+    sta plyVisible                      // solid, never blinking, while it burns
+    rts
+
+// ---------------------------------------------------------------------------
+// playerFatalTick — hand the lifecycle over when the last life's presentation
+// has finished. MAIN THREAD, once per frame from gameFrame.
+//
+// FIVE CYCLES unless the player is actually dying for the last time. The test
+// is plyFatal AND a finished blink, so the transition happens on the frame the
+// current engine's own death behaviour ends -- not on the collision frame, and
+// not on a timer of its own invention.
+// ---------------------------------------------------------------------------
+playerFatalTick:
+    lda plyFatal
+    bne !dying+
+    rts
+!dying:
+    lda plyDead
+    beq !over+
+    rts                                 // the fireball is still burning
+!over:
+    lda #0
+    sta plyFatal                        // once, and only once
+    jmp gsEnterGameOver                 // src/gamestate.asm; its rts is ours
 
 // ---------------------------------------------------------------------------
 // playerInvulnTick — run the invulnerability window down, and blink while it
@@ -666,6 +855,14 @@ playerBankTick:
 
 // ---------------------------------------------------------------------------
 playerTick:
+    // DEAD CRAFT, NO CONTROLS. The whole movement block below is skipped, so
+    // the stick cannot move it, the lean cannot change and the position is
+    // frozen exactly where it was destroyed. weaponFire refuses separately, so
+    // the trigger is dead too.
+    lda plyDead
+    beq !alive+
+    jmp playerDeathTick                 // its rts is ours
+!alive:
     jsr playerInvulnTick
     jsr playerBankTick                  // presentation only; reads joyState,
                                         // writes plyBank, touches no position
@@ -811,6 +1008,26 @@ playerEmit:
     // bank order, so a signed lean of -2..+2 becomes a pointer with one add.
     // frame = FIRST + bank * ENGINE_FRAMES + engine, and ENGINE_FRAMES is 3,
     // so the multiply is one shift and one add of the value itself.
+    // THE FIREBALL TAKES HW0 OUTRIGHT while the craft is dying. The ship's
+    // silhouette is gone on the very first frame of death -- there is no
+    // intact hull to be seen tinting or blinking, because the pointer no
+    // longer names one.
+    lda plyDead
+    beq !hull+
+
+    lda plyBoomFrame                    // 0..PLAYER_BOOM_FRAMES-1
+    cmp #PLAYER_BOOM_FRAMES
+    bcc !boomOk+
+    lda #PLAYER_BOOM_FRAMES - 1         // belt and braces: the animation is
+!boomOk:                                // ended by plyDead, never by wrapping
+    clc
+    adc #PLAYER_PTR_BOOM
+    sta plyPresPtr0
+    lda #PLAYER_COL_BOOM                // red, in HW0's OWN $d027. No shared
+    sta plyPresCol0                     // colour moves; see player_boom_art.asm
+    jmp !hw0Done+
+
+!hull:
     lda plyBank                         // 0..4
     asl                                 // 2n
     clc
@@ -826,6 +1043,7 @@ playerEmit:
     // causes. The muzzle flash is HW1's business alone, below.
     lda #PLAYER_COL_SHIP
     sta plyPresCol0
+!hw0Done:
 
     // ---- HW1: the muzzle flash --------------------------------------------
     // THE TRIGGER IS shotFired, AND THAT IS THE POINT. It is set by weaponFire

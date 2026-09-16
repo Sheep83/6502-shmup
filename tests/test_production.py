@@ -202,6 +202,15 @@ def main():
                     return (f0, x)
             return (f0, x)                  # give up; the check will show it
 
+        # A DEAD CRAFT DOES NOT STEER, by design -- see
+        # reports/player-death-fireball-collision.md -- so this sample starts
+        # from one that is alive. Without it a hostile bolt landing just before
+        # the window turns "does the player move" into a coin toss.
+        for f in ("plyDead", "plyBoomFrame", "plyBoomTimer", "plyFatal"):
+            poke(mon, sym[f], 0)
+        poke(mon, sym["plyVisible"], 1)
+        poke(mon, sym["hudLives"], 200)
+
         bp = set_bp(mon, sym["gameFrame"])
         xs = step_n(mon, sym["frameCounter"], 6, coherent)
         mon.cmd(f"delete {bp}")
@@ -221,16 +230,39 @@ def main():
         check("...on every single sampled interval", not offenders,
               f"(frames, px) mismatches: {offenders}")
 
-        # playerTakeHit is a self-contained state routine -- it sets plyInvuln
-        # and increments plyHits and nothing else, with no dependency on frame
-        # cadence -- so calling it directly (constraint #4's carve-out) is
+        # playerTakeHit is a self-contained state routine with no dependency on
+        # frame cadence, so calling it directly (constraint #4's carve-out) is
         # legitimate here, unlike turretFireTick in test_turret_regression.py.
+        #
+        # WHAT IT DOES CHANGED. It used to raise plyInvuln and nothing else: a
+        # hit was a hundred frames of blinking on an intact ship. It now
+        # DESTROYS the craft -- plyDead, a one-shot fireball, and the
+        # invulnerability moved to the respawn at the far end of it. The hit
+        # counter is unchanged, and the invulnerability is asserted below where
+        # it now happens. See reports/player-death-fireball-collision.md.
+        for f in ("plyDead", "plyBoomFrame", "plyBoomTimer", "plyFatal",
+                  "plyInvuln"):
+            poke(mon, sym[f], 0)
+        poke(mon, sym["hudLives"], 5)
         hits0 = rd1(mon, sym["plyHits"])
         call(mon, sym, "playerTakeHit")
-        invuln = rd1(mon, sym["plyInvuln"])
         hits1 = rd1(mon, sym["plyHits"])
-        check("playerTakeHit raises invulnerability and the hit counter",
-              invuln > 0 and hits1 == hits0 + 1, f"invuln {invuln} hits {hits1}")
+        check("playerTakeHit destroys the craft and counts the hit",
+              rd1(mon, sym["plyDead"]) == 1 and hits1 == hits0 + 1,
+              f"dead {rd1(mon, sym['plyDead'])} hits {hits1}")
+
+        # Run the fireball out, so the window watched below is the RESPAWN's
+        # invulnerability -- which is the thing this section is really about.
+        # step_n needs a breakpoint armed, and the sampling above deleted them.
+        poke(mon, sym["plyBoomFrame"], 7)
+        poke(mon, sym["plyBoomTimer"], 5)
+        bp = set_bp(mon, sym["gameFrame"])
+        step_n(mon, sym["frameCounter"], 3, lambda: None)
+        mon.cmd(f"delete {bp}")
+        mon.cmd("delete")
+        invuln = rd1(mon, sym["plyInvuln"])
+        check("...and the respawn that follows is invulnerable",
+              invuln > 0, f"invuln {invuln}")
 
         # Watch the whole invulnerability window run down. plyPresEnable must
         # ALWAYS be a legal value (0 or the full mask -- never a stray bit),

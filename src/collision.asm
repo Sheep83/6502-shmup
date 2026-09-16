@@ -90,6 +90,42 @@
 // is a pair, an index and a kind, and applyDamage dispatches on the kind. Kind
 // is a separate byte rather than a flag bit in csTarget so that csTarget stays
 // usable as an index without masking on every read.
+// ===========================================================================
+// THE PLAYER'S BODY BOX — ramming an enemy
+// ===========================================================================
+// SOFTWARE COLLISION IN LOGICAL COORDINATES, and $d01e is not read here or
+// anywhere else in this engine. The mux time-shares HW2..HW7, so a VIC
+// collision bit names a hardware SLOT and a slot is not an object: it would
+// answer "something touched the player" without ever saying what, and for part
+// of every frame it would be answering about the HUD.
+//
+// A SLIGHTLY FORGIVING PLAYER BOX. Both sprites are 24x21, but ramming is
+// judged on a box INSET inside the craft rather than on its full cell: at full
+// size the player collects a hit from an enemy whose transparent corner merely
+// passed over a wingtip, which reads as being killed by nothing. The inset is
+// stated as a rectangle inside the ship and the four compare bounds are
+// DERIVED from it, so tuning is these four numbers and nothing else.
+//
+//     enemy box    the full 24x21 cell, at logX/logY
+//     player box   PLAYER_BODY_W x PLAYER_BODY_H, inset by
+//                  PLAYER_BODY_INSET_X/Y inside the craft's own cell
+//
+// There is deliberately ONE enemy box for every species. The Ring, the
+// Dropper and the protectors are all the same 24x21 cell and none of the
+// current data carries a cheaper per-species extent, so a per-species hitbox
+// table would be a framework holding one repeated number.
+.const PLAYER_BODY_INSET_X = 6      // pixels in from each side of the craft
+.const PLAYER_BODY_INSET_Y = 5      // ...and down from its top
+.const PLAYER_BODY_W       = 12     // so the box is 12 of the ship's 24 wide
+.const PLAYER_BODY_H       = 12     // ...and 12 of its 21 tall
+
+// The four bounds the overlap test actually uses, as (enemyX - plyX) and
+// (enemyY - plyY) windows. Derived, never typed twice.
+.const BODY_HIT_LEFT  = HITBOX_W - PLAYER_BODY_INSET_X          // 18
+.const BODY_HIT_RIGHT = PLAYER_BODY_INSET_X + PLAYER_BODY_W     // 18
+.const BODY_HIT_UP    = SPRITE_HEIGHT - PLAYER_BODY_INSET_Y     // 16
+.const BODY_HIT_DOWN  = PLAYER_BODY_INSET_Y + PLAYER_BODY_H     // 17
+
 .const CS_KIND_ENEMY   = 0
 .const CS_KIND_TURRET  = 1
 
@@ -189,6 +225,95 @@ collisionTick:
     tax
     inx
     jmp !rayLoop-
+
+// ---------------------------------------------------------------------------
+// playerBodyTick — the craft meets an enemy's body. MAIN THREAD, once a frame.
+//
+// WHAT COUNTS AS A BODY, and every one of these is read from the state the
+// engine already keeps rather than from a flag invented for this:
+//
+//   logActive   the slot holds an object at all -- a freed or despawning slot
+//               is inactive and fails here first
+//   objType     TYPE_ENEMY. Hostile projectiles, collectible tokens and the
+//               background turrets are other types and are never bodies
+//   objHP       NON-ZERO. Zero is this engine's own "dying": it is what
+//               enemyTick tests to run the death animation instead of the
+//               flight path, so an enemy already exploding cannot also ram
+//
+// Protectors and the Dropper are ordinary TYPE_ENEMY objects and are therefore
+// included by construction, exactly as the brief wants -- no special case
+// names either of them.
+//
+// THE DAMAGE PATH IS THE EXISTING ONE. This routine decides GEOMETRY and
+// nothing else; playerTakeHit owns what being hit means, which is why the
+// invulnerability rule, the hurt SFX, the life and the explosion all behave
+// identically whether the player was shot or rammed. Nothing here destroys the
+// enemy: nothing in this game's semantics says a collision damages the thing
+// collided with, and inventing that would be a balance change.
+//
+// ONE HIT PER FRAME. The scan returns as soon as it damages the player, like
+// ebulletPlayerTick and for the same reason: the player is dead or
+// invulnerable from that instant, so every later slot would be refused anyway.
+// ---------------------------------------------------------------------------
+playerBodyTick:
+    lda plyDead                         // a corpse cannot be rammed
+    bne !done+
+    lda plyInvuln                       // ...and neither can a ship that is
+    bne !done+                          // already immune
+
+    ldx #0
+!slot:
+    lda logActive,x
+    beq !next+
+    lda objType,x
+    cmp #TYPE_ENEMY
+    bne !next+
+    lda objHP,x
+    beq !next+                          // dying: not a body any more
+
+    // ---- vertical overlap -------------------------------------------------
+    // enemyY - plyY must lie in -(BODY_HIT_UP-1) .. BODY_HIT_DOWN-1. Biasing
+    // by the upper reach turns that into ONE unsigned compare.
+    lda logY,x
+    sec
+    sbc plyY
+    clc
+    adc #BODY_HIT_UP - 1
+    cmp #BODY_HIT_UP - 1 + BODY_HIT_DOWN
+    bcs !next+
+
+    // ---- horizontal overlap, nine bits ------------------------------------
+    lda logX,x
+    sec
+    sbc plyX
+    sta csTmp
+    lda logXHi,x
+    sbc plyXHi
+    beq !enemyRight+
+    cmp #$ff
+    bne !next+                          // more than 255 pixels apart
+
+    lda csTmp                           // the enemy is left of the craft
+    clc
+    adc #BODY_HIT_LEFT - 1
+    bcc !next+
+    jmp !ram+
+
+!enemyRight:
+    lda csTmp
+    cmp #BODY_HIT_RIGHT
+    bcs !next+
+
+!ram:
+    jmp playerTakeHit                   // src/player.asm owns the consequence;
+                                        // its rts is ours
+
+!next:
+    inx
+    cpx #MAX_OBJECTS
+    bne !slot-
+!done:
+    rts
 
 // ---------------------------------------------------------------------------
 // traceRay — the nearest eligible enemy the ray at csRay intersects.

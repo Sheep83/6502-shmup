@@ -603,8 +603,9 @@ hudScoreBump:
 // hide inside the motion.
 //
 //   score     +10 every 8 frames                              (~1.6 per second)
-//   lives     one fewer every 128 frames, 5 -> 0 -> 5         (~2.5s)
 //   upgrade   next state every 192 frames, 0 -> 3 -> 0        (~3.8s)
+//
+// LIVES ARE NO LONGER HERE: src/player.asm owns hudLives. See below.
 //
 // HEAT IS NOT DRIVEN HERE. src/weapon.asm feeds hudHeatLo/Hi from the real
 // weapon through weaponHudFeed. Whatever comes to own score, lives or upgrade
@@ -626,21 +627,12 @@ hudDemoTick:
     jsr hudScoreBump
 !noScore:
 
-    // ---- lives: one fewer every 128 frames -------------------------------
-    lda hudDemoFrame
-    and #$7f
-    bne !noLives+
-    dec hudLives
-    lda hudLives
-    cmp #$ff
-    bne !livesOk+
-    lda #HUD_LIVES_MAX
-    sta hudLives
-!livesOk:
-    lda hudDirty
-    ora #HUD_DIRTY_LIVES
-    sta hudDirty
-!noLives:
+    // ---- lives: NOT DRIVEN HERE ANY MORE ---------------------------------
+    // src/player.asm's playerTakeHit owns hudLives now, and the note above
+    // required exactly that: whatever comes to own a value REPLACES this block
+    // rather than running alongside it. The placeholder that cycled 5 -> 0 -> 5
+    // on a 128-frame timer is gone, because two writers of one logical value is
+    // how a HUD starts disagreeing with the game it is describing.
 
     // ---- upgrade: next state every 192 frames ----------------------------
     inc hudDemoUpgTick

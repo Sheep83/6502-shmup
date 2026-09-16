@@ -1169,6 +1169,16 @@ irqHandler:
     lda #$01
     sta $d019                           // acknowledge the raster IRQ
 
+    // THE LIFECYCLE SEAM, and it is five instructions. While a non-game state
+    // is up the executor must not run at all: no schedule, no batch, no phase
+    // chain, no page. gsAttractIrq programs a plain text display, holds every
+    // sprite off, advances the frame counter and returns. See src/gamestate.asm
+    // -- this is the one hook a later extravagant title presentation replaces.
+    lda gsNonGame
+    beq !gameplay+
+    jmp gsAttractIrq
+!gameplay:
+
     // Every phase shares this entry, and every far target goes through an
     // absolute jmp -- the dispatch chain is long past a relative branch's reach.
     //

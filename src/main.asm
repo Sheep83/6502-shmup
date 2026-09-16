@@ -350,6 +350,16 @@ BasicUpstart2(entry)
                                         // (MAX_OBJECTS, TYPE_PICKUP) and sfx
                                         // (SFX_TOKEN). BEFORE waves.asm, which
                                         // authors the tokens and needs PICKUP_P.
+#import "player_boom_art.asm"           // AFTER player.asm and pickup.asm: it
+                                        // pins itself between the token bitmap
+                                        // and screen page B
+#import "gamestate.asm"                 // AFTER hud.asm (HUD_LIVES_MAX,
+                                        // HUD_DIRTY_*), renderer.asm
+                                        // (FRAME_IRQ_LINE, PH_FRAME) and
+                                        // main's own scrPtr/terrain's trSrc,
+                                        // whose zero-page pairs it asserts
+                                        // against. The outer lifecycle: see
+                                        // reports/state-machine-reintegration.md
 #import "turrets.asm"                   // AFTER terrain.asm, whose glyph
                                         // namespace, charset window, metatile
                                         // geometry and derived stage height it
@@ -458,6 +468,14 @@ entry:
     jsr installRenderer                 // renderer owns the IRQ chain from here
     cli
 
+    // THE OUTER LIFECYCLE STARTS HERE, and the engine below it does not know
+    // it exists. gsBoot seeds the high-score table and enters ATTRACT; the
+    // router then calls gamePlayLoop for the PLAYING state exactly as the old
+    // game's mainLoop called its gameLoop. Nothing between this line and the
+    // renderer changed: the boot above still leaves a published schedule and a
+    // scrolled pair of pages, which is the state a game starts from.
+    jmp gsBoot                          // src/gamestate.asm; never returns
+
 // ---------------------------------------------------------------------------
 // The main loop runs once per DISPLAYED frame, paced by the renderer's own
 // frame counter. THE ORDER IS THE WHOLE OF PAGE OWNERSHIP:
@@ -471,7 +489,24 @@ entry:
 // So no main-thread write ever lands on the page the VIC is fetching, and the
 // page decision is made at exactly one point per frame.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// gamePlayLoop — the PLAYING state's own frame loop, called by the router in
+// src/gamestate.asm and returning to it the moment the state changes.
+//
+// This IS the old mainLoop, unchanged except for its name and the three
+// instructions at the bottom that let it end. The old game's gameLoop had the
+// same shape and the same job: run the engine until the lifecycle says stop.
+// ---------------------------------------------------------------------------
+// KEPT AS A LABEL ON PURPOSE. tests/harness.py's call() returns the program
+// counter here after driving a routine directly, and every existing test in the
+// suite depends on that. It now means "the top of the program", which since the
+// lifecycle arrived is the state router rather than the game loop -- so a test
+// that hijacked the CPU during GAME OVER resumes into GAME OVER, not into
+// gameplay that is not running.
 mainLoop:
+    jmp gsRouter
+
+gamePlayLoop:
     // HUD bitmap preparation lives in the SPIN, not in the once-per-frame block
     // below. That block runs immediately after the frame transaction and
     // reaches this point at around raster 10, which is inside the window where
@@ -483,7 +518,7 @@ mainLoop:
 
     lda frameCounter
     cmp lastFrameSeen
-    beq mainLoop                        // same displayed frame: nothing to do
+    beq gamePlayLoop                    // same displayed frame: nothing to do
 
     // DID THE MAIN THREAD MISS A FRAME? The counter advances by one per
     // displayed frame, so a step of two or more means a whole frame went by
@@ -505,7 +540,14 @@ mainLoop:
     pla
     sta lastFrameSeen
     jsr gameFrame
-    jmp mainLoop
+
+    // THE ONLY EXIT. playerFatalTick hands the lifecycle to GAME OVER when the
+    // last life's death presentation has finished; until then this is the same
+    // unconditional loop it has always been.
+    lda gsState
+    cmp #GS_PLAYING
+    beq gamePlayLoop
+    rts
 
 // ---------------------------------------------------------------------------
 // gameFrame — ONE displayed frame of game, in the order the engine requires.
@@ -600,6 +642,13 @@ gameFrame:
     // unless something is actually in flight.
     jsr ebulletPlayerTick
 
+    // RAMMING, and it sits here for the same reasons the projectile pass does:
+    // every enemy has moved, so the boxes compared are this frame's, and a
+    // collision resolved now frees its consequences before the spawners below
+    // ask for pool slots. It shares playerTakeHit with the projectile pass, so
+    // being rammed and being shot are the same event to everything downstream.
+    jsr playerBodyTick                  // src/collision.asm
+
     // THE TOKENS MEET THE SHIP, immediately after the projectiles do and for
     // the same reasons: every object has moved, and a collection resolved here
     // frees its slot before waveTick and the two firing ticks below come asking
@@ -650,6 +699,7 @@ gameFrame:
     jsr tokenTick                       // src/token.asm
 
     jsr hudDemoTick                   // score, lives and upgrade only: their
+
                                         // systems do not exist yet. Heat is fed
                                         // above, from the real weapon.
 
@@ -706,6 +756,17 @@ gameFrame:
 
     jsr regenTick
     jsr scrollTick
+
+    // THE LIFECYCLE'S ONE CALL INTO THE GAME FRAME, AND IT IS LAST.
+    //
+    // Everything above has run -- including the player's own death behaviour
+    // and, crucially, regenTick and scrollTick, which paint terrain into the
+    // screen pages. gsEnterGameOver clears that screen and stamps its text, so
+    // calling it any earlier meant the rest of this very frame repainted
+    // terrain straight over the words: measured, and the GAME OVER row came
+    // back full of terrain glyphs. Nothing after this line draws anything.
+    jsr playerFatalTick                 // src/player.asm -> gsEnterGameOver
+
     // fall through to the span measurement
 
 // ---------------------------------------------------------------------------

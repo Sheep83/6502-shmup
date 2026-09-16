@@ -431,6 +431,13 @@ def main():
         poke(mon, sym["logXHi"] + bolt, px[1])
         poke(mon, sym["logY"] + bolt, rd1(mon, sym["plyY"]))
         poke(mon, sym["plyInvuln"], 0)
+        # ...and the craft must be ALIVE to be hit: a dying one ignores bolts
+        # now, deliberately. See reports/player-death-fireball-collision.md.
+        for f in ("plyDead", "plyBoomFrame", "plyBoomTimer", "plyFatal"):
+            poke(mon, sym[f], 0)
+        poke(mon, sym["plyVisible"], 1)
+        poke(mon, sym["hudLives"], 200)
+
         hits0 = rd1(mon, sym["plyHits"])
         frame_top(mon, sym)
         check("a hostile bolt on the ship is a player hit, unchanged path",
