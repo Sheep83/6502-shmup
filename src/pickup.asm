@@ -56,6 +56,12 @@
 // whole of the interaction v1 wants.
 .const PICKUP_VY     = 1
 
+// ...APPLIED ON ONE FRAME IN TWO. See the note in pickupTick: the token is now
+// the centre of an encounter that has to be watched, so it descends at half
+// the scroll rate. A mask rather than a counter, so it costs no state and
+// every token on screen moves on the same frames.
+.const PICKUP_VY_MASK = %00000001
+
 // Where a token is authored to appear, above the aperture. The whole 21-line
 // sprite is above raster 55 at this Y, so a token FADES IN through the top
 // edge exactly as the enemy waves do rather than materialising in view.
@@ -211,6 +217,12 @@ pkTmp:       .byte 0
 pkSpawnXLo:  .byte 0
 pkSpawnXHi:  .byte 0
 
+// ...AND Y IS A PARAMETER NOW. It was a constant while tokens were authored on
+// the trigger list and every one entered from above the aperture. A token is
+// now dropped by a destroyed Dropper and must appear WHERE IT DIED, so the
+// caller says where. src/token.asm is the only caller.
+pkSpawnY:    .byte 0
+
 // PER-OBJECT KIND, one byte per POOL SLOT, written at spawn and then never
 // again for that token's life. It is on the OBJECT rather than looked up from
 // anything else for the same reason enySpecies is: a slot outlives the thing
@@ -296,8 +308,9 @@ pickupSpawn:
     sta logX,x
     lda pkSpawnXHi
     sta logXHi,x
-    lda #PICKUP_SPAWN_Y
-    sta logY,x
+    lda pkSpawnY                        // the CALLER's Y: a token now appears
+    sta logY,x                          // where its Dropper died, not at a
+                                        // fixed line above the aperture
 
     // ---- identity ---------------------------------------------------------
     lda pkTmp
@@ -360,7 +373,26 @@ pickupTick:
     lda pkColTab,y
     sta logCol,x                        // and NOTHING else. See the header.
 
-    // ---- the drift --------------------------------------------------------
+    // ---- the drift, ON EVERY OTHER FRAME ----------------------------------
+    // PROVISIONAL, AND HALF THE SPEED IT WAS. One pixel a frame matched the
+    // scroll exactly, which was right when a token was scenery to steer into.
+    // A token is now the prize at the centre of a three-enemy encounter, and
+    // at the old rate it crossed the aperture in under four seconds -- barely
+    // time for the reinforcement and egress to be seen at all, let alone
+    // judged.
+    //
+    // A FRAME-COUNTER BIT, NOT A FRACTIONAL VELOCITY. The token moves on even
+    // frames and holds on odd ones: one pixel every two frames, deterministic,
+    // no accumulator, no per-token byte and no sub-pixel machinery. The token
+    // no longer matches the scroll, and that is now correct -- it should read
+    // as an object hanging in the encounter rather than as part of the ground.
+    //
+    // THIS IS NOT FINAL BALANCE. It exists so the mechanic can be watched; the
+    // rate lives here, in one bit, for exactly that reason.
+    lda frameCounter
+    and #PICKUP_VY_MASK
+    bne !held+
+
     lda logY,x
     clc
     adc #PICKUP_VY
@@ -368,7 +400,22 @@ pickupTick:
     sta logY,x
     cmp #PICKUP_Y_MAX
     bcs pickupDespawn
-    rts
+!held:
+
+    // ---- how much of it is outside the aperture ---------------------------
+    // THE TOKEN IS CLIPPED BY THE SAME RULE AND THE SAME SCRATCH AS AN ENEMY,
+    // and this one call is the whole of it. src/enemy.asm's logClipAnnotate
+    // writes logClip from logY; the schedule builder turns that into a clamped
+    // physical Y and a row-shifted copy in the CURRENT/NEXT scratch pool, and
+    // src/clip.asm renders it from whatever logPtr names -- which for a token
+    // is the token's own bitmap.
+    //
+    // NOTHING TOKEN-SPECIFIC EXISTS ANYWHERE IN THAT PATH. The builder and the
+    // clipper never asked what type an entry was; a token simply never wrote
+    // the annotation, so it was admitted whole or not at all and fell off the
+    // bottom edge in one step. This is an eligibility fix, not a clipping
+    // change.
+    jmp logClipAnnotate                 // X preserved; its rts is ours
 
 // ---------------------------------------------------------------------------
 // pickupDespawn — this token's life ends uncollected. X = slot, preserved.

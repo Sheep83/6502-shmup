@@ -442,13 +442,16 @@
                     .eval frames = frames + 1
                     .var px = floor(x / 4)
                     .var py = floor(y / 4)
-                    // src/enemy.asm's three rules, direction and all: a
-                    // sprite behind a side border counts as gone only if it
+                    // src/enemy.asm's four rules, direction and all: a
+                    // sprite behind a border counts as gone only if it
                     // is still traveling that way, which is what lets a
-                    // pattern ENTER through one.
+                    // pattern ENTER through one. The TOP rule is the newest
+                    // and is the one every pattern here crosses on its way in
+                    // -- which is exactly why it asks the direction.
                     .if (px < 0) { .eval wrapped = true }
                     .if ((px < ENEMY_CLEAR_X_LEFT && vx < 0)
                          || (px >= ENEMY_CLEAR_X_RIGHT && vx > 0)
+                         || (py < ENEMY_CLEAR_Y_TOP && vy < 0)
                          || py >= ENEMY_CLEAR_Y) {
                         .eval freed = true
                     }
@@ -535,6 +538,23 @@
 .var trigSpecies = List().add(SPECIES_RING, SPECIES_DROPPER,
                               SPECIES_RING, SPECIES_DROPPER)
 
+// WHICH SIDE A DROPPER FLIES IN FROM. Read only when the species above is
+// SPECIES_DROPPER; a Ring wave carries whatever is written here and ignores it,
+// the same way a wave that does not shoot still carries a fire mask.
+//
+// A COLUMN AND NOT A RULE, for the same reason trigSpecies is one. "Alternate
+// the sides" would be arithmetic on the cursor that silently inverts for every
+// trigger after an inserted fifth; written down, the side a particular
+// appearance comes in on is content somebody chose, it reads at a glance, and
+// the mirrored appearance is one byte rather than a second code path.
+//
+// THE TWO SIDES ARE THE SAME ROUTINE. src/dropper.asm branches on this once, at
+// launch, to pick an entry X and the sign of a velocity; everything after that
+// -- the weave, the three passes, the reversals, the escape -- is direction
+// agnostic. Level 1 exercises both.
+.var trigSide = List().add(DROP_SIDE_LEFT, DROP_SIDE_LEFT,
+                           DROP_SIDE_LEFT, DROP_SIDE_RIGHT)
+
 // WHICH MEMBERS OF THIS APPEARANCE MAY SHOOT — a bitmask over MEMBER INDEX,
 // bit 0 the first member sent, and zero for a formation that does not shoot
 // at all.
@@ -591,12 +611,16 @@
 //                       well right of the formation rather than inside it
 //     trigger 3  X=150  with the loop, the one formation that does not shoot,
 //                       so there is a calm pass in which to go and get it
-.var trigToken = List().add(0, 220, 0, 150)
+// THE TOKEN COLUMN IS GONE, and its removal is the point of this slice. A
+// token used to be authored content an appearance could bring; it is now a
+// REWARD for destroying the level's one Dropper, dropped where that Dropper
+// died. No trigger creates one, and no P appears merely because a wave started.
+// See src/token.asm.
 .const WAVE_TRIGGERS = 4
 
 .if (trigDelta.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS
      || trigSpecies.size() != WAVE_TRIGGERS || trigFire.size() != WAVE_TRIGGERS
-     || trigToken.size() != WAVE_TRIGGERS) {
+     || trigSide.size() != WAVE_TRIGGERS) {
     .error "the trigger list is not WAVE_TRIGGERS entries on every axis"
 }
 .for (var t = 0; t < WAVE_TRIGGERS; t++) {
@@ -615,13 +639,6 @@
     // knows how many members it sends, so the assembler can say so.
     .if ((trigFire.get(t) >> waveDefs.get(trigDef.get(t)).get(0)) != 0) {
         .error "a trigger's fire mask names a member this wave never sends"
-    }
-    // A TOKEN AUTHORED OFF THE PLAYFIELD is a token the player can never reach
-    // and never sees -- it would drift down behind a border and despawn. The
-    // visible window is 24..343 and a sprite is 24 wide, so a token must start
-    // inside 24..319 to be wholly on screen.
-    .if (trigToken.get(t) != 0 && (trigToken.get(t) < 24 || trigToken.get(t) > 319)) {
-        .error "a trigger authors a token outside the visible playfield"
     }
 }
 // THE ALTERNATION ITSELF IS CHECKED, including across the wrap -- the list
@@ -654,6 +671,9 @@ wvIndex:   .fill WAVE_SLOTS, 0      // members sent so far: drives xStep
 wvFire:    .fill WAVE_SLOTS, 0      // the authored fire mask over member
                                     // index, latched with the species below
                                     // and read once per member as it is sent
+wvSide:    .fill WAVE_SLOTS, 0      // the entry side a Dropper in this wave
+                                    // flies in from, latched with the species
+                                    // below and for the same reason
 wvSpecies: .fill WAVE_SLOTS, 0      // which enemy this instance is made of,
                                     // copied from the authored trigger column
                                     // when the wave was armed. Held per
@@ -755,10 +775,34 @@ waveTick:
     lda worldProgressHi
     cmp wvNextAtHi
     bcc !noTrigger+
-    bne !fire+
+    bne !due+
     lda worldProgressLo
     cmp wvNextAtLo
     bcc !noTrigger+
+!due:
+    // ---- ...and is the stage allowed to run right now? --------------------
+    // A TOKEN ENCOUNTER PAUSES THE DIRECTOR, IT DOES NOT SKIP IT. The encounter
+    // is meant to be three defenders and one token, and an authored wave
+    // arriving into the middle of it would be four enemies the transition never
+    // agreed to. But the trigger list is AUTHORED PROGRESSION -- a stage the
+    // player is supposed to see -- so it is held rather than lost.
+    //
+    // The hold is one 16-bit copy: while the encounter runs, a trigger that has
+    // come due is walked forward to the world's own shoulder, so it stays
+    // exactly due and never accumulates a backlog. The cursor does not move,
+    // worldProgress is untouched, and the frame the encounter ends the held
+    // trigger fires -- one wave, on the next tick, not a burst of every wave the
+    // encounter outlasted.
+    //
+    // This is deliberately the whole seam. Nothing else in the director knows
+    // encounters exist, and removing token.asm would leave one dead branch.
+    lda tkActive
+    beq !fire+
+    lda worldProgressLo
+    sta wvNextAtLo
+    lda worldProgressHi
+    sta wvNextAtHi
+    jmp !noTrigger+
 !fire:
     jsr waveStartNext
 !noTrigger:
@@ -785,25 +829,11 @@ waveTick:
 // worse than one that does not arrive.
 // ---------------------------------------------------------------------------
 waveStartNext:
-    // ---- the token this appearance brings, if any -------------------------
-    // FIRST, AND DELIBERATELY BEFORE THE INSTANCE SCAN. A token is authored
-    // against the MOMENT, not against the formation: if both wave instances
-    // are busy the wave is dropped, and a token dropped with it would make the
-    // level quietly different every time the director happened to be behind.
-    // The two are independent authored content that share a trigger.
-    ldy wvNextTrig
-    lda waveTrigTokenLo,y
-    ora waveTrigTokenHi,y
-    beq !noToken+                       // this appearance brings none
-    lda waveTrigTokenLo,y
-    sta pkSpawnXLo
-    lda waveTrigTokenHi,y
-    sta pkSpawnXHi
-    lda #PICKUP_P                       // the only authored kind today
-    jsr pickupSpawn                     // carry set = the pool refused, which
-                                        // pickupSpawn counts and this does not
-                                        // need to care about
-!noToken:
+    // A TOKEN IS NO LONGER AUTHORED HERE. It used to be a column on the trigger
+    // list -- an appearance could simply bring one -- and that is exactly the
+    // semantics this slice replaces: a token is now a REWARD, dropped by a
+    // destroyed Dropper at the place it died, and nothing else in the game
+    // creates one. See src/token.asm and the death hook in src/enemy.asm.
 
     // ---- find a free instance --------------------------------------------
     ldx #WAVE_SLOTS - 1
@@ -830,6 +860,11 @@ waveStartNext:
                                         // wave being armed.
     lda waveTrigFire,y                  // ...and the fire mask with it, for the
     sta wvFire,x                        // same reason and at the same moment
+    lda waveTrigSide,y                  // ...and the Dropper's entry side, which
+    sta wvSide,x                        // is meaningless for a Ring wave and
+                                        // latched anyway: one unconditional
+                                        // copy beats a branch that has to know
+                                        // what a species is
 
     // The member count comes from the definition, so a wave that is armed is
     // armed completely: nothing below can leave it half-configured.
@@ -1139,7 +1174,34 @@ waveSpawnMember:
     // without touching it.
     ldy wvInst
     lda wvSpecies,y
+
+    // ONE LIVE DROPPER, EVER, AND THIS IS THE WHOLE RULE. A Dropper's death is
+    // what drops the token, so two of them alive at once would mean two tokens
+    // and two overlapping encounters. The check is made HERE, at the single
+    // instruction that commits a species to an object, rather than at the
+    // trigger or at the instance: this is the last moment before the enemy
+    // exists and the only place the answer can be wrong.
+    //
+    // A REFUSED DROPPER STILL FLIES. It is substituted with a Ring rather than
+    // dropped, because the authored wave's shape, count and timing are the
+    // content -- silently spawning one fewer member would quietly rewrite an
+    // encounter the level author wrote, where a different enemy on the same
+    // path keeps it.
+    cmp #SPECIES_DROPPER
+    bne !species+
+    ldy tkDropperLive
+    beq !claim+
+    lda #SPECIES_RING                   // one is already out there
+    jmp !species+
+!claim:
+    ldy #1
+    sty tkDropperLive                   // this one is now THE Dropper;
+                                        // src/enemy.asm clears it when this
+                                        // object dies or leaves
+!species:
     sta enySpecies,x
+
+    ldy wvInst
 
     // ---- may THIS ONE shoot? ----------------------------------------------
     // TWO INDEPENDENT AUTHORITIES, AND BOTH MUST SAY YES. The encounter says
@@ -1204,6 +1266,26 @@ waveSpawnMember:
                                         // guarantee that does not depend on
                                         // another file's promise
     jsr wmEnterStage                    // X preserved
+
+    // ---- ...AND A DROPPER IS THEN TAKEN OFF THAT PATH ---------------------
+    // AFTER wmEnterStage, not before, and the order is the whole of it: the
+    // stage the wave just armed writes wmMode, wmVX, wmVY and wmTimer, so a
+    // flight installed above would be overwritten a dozen instructions later.
+    // Arm the member like any other and then take it over, which also means
+    // there is never a half-configured object -- it is a complete wave member
+    // right up to the instant it becomes a complete Dropper.
+    //
+    // WHY A DROPPER DOES NOT FLY ITS WAVE'S PATH. Its death is the only death
+    // in the game that is worth something, so WHERE it dies is a gameplay fact:
+    // killed low, the P it drops has no room for the encounter it starts. A
+    // formation path authored for Rings cannot promise that. See src/dropper.asm.
+    lda enySpecies,x
+    cmp #SPECIES_DROPPER
+    bne !ordinary+
+    ldy wvInst
+    lda wvSide,y                        // the side this appearance authored
+    jsr dropperLaunch                   // X preserved
+!ordinary:
 
     // ---- combat: an ordinary enemy, exactly as before ---------------------
     lda #ENEMY_MAX_HP
@@ -1304,13 +1386,11 @@ waveTrigSpecies:
 .for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigSpecies.get(t) }
 waveTrigFire:
 .for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigFire.get(t) }
-waveTrigTokenLo:
-.for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte <trigToken.get(t) }
-waveTrigTokenHi:
-.for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte >trigToken.get(t) }
+waveTrigSide:
+.for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigSide.get(t) }
 waveTrigEnd:
-.if (waveTrigEnd - waveTrigDelta != 6 * WAVE_TRIGGERS) {
-    .error "the trigger table is not six bytes per trigger"
+.if (waveTrigEnd - waveTrigDelta != 5 * WAVE_TRIGGERS) {
+    .error "the trigger table is not five bytes per trigger"
 }
 
 .if (* > $8000) { .error "the wave code has outgrown its $7c00 segment" }

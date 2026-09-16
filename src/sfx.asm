@@ -140,7 +140,8 @@
 .const SFX_HURT       = 3               // the player takes damage
 .const SFX_ESHOT      = 4               // a moving enemy fires
 .const SFX_TOKEN      = 5               // the player collects a token
-.const SFX_COUNT      = 6
+.const SFX_PING       = 6               // the Orbital Dropper's sonar locator
+.const SFX_COUNT      = 7
 
 // --- the channels -----------------------------------------------------------
 // One per SID voice, and the channel index is the voice number less one. An
@@ -180,12 +181,17 @@ sfxChFrame:  .byte 0, 0, 0
 sfxCurCh:    .byte 0
 
 // --- diagnostics, saturating like every other counter in this engine --------
-// One counter, not v1's accepted/rejected pair: with a voice per effect
-// nothing can be refused, so every request is honoured and a rejection counter
-// would be a byte that is provably always zero. This one is still worth its
-// byte — it is how a test, or a person at the monitor, distinguishes "the hook
-// never fired" from "the hook fired and the sound was wrong".
+// It is how a test, or a person at the monitor, distinguishes "the hook never
+// fired" from "the hook fired and the sound was wrong".
 sfxRequests: .byte 0
+
+// ...AND THE REJECTION COUNTER IS BACK. It was removed when global priority
+// was: with a voice per effect nothing could be refused and the byte was
+// provably always zero. The Dropper's sonar ping reintroduces exactly one way
+// for a request to be turned away -- a routine voice-2 effect arriving during
+// the ping's four frames -- so this counts those, and a test can tell that the
+// ping was genuinely protected rather than merely lucky.
+sfxRefused:  .byte 0
 
 // The requested id, parked here for the length of sfxRequest. It is here and
 // not on the stack because the caller's X has to be saved BEFORE the id can be
@@ -239,6 +245,7 @@ sfxInit:
 
     lda #0
     sta sfxRequests
+    sta sfxRefused
     // fall through: the voices' own silence, and the state that describes it
 
 // ---------------------------------------------------------------------------
@@ -316,6 +323,48 @@ sfxRequest:
 
     lda sfxVoiceTab,x
     tay                                 // Y = the effect's channel, 0..2
+
+    // ---- IS THE VOICE PROTECTED RIGHT NOW? --------------------------------
+    // Exactly one sound in this game is protected, and it is protected from
+    // exactly one class of thing, so this is a RULE and deliberately not a
+    // ranking. The requirement the Dropper ping imposes is:
+    //
+    //     the ping outranks a routine voice-2 effect...  ping > eshot, token
+    //     ...but a destruction outranks the ping...      kill >= ping
+    //     ...and those two are still peers as before     kill == eshot
+    //
+    // which no single priority NUMBER can express -- give kill a rank above
+    // the ping and an enemy shot stops being audible during a destruction,
+    // which is behaviour nobody asked to change. So the test names the one
+    // protected sound instead of ranking all six.
+    //
+    // THE PING DOES NOT RESERVE VOICE 2. This looks at what is PLAYING, and
+    // sfxChannel returns the voice to SFX_NONE the moment an effect finishes
+    // -- so between pings, which is most of the time, the first instruction
+    // below falls straight through and voice 2 behaves exactly as it always
+    // did. A Dropper overhead costs the world its enemy sounds for four
+    // frames in forty-eight.
+    //
+    // AND A DESTRUCTION IS NEVER MASKED. The one moment the ping must give way
+    // is the Dropper's own death: that is the feedback that ends the encounter
+    // it was announcing, and hearing the locator survive the thing it was
+    // locating would be absurd. SFX_KILL is let through.
+    lda sfxChId,y
+    cmp #SFX_PING
+    bne !accept+                        // nothing else is ever protected
+    lda sfxReqId
+    cmp #SFX_PING
+    beq !accept+                        // a ping may retrigger a ping
+    cmp #SFX_KILL
+    beq !accept+                        // ...and a destruction ends one
+
+    lda sfxRefused                      // saturating: that a sound was held
+    cmp #$ff                            // off is worth being able to see
+    beq !out+
+    inc sfxRefused
+    jmp !out+                           // X and Y are restored there
+
+!accept:
     txa
     sta sfxChId,y
     lda #0
@@ -479,6 +528,7 @@ sfxVoiceTab:                            // by effect id: the channel it owns
     .byte SFX_CH_HURT                   // the ship is hit  -> voice 3
     .byte SFX_CH_KILL                   // an enemy fires   -> voice 2
     .byte SFX_CH_KILL                   // a token collected-> voice 2
+    .byte SFX_CH_KILL                   // the Dropper ping -> voice 2
                                         //
                                         // THREE EFFECTS ON ONE VOICE, and the
                                         // arbitration is the one this module
@@ -598,6 +648,8 @@ sfxCtrlTab:                             // the effect's waveform, read on the
     .byte SID_SAW   | SID_GATE          // from when the sweep runs out
     .byte SID_PULSE | SID_GATE          // the enemy shot, and the only pulse
     .byte SID_TRI   | SID_GATE          // the token chime, and the only triangle
+    .byte SID_PULSE | SID_GATE          // the sonar ping: pulse, but at a duty
+                                        // nothing else uses -- see sfxPWHiTab
 
 sfxADTab:                               // attack 0 throughout: every one of
     .byte 0                             // these strikes rather than swells
@@ -606,10 +658,16 @@ sfxADTab:                               // attack 0 throughout: every one of
     .byte $09                           // decay 9 -> 750 ms
     .byte $03                           // decay 3 -> 72 ms: a spit, not a note
     .byte $05                           // decay 5 -> 168 ms: a chime may ring
+    .byte $06                           // decay 6 -> 204 ms: the ping RINGS,
+                                        // which is the whole character of it.
+                                        // The gate is only held for 80 ms; the
+                                        // rest of what the ear hears is this
+                                        // envelope falling away
 
 sfxSRTab:                               // SUSTAIN ZERO, ALWAYS. See above.
     .byte 0
     .byte $00                           // release 0 -> 6 ms: no tail
+    .byte $00
     .byte $00
     .byte $00
     .byte $00
@@ -627,9 +685,15 @@ sfxPWHiTab:
                                         // buzzy, which is what makes it read as
                                         // machinery rather than as a tone
     .byte 0                             // triangle: unused
+    .byte $08                           // 50% -- a hollow square, and the one
+                                        // duty in this game that is not the
+                                        // enemy shot's thin $02. Pure enough to
+                                        // read as a locator tone, hard enough
+                                        // not to be mistaken for the token's
+                                        // triangle chime on the same voice
 
 sfxLenTab:                              // sweep entries, and so frames
-    .byte 0, 3, 12, 30, 3, 6
+    .byte 0, 3, 12, 30, 3, 6, 4
 
 // Where each effect's slice of the shared sweep table starts. Stated before
 // the table that names them: KickAssembler resolves .const strictly in order.
@@ -638,11 +702,12 @@ sfxLenTab:                              // sweep entries, and so frames
 .const SFX_HURT_SWEEP  = 15
 .const SFX_ESHOT_SWEEP = 45
 .const SFX_TOKEN_SWEEP = 48
-.const SFX_SWEEP_LEN   = 54
+.const SFX_PING_SWEEP  = 54
+.const SFX_SWEEP_LEN   = 58
 
 sfxBaseTab:                             // first sweep entry, by id
     .byte 0, SFX_FIRE_SWEEP, SFX_KILL_SWEEP, SFX_HURT_SWEEP, SFX_ESHOT_SWEEP
-    .byte SFX_TOKEN_SWEEP
+    .byte SFX_TOKEN_SWEEP, SFX_PING_SWEEP
 
 // ---------------------------------------------------------------------------
 // THE SHARED SWEEP TABLES. Three effects' per-frame data laid end to end, each
@@ -679,6 +744,11 @@ sfxSweepLo:
     // other effect in this game falls; a reward is the one thing that should
     // go up, and the direction alone tells the player it was good news.
     .byte $37, $84, $79, $6d, $09, $a4
+    // ping: 2100, 2040, 1980, 1925 Hz -- a SETTLE, not a sweep. Four frames
+    // across barely a whole tone, which the ear hears as one pitch with a
+    // slight give in it: the give is what stops a pure square reading as a
+    // test tone and makes it read as a locator.
+    .byte $b0, $b2, $b4, $0c
 
 sfxSweepHi:
     .byte $26, $19, $10
@@ -688,6 +758,7 @@ sfxSweepHi:
     .byte $09, $08, $07, $07, $06, $06, $05, $05, $04, $04
     .byte $77, $4f, $35
     .byte $35, $42, $56, $6a, $85, $9f
+    .byte $8b, $87, $83, $80
 
 sfxSweepCtrl:
     // fire: struck once, and held for the length of the sweep
@@ -703,6 +774,9 @@ sfxSweepCtrl:
     .fill 3, SID_PULSE | SID_GATE
     // token: one gated triangle, struck once and held while the pitch climbs
     .fill 6, SID_TRI | SID_GATE
+    // ping: one gated pulse, struck once. Short on purpose -- the sound is
+    // mostly its own decay, and the silence after it is half the cue
+    .fill 4, SID_PULSE | SID_GATE
 
 // --- the tables must agree with each other, and the assembler can say so ----
 .if (sfxSweepHi - sfxSweepLo != SFX_SWEEP_LEN)   { .error "the sweep low-byte table is not SFX_SWEEP_LEN entries" }
@@ -712,6 +786,7 @@ sfxSweepCtrl:
 .if (SFX_KILL_SWEEP + 12 != SFX_HURT_SWEEP)      { .error "the kill sweep does not end where the hurt sweep begins" }
 .if (SFX_HURT_SWEEP + 30 != SFX_ESHOT_SWEEP)     { .error "the hurt sweep does not end where the enemy-shot sweep begins" }
 .if (SFX_ESHOT_SWEEP + 3 != SFX_TOKEN_SWEEP)     { .error "the enemy-shot sweep does not end where the token sweep begins" }
-.if (SFX_TOKEN_SWEEP + 6 != SFX_SWEEP_LEN)       { .error "the token sweep does not end where the table does" }
+.if (SFX_TOKEN_SWEEP + 6 != SFX_PING_SWEEP)      { .error "the token sweep does not end where the ping sweep begins" }
+.if (SFX_PING_SWEEP + 4 != SFX_SWEEP_LEN)        { .error "the ping sweep does not end where the table does" }
 
 .if (* > $1e00) { .error "the sfx module has run into the sorter at $1e00" }

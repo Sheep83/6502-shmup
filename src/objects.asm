@@ -50,6 +50,24 @@
 // a token can never be mistaken for something that hurts. See src/pickup.asm.
 .const TYPE_PICKUP   = 3
 
+// --- what an ENEMY object is currently doing with itself ---------------------
+// A second per-slot identity beside the type, and it lives HERE rather than in
+// src/token.asm for one reason of import order: src/enemy.asm has to compare
+// against ROLE_GUARD, and it is imported long before the token encounter that
+// owns the behaviour. The pool is where per-slot meanings are declared, so this
+// is where a per-slot meaning belongs.
+//
+// ROLE_NORMAL is 0 so a zeroed slot is on its authored path by construction,
+// exactly as TYPE_NONE makes one typeless. The three guard posts are
+// CONSECUTIVE from ROLE_GUARD, so "is this a guard" and "which post" are one
+// compare and one subtract rather than two bytes that could disagree.
+//
+// Only src/token.asm ever writes a value other than ROLE_NORMAL; see the note
+// at the top of that file for why the role is stored and never inferred.
+.const ROLE_NORMAL   = 0    // flying the path its wave authored
+.const ROLE_EGRESS   = 1    // dismissed from an encounter: leaving under WM_EXIT
+.const ROLE_GUARD    = 2    // ...and +1, +2: the three posts around a token
+
 // ===========================================================================
 // State. MAIN THREAD ONLY.
 // ===========================================================================
@@ -170,6 +188,13 @@ objectZeroSlot:
                                         // spawner overwrote this -- and a
                                         // future species with BEHAVIOUR
                                         // attached would inherit that too.
+    sta enyRole,x                       // ...NOR WHAT IT WAS DOING. A slot
+                                        // freed by a token guard and handed to
+                                        // a wave member would otherwise have
+                                        // the new enemy walk to a ring post
+                                        // instead of flying its authored path,
+                                        // and would count toward the three the
+                                        // encounter is trying to maintain.
     // ...NOR ITS TRAJECTORY. src/movement.asm's per-object arrays are indexed
     // by this same slot and merely live elsewhere in memory, this block having
     // run up against the collision state at $c5f3. The clearing belongs HERE:

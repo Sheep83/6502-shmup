@@ -361,12 +361,29 @@ BasicUpstart2(entry)
 #import "movement.asm"                  // AFTER objects.asm (MAX_OBJECTS) and
                                         // renderer.asm (the production Y band
                                         // its arc is proven against)
+#import "dropper.asm"                   // AFTER movement.asm (wmApplyVelocity,
+                                        // which carries its horizontal travel),
+                                        // enemy.asm (SPECIES_DROPPER,
+                                        // ENEMY_FIRE_NONE, MIN_SPRITE_Y) and
+                                        // sfx.asm (SFX_PING). BEFORE waves.asm,
+                                        // which authors the entry side with the
+                                        // DROP_SIDE_* constants declared here
 #import "waves.asm"                     // AFTER movement.asm (the WM_*
                                         // primitives and arc geometry its
                                         // authored content names), enemy.asm
                                         // (ENEMY_PTR, ENEMY_MAX_HP) and
                                         // scroll.asm (worldProgress, the clock
                                         // its triggers are authored against)
+#import "token.asm"                     // LAST of the gameplay modules. It names
+                                        // something from nearly all of them --
+                                        // the pool (objectAlloc), the enemy
+                                        // (SPECIES_RING, ENEMY_MAX_HP,
+                                        // ENEMY_FIRE_NONE), movement (WM_EXIT,
+                                        // wmBaseCol), pickups (PICKUP_P,
+                                        // pickupSpawn) and the director
+                                        // (WAVE_SLOTS, wvActive) -- and nothing
+                                        // names it back except two call sites
+                                        // and one role compare
 
 // OUTSIDE VIC BANK 0, with the player, the scroller, the weapon, the object
 // pool, the enemy and collision. Every byte in this file is main-thread code or
@@ -620,7 +637,19 @@ gameFrame:
     // whatever the stage is doing.
     jsr waveTick
 
-    jsr hudDemoTick                     // score, lives and upgrade only: their
+    // THE TOKEN ENCOUNTER, AFTER THE DIRECTOR AND AFTER EVERYTHING HAS MOVED.
+    // Last because it is the only thing that reads positions written this frame:
+    // the guards walked during objectUpdateAll and the token fell with them, so
+    // caching the token's place here gives every guard in the NEXT frame the
+    // same settled answer. It is also where the encounter notices the token was
+    // collected or lost -- collisionTick and pickupTick have both already run,
+    // so the ending is seen on the frame it happened.
+    //
+    // Costs three cycles and an rts when no encounter is running, which is most
+    // of the level.
+    jsr tokenTick                       // src/token.asm
+
+    jsr hudDemoTick                   // score, lives and upgrade only: their
                                         // systems do not exist yet. Heat is fed
                                         // above, from the real weapon.
 
@@ -771,6 +800,13 @@ gameInit:
                                         // trigger one delta of worldProgress
                                         // away. AFTER objectInit, whose empty
                                         // pool it assumes
+    jsr dropperInit                     // no Dropper in flight, no ping pending
+    jsr tokenInit                       // no encounter, no roles, and above all
+                                        // NO LIVE DROPPER: a restart that
+                                        // inherited that one flag from the
+                                        // previous session would refuse the new
+                                        // level its Dropper forever, and the
+                                        // token could never be earned again
     jsr playerEmit
     jsr sortTick
     jsr buildSchedule
@@ -1026,3 +1062,5 @@ gameSpanOver:  .byte 0                  // frames whose span exceeded 255 lines:
                                         // the span above is then a floor
 gameOverrun:   .byte 0                  // displayed frames the main thread did
                                         // not prepare a frame for. MUST read 0.
+
+.if (* > $5400) { .error "main has run into the token encounter code at $5400" }

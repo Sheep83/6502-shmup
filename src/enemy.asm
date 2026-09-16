@@ -194,6 +194,15 @@
                                     // the FIRST Y at which the sprite's top is
                                     // past the bottom of the aperture, so
                                     // nothing of it remains inside.
+.const ENEMY_CLEAR_Y_TOP = ENEMY_HIDDEN_Y + 1                 // 35
+                                    // ...and the mirror of it at the other
+                                    // end: the first Y at which any part of the
+                                    // sprite is still inside the aperture, so
+                                    // BELOW this nothing of it remains. Used
+                                    // only with a direction test -- every wave
+                                    // spawns above this line and flies down
+                                    // through it, so position alone would free
+                                    // every enemy in the game at birth.
 
 // SIDE CLEARANCE. The renderer admits on Y ALONE -- there is no X test in the
 // builder -- so a sprite that is half off the left or right edge is scheduled
@@ -566,7 +575,40 @@ enemyTick:
     // Two enemies from two waves can be at different points of different
     // primitives in one call to objectUpdateAll -- the property the encounter
     // director is built on.
+    // ...UNLESS THE TOKEN ENCOUNTER HAS TAKEN THIS ONE OVER. A guard is an
+    // ordinary enemy in every respect except where it gets its position from:
+    // src/token.asm walks it toward a post on the ring around the token
+    // instead, and no movement program runs for it at all. That is the whole
+    // of "detached from its authored path" -- one branch, here, and nothing in
+    // src/movement.asm has to know roles exist.
+    //
+    // A DISMISSED enemy is NOT routed away: ROLE_EGRESS is flown by the
+    // ordinary wmTick, because the encounter gave it a terminal WM_EXIT and
+    // the movement interpreter already knows how to fly one of those.
+    // ...OR UNLESS IT IS THE DROPPER, WHICH FLIES ITS OWN PATH. A Dropper is
+    // checked FIRST and never reaches the role test, because a Dropper can
+    // never be anything but ROLE_NORMAL: roles are handed out by the token
+    // encounter, which only exists once a Dropper has died, and the
+    // one-live-Dropper rule means there is no second one alive to be posted.
+    // Testing species first costs the common case one load and one compare
+    // and saves the Dropper both.
+    lda enySpecies,x
+    cmp #SPECIES_DROPPER
+    beq !dropper+
+
+    lda enyRole,x
+    cmp #ROLE_GUARD
+    bcc !authored+                      // ROLE_NORMAL or ROLE_EGRESS
+    jsr tokenGuardMove
+    jmp !moved+
+
+!dropper:
+    jsr dropperFly                      // src/dropper.asm: three passes across
+    jmp !moved+                         // the top of the aperture, then out
+
+!authored:
     jsr wmTick
+!moved:
 
     // THE DESPAWN RULES: HAS THE SPRITE LEFT THE APERTURE ALTOGETHER?
     //
@@ -591,23 +633,41 @@ enemyTick:
     // High byte set, so X is 256..511: the only way out is the right edge.
     lda logX,x
     cmp #ENEMY_CLEAR_X_RIGHT_LO
-    bcc !checkBottom+
+    bcc !checkVertical+
     lda wmVX,x
-    beq !checkBottom+                   // parked behind the border: not gone
-    bmi !checkBottom+                   // coming back in
+    beq !checkVertical+                   // parked behind the border: not gone
+    bmi !checkVertical+                   // coming back in
     jmp !gone+
 
 !checkLeft:
     lda logX,x
     cmp #ENEMY_CLEAR_X_LEFT
-    bcs !checkBottom+
+    bcs !checkVertical+
     lda wmVX,x
     bmi !gone+                          // still travelling left: it has left
 
-!checkBottom:
+!checkVertical:
+    // THE VERTICAL PAIR, AND THE TOP HALF ASKS WHICH WAY IT IS GOING for
+    // exactly the reason the side tests do. Every authored wave spawns ABOVE
+    // the aperture and flies down into it, so a rule that freed anything above
+    // the top edge would kill every enemy in the game on its first frame. An
+    // enemy above the aperture on its way IN is alive; the same enemy above the
+    // same edge on its way OUT is gone.
+    //
+    // Nothing had ever left that way until v2.1, which is why this test is
+    // newer than the other three: the token encounter dismisses its surviving
+    // protectors UPWARD rather than down through the player who has just
+    // collected the token (see src/token.asm). WM_EXIT carries them, wmVY is
+    // signed, and this is the edge that retires them.
     lda logY,x
     cmp #ENEMY_CLEAR_Y
-    bcc !alive+
+    bcs !gone+                          // below the bottom: gone either way
+    cmp #ENEMY_CLEAR_Y_TOP
+    bcs !alive+                         // inside the band: the common case, and
+                                        // the only one that costs a compare
+    lda wmVY,x
+    bmi !gone+                          // still travelling up: it has left
+    bpl !alive+                         // descending or parked: arriving
 !gone:
     jmp enemyDespawn
 !alive:
@@ -629,6 +689,14 @@ enemyTick:
 // the admission band, so the builder's ordinary Y test refuses the entry and a
 // fully invisible enemy costs no scratch block, no mux slot and no schedule
 // entry -- while remaining perfectly alive.
+//
+// IT IS SHARED, AND THE LABEL IS WHY. enemyTick falls straight into this, but
+// src/pickup.asm calls it: a token is clipped by exactly the same rule and
+// through exactly the same schedule-owned scratch, so it asks the routine that
+// already knows the rule rather than carrying a second copy that could drift.
+// Nothing in here is enemy-specific -- it reads logY and writes logClip.
+// Entry/exit: X = the logical slot, preserved.
+logClipAnnotate:
     lda logY,x
     cmp #MIN_SPRITE_Y
     bcc !above+
@@ -718,7 +786,46 @@ enemyDeathTick:
 !release:
     // The death animation is over. A NORMAL despawn: the same call, the same
     // membership update, the same guarantee that CURRENT is not touched.
+    //
+    // ---------------------------------------------------------------------
+    // ...EXCEPT THAT A DESTROYED DROPPER DROPS A TOKEN, AND THIS IS THE HOOK
+    // ---------------------------------------------------------------------
+    // THE LOGICAL DESTRUCTION EVENT AND NOTHING ELSE. This path is reached
+    // only by an enemy whose health reached zero and whose death animation has
+    // run out; an enemy that merely flew off an edge goes through the despawn
+    // rules in enemyTick and never arrives here. So a Dropper the player let
+    // escape drops nothing, which is the rule the reward depends on.
+    //
+    // Nothing here reads a sprite pointer, an animation frame, a colour or any
+    // VIC state: the species byte is the identity and objHP reaching zero is
+    // the event.
+    //
+    // THE ORDER IS THE ALLOCATION POLICY. The position is captured first
+    // because objectFree zeroes the slot, and the slot is released BEFORE the
+    // token is asked for -- which guarantees the pool has room for it. A
+    // reward the player earned must not be lost to a full pool, and this costs
+    // nothing: the object that just died was occupying exactly the slot the
+    // token needs. No deferred queue, no retry, no dropped token.
+    lda enySpecies,x
+    cmp #SPECIES_DROPPER
+    beq !dropper+
     jmp enemyDespawn
+
+!dropper:
+    lda logX,x
+    sta pkSpawnXLo
+    lda logXHi,x
+    sta pkSpawnXHi
+    lda logY,x
+    sta pkSpawnY                        // the token appears where it died
+
+    jsr enemyDespawn                    // frees the slot: capacity guaranteed
+    txa                                 // objectUpdateAll requires X back, and
+    pha                                 // the encounter clobbers it
+    jsr tokenDropperDied
+    pla
+    tax
+    rts
 
 // ---------------------------------------------------------------------------
 // enemyBaseColour — the colour a hit flash returns to.
@@ -742,6 +849,18 @@ enemyBaseColour:
 // edited. That is the whole point of the boundary.
 // ---------------------------------------------------------------------------
 enemyDespawn:
+    // THE ONE PLACE A DROPPER'S LIVENESS IS RELEASED, and it is here rather
+    // than on the death path because BOTH ways of leaving have to clear it: a
+    // Dropper that was shot and one that simply flew off the bottom both stop
+    // being the live Dropper. Reading the species before objectFree matters --
+    // objectZeroSlot is about to erase it.
+    lda enySpecies,x
+    cmp #SPECIES_DROPPER
+    bne !notDropper+
+    lda #0
+    sta tkDropperLive
+!notDropper:
+
     jsr objectFree
 
     inc enyDespawned                    // 16-bit, saturating at $ffff
