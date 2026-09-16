@@ -63,7 +63,7 @@ MIN_SPRITE_Y, MAX_SPRITE_Y = 55, 226
 STAGE_ROWS       = 420                  # src/terrain.asm TERRAIN_STAGE_ROWS
 SCREEN_ROWS      = 25
 STAGE_START_ROW  = STAGE_ROWS - SCREEN_ROWS
-TYPE_NONE, TYPE_ENEMY, TYPE_EBULLET = 0, 1, 2
+TYPE_NONE, TYPE_ENEMY, TYPE_EBULLET, TYPE_PICKUP = 0, 1, 2, 3
 PLAYER_SLOT_MASK = 0b00000011
 
 
@@ -143,16 +143,17 @@ def main():
               len(set(counts)) > 1, f"{sorted(set(counts))}")
         # Every ACTIVE slot must carry a type this engine knows about. An
         # enemy bullet is an ordinary object now (not a special case), so both
-        # TYPE_ENEMY and TYPE_EBULLET are legitimate; TYPE_NONE in an active
+        # TYPE_ENEMY, TYPE_EBULLET and TYPE_PICKUP are legitimate; TYPE_NONE in an active
         # slot, or anything outside that pair, is pool corruption.
         bad = []
         for s in samples:
             for i in range(32):
                 if i < MAX_OBJECTS and s["logActive"][i] and \
-                        s["objType"][i] not in (TYPE_ENEMY, TYPE_EBULLET):
+                        s["objType"][i] not in (TYPE_ENEMY, TYPE_EBULLET,
+                                                TYPE_PICKUP):
                     bad.append((i, s["objType"][i]))
         check("every active pool slot holds a known production type "
-              "(enemy or hostile projectile)", not bad, f"{bad[:5]}")
+              "(enemy, hostile projectile or pickup)", not bad, f"{bad[:5]}")
         active_counts = [sum(s["logActive"][:MAX_OBJECTS]) for s in samples]
         mism = [(a, c) for a, c in zip(active_counts, counts) if a != c]
         check("logCount agrees with the number of active slots on every "

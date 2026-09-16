@@ -43,6 +43,12 @@
 // src/collision.asm's traceRay filters on TYPE_ENEMY, so the player's weapon
 // cannot shoot incoming bullets down.
 .const TYPE_EBULLET  = 2
+// A COLLECTIBLE TOKEN: an ordinary pool object with an ordinary logical
+// presentation, and the type is what keeps it out of everything meant for the
+// other two -- traceRay filters on TYPE_ENEMY so the player's cannon cannot
+// shoot its own pickups down, and ebulletPlayerTick filters on TYPE_EBULLET so
+// a token can never be mistaken for something that hurts. See src/pickup.asm.
+.const TYPE_PICKUP   = 3
 
 // ===========================================================================
 // State. MAIN THREAD ONLY.
@@ -148,6 +154,10 @@ objectZeroSlot:
                                         // otherwise hand its successor a
                                         // clamped Y and a scratch bitmap on its
                                         // first frame, before enemyTick ran.
+    sta pkKind,x                        // ...NOR WHAT KIND OF PICKUP IT WAS. A
+                                        // slot freed by a token and handed to
+                                        // another one must not inherit the
+                                        // previous kind's effect on collection
     sta enyFire,x                       // ...NOR PERMISSION TO SHOOT. A slot
                                         // freed by an enemy the encounter
                                         // authored to fire must not hand that
@@ -262,8 +272,8 @@ objectFree:
 // ---------------------------------------------------------------------------
 // objectUpdateAll — one frame of every active object. MAIN THREAD.
 //
-// Dispatch is a chain of type tests rather than a jump table: with two types a
-// table would cost more than it saves. Both tick routines may free slot X and
+// Dispatch is a chain of type tests rather than a jump table: with three types
+// a table would still cost more than it saves. Every tick routine may free X and
 // both preserve it.
 // ---------------------------------------------------------------------------
 objectUpdateAll:
@@ -277,9 +287,15 @@ objectUpdateAll:
     jsr enemyTick                       // may free slot X; X is preserved
     jmp !next+
 !notEnemy:
-    cmp #TYPE_EBULLET                   // the only other thing in the pool, and
-    bne !next+                          // an inactive slot never gets this far
+    cmp #TYPE_EBULLET
+    bne !notEbullet+
     jsr ebulletTick                     // may free slot X; X is preserved
+    jmp !next+
+
+!notEbullet:
+    cmp #TYPE_PICKUP                    // the only other thing in the pool, and
+    bne !next+                          // an inactive slot never gets this far
+    jsr pickupTick                      // may free slot X; X is preserved
 !next:
     inx
     cpx #MAX_OBJECTS

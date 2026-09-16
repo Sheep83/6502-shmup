@@ -285,9 +285,17 @@ def main():
               and rd1(mon, sym["ebFired"]) == fired0 + 1,
               f"wvShots {shots0}->{rd1(mon, sym['wvShots'])}, "
               f"ebFired {fired0}->{rd1(mon, sym['ebFired'])}")
-        born = [i for i, a in enumerate(pool(mon, sym)) if a and not before[i]]
-        check("exactly one new object appeared", len(born) == 1, str(born))
-        b = born[0]
+        # THE BOLT IS IDENTIFIED BY WHAT IT IS, not by which slot changed
+        # occupancy. A slot freed this frame -- a token despawning, an enemy
+        # leaving -- can be reallocated to the bolt within the same frame, so
+        # the slot's active flag reads 1 both before and after and a
+        # new-arrivals diff misses it entirely. The sky was cleared and the
+        # turrets stood down above, so exactly one hostile bolt should exist.
+        bolts = [i for i, a in enumerate(pool(mon, sym)) if a
+                 and rd1(mon, sym["objType"] + i) == 2]
+        check("exactly one hostile bolt is in the air, and it is the enemy's",
+              len(bolts) == 1, str(bolts))
+        b = bolts[0]
         bx, bxh, by = (rd1(mon, sym["logX"] + b), rd1(mon, sym["logXHi"] + b),
                        rd1(mon, sym["logY"] + b))
         check("the bolt leaves the bottom centre of the enemy's logical box",

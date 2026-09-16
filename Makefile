@@ -113,7 +113,7 @@ VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 .PHONY: all build d64 test
 .PHONY: test-boot test-production test-turret-regression
 .PHONY: test-encounter-director test-player-ship test-flight-paths test-ingress-egress test-clip-scratch
-.PHONY: test-sfx test-enemy-fire
+.PHONY: test-sfx test-enemy-fire test-pickup
 .PHONY: run run-d64 clean
 
 all: build
@@ -197,6 +197,16 @@ d64: build
 #                               than in a non-default target for the same reason
 #                               as the turret regression: what it guards is
 #                               authored content wired to production hooks.
+#   test_pickup.py             token pickups: the authored token column spawns
+#                               through the real director at the authored X and
+#                               nowhere else, the object is a TYPE_PICKUP of
+#                               kind P wearing the P bitmap, it drifts at the
+#                               scroll's own speed and despawns itself past the
+#                               aperture, the flash moves logCol and nothing
+#                               else, the ship collects it exactly once and the
+#                               slot comes back whole, a stale slot collects
+#                               nothing, the hostile cap is untouched and a full
+#                               pool refuses cleanly.
 #   test_encounter_director.py the encounter director: an authored trigger off
 #                               worldProgress starts a wave, a SECOND wave
 #                               instance runs concurrently with the first,
@@ -237,6 +247,7 @@ test: build
 	python3 tests/test_level_assets.py
 	python3 tests/test_sfx.py
 	python3 tests/test_enemy_fire.py
+	python3 tests/test_pickup.py
 
 test-boot: build
 	python3 tests/test_boot.py
@@ -261,6 +272,9 @@ test-sfx: build
 
 test-enemy-fire: build
 	python3 tests/test_enemy_fire.py
+
+test-pickup: build
+	python3 tests/test_pickup.py
 
 # NON-DEFAULT ON PURPOSE. The composable-movement vocabulary (v1.1): stage
 # transitions, a three-stage path walked end to end, an arc and its mirror on

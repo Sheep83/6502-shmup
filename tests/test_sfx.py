@@ -63,7 +63,7 @@ from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
                      free_run, step_n, call, check, report)
 
 # --- the contract, restated independently of the assembler ------------------
-SFX_NONE, SFX_FIRE, SFX_KILL, SFX_HURT, SFX_ESHOT = 0, 1, 2, 3, 4
+SFX_NONE, SFX_FIRE, SFX_KILL, SFX_HURT, SFX_ESHOT, SFX_TOKEN = 0, 1, 2, 3, 4, 5
 
 SFX_CODE      = 0x1780          # src/sfx.asm's code segment
 CPU_ONLY_LO   = 0x1000          # the VIC sees the character ROM here, so RAM
@@ -93,10 +93,12 @@ SID_VOLUME    = 0xd418
 # voice may ever see: the waveform gated, the same waveform with the gate
 # dropped (the release frame at the end of an effect's sweep),
 # and zero (the voice put away, and the falling edge sfxRequest writes).
-# Voice 2 carries TWO effects since enemy firing arrived -- the destruction
-# crunch (noise) and the enemy shot (pulse) -- so it is the one voice whose
+# Voice 2 carries THREE effects -- the destruction crunch (noise), the enemy
+# shot (pulse) and the token chime (triangle) -- so it is the one voice whose
 # legal set is not a single waveform.
-VOICE_WAVE    = {CH_FIRE: (0x80,), CH_KILL: (0x80, 0x40), CH_HURT: (0x20,)}
+VOICE_WAVE    = {CH_FIRE: (0x80,),
+                 CH_KILL: (0x80, 0x40, 0x10),   # crunch, enemy spit, token chime
+                 CH_HURT: (0x20,)}
 
 FIRE_SWEEP    = 3               # sfxLenTab's entry for the fire effect
 FIRE_FRAMES   = FIRE_SWEEP + 2  # sweep, then a release frame, then a finish
@@ -131,9 +133,10 @@ SAMPLE_LEN    = 0xc608 - SAMPLE_BASE
 CALLER_SEGMENTS = (
     ("player", 0x4000, 0x4300),
     ("weapon", 0x4600, 0x4800),
-    ("collision", 0x4c00, 0x5000),
+    ("collision", 0x4c00, 0x4d00),      # ...up to the pickup segment's base
     ("turrets", 0x6f00, 0x7500),
     ("waves", 0x7c00, 0x8000),
+    ("pickup", 0x4d00, 0x5000),
 )
 
 # The only (effect, requesting module) pairs this game is allowed to produce.
@@ -143,6 +146,7 @@ LEGAL_HOOKS = {
     (SFX_KILL, "turrets"),      # turretDamage, when a turret is destroyed
     (SFX_HURT, "player"),       # playerTakeHit
     (SFX_ESHOT, "waves"),       # waveFireShot, on a hostile bolt that EXISTS
+    (SFX_TOKEN, "pickup"),      # pickupCollect, on a token actually collected
 }
 
 PORT = 6529

@@ -32,7 +32,9 @@
 //                 HW1. Multicolour; see src/player.asm.
 //   $2400-$253f   PLAYER MUZZLE FLASH (5 x 64), pointers $90-$94: one per
 //                 banking attitude, drawn on HW1. See src/player.asm.
-//   $2540-$27ff   free, 11 blocks
+//   $2580-$25bf   COLLECTIBLE TOKEN bitmap, pointer $96. Engine-owned art
+//                 that every level has, beside the ship's own. src/pickup.asm.
+//   $25c0-$27ff   free, 9 blocks
 //   $2800-$2bff   screen page B          sprite pointers $2bf8-$2bff
 //   $2c00-$30ff   THE LEVEL ENEMY SPRITE WINDOW (20 x 64), pointers $b0-$c3.
 //                 NOT a per-species home: the current level's enemy library is
@@ -42,7 +44,9 @@
 //   $3100-$31ff   clip scratch, 4 blocks
 //   $3200-$357f   HUD sprite bitmaps (14 x 64), pointers $c8-$d5
 //   $3580-$367f   free, 4 blocks -- the Ring's former pinned home, vacated so
-//                 that the enemy window could be one contiguous run
+//                 that the enemy window could be one contiguous run. Kept
+//                 EMPTY: tests/test_level_assets.py proves the migration by
+//                 asserting all 256 bytes are still zero.
 //   $3680-$36bf   clip scratch, 1 block
 //   $36c0-$36ff   hostile projectile bitmap
 //   $3700-$37ff   clip scratch, 4 blocks
@@ -341,6 +345,11 @@ BasicUpstart2(entry)
                                         // and tables decide where the
                                         // projectile's own 64 bytes fit);
                                         // BEFORE turrets.asm, which fires it
+#import "pickup.asm"                    // AFTER hud.asm (HUD_SPRITES_END, which
+                                        // its bitmap is pinned above), objects
+                                        // (MAX_OBJECTS, TYPE_PICKUP) and sfx
+                                        // (SFX_TOKEN). BEFORE waves.asm, which
+                                        // authors the tokens and needs PICKUP_P.
 #import "turrets.asm"                   // AFTER terrain.asm, whose glyph
                                         // namespace, charset window, metatile
                                         // geometry and derived stage height it
@@ -408,6 +417,11 @@ entry:
                                         // master volume up, ONCE. Everything
                                         // after this point only ever touches
                                         // voice 3. See src/sfx.asm.
+    jsr pickupInit                      // no tokens collected, ONCE. Not in
+                                        // gameInit: pkTokensP is player state
+                                        // and whether a restart keeps it is a
+                                        // decision for the day there IS one.
+                                        // See src/pickup.asm.
     jsr ebulletInit                     // no hostile projectiles at boot
     jsr turretInit                      // mark the authored turrets alive.
                                         // BEFORE scrollInit: that builds both
@@ -568,6 +582,14 @@ gameFrame:
     // are both end-of-frame state for the same frame. A load and a branch
     // unless something is actually in flight.
     jsr ebulletPlayerTick
+
+    // THE TOKENS MEET THE SHIP, immediately after the projectiles do and for
+    // the same reasons: every object has moved, and a collection resolved here
+    // frees its slot before waveTick and the two firing ticks below come asking
+    // for one. It is NOT gated on plyInvuln -- src/pickup.asm explains why at
+    // length, and the short version is that an invulnerable ship in this engine
+    // is a blinking one, not a dead one.
+    jsr pickupPlayerTick
 
     // AFTER collisionTick, so a hit lands its flash on the same frame the shot
     // resolved. Colour RAM only -- the VIC latches a row's colour once per

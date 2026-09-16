@@ -124,6 +124,7 @@
 .const SID_PULSE      = %01000000
 .const SID_SAW        = %00100000
 .const SID_NOISE      = %10000000
+.const SID_TRI        = %00010000
 // NOISE IS NEVER COMBINED WITH ANOTHER WAVEFORM. On real hardware selecting
 // noise together with a second waveform empties the noise shift register and
 // the voice goes quiet until the register is re-seeded, which on a 6581 means
@@ -138,7 +139,8 @@
 .const SFX_KILL       = 2               // an enemy or a turret destroyed
 .const SFX_HURT       = 3               // the player takes damage
 .const SFX_ESHOT      = 4               // a moving enemy fires
-.const SFX_COUNT      = 5
+.const SFX_TOKEN      = 5               // the player collects a token
+.const SFX_COUNT      = 6
 
 // --- the channels -----------------------------------------------------------
 // One per SID voice, and the channel index is the voice number less one. An
@@ -475,17 +477,38 @@ sfxVoiceTab:                            // by effect id: the channel it owns
     .byte SFX_CH_FIRE                   // player fire      -> voice 1
     .byte SFX_CH_KILL                   // enemy/turret     -> voice 2
     .byte SFX_CH_HURT                   // the ship is hit  -> voice 3
-    .byte SFX_CH_KILL                   // an enemy fires   -> voice 2.
-                                        // TWO EFFECTS ON ONE VOICE, and the
+    .byte SFX_CH_KILL                   // an enemy fires   -> voice 2
+    .byte SFX_CH_KILL                   // a token collected-> voice 2
+                                        //
+                                        // THREE EFFECTS ON ONE VOICE, and the
                                         // arbitration is the one this module
                                         // already has: whichever asked last
-                                        // plays. An enemy shot and an enemy
-                                        // exploding are both WORLD events, they
-                                        // are each about 100-280 ms, and the
-                                        // case where one cuts the other off is
-                                        // an enemy firing at the instant
-                                        // another dies -- which is a moment the
-                                        // explosion should own anyway
+                                        // plays. A destruction, an enemy shot
+                                        // and a token are all WORLD events of
+                                        // 100-280 ms, and the collisions
+                                        // between them are moments where the
+                                        // later event is the one worth hearing.
+                                        //
+                                        // THE TOKEN IS NOT ON VOICE 1, though
+                                        // this module's own v1.1 note predicted
+                                        // "a pickup chime joins voice 1 with
+                                        // the other light traffic". Measured
+                                        // against the game that now exists,
+                                        // that would be inaudible: held fire
+                                        // retriggers voice 1 every eight frames
+                                        // and the report itself occupies five
+                                        // of them, so a chime started there is
+                                        // cut off within three frames whenever
+                                        // the player is shooting -- which is
+                                        // almost always. Voice 3 was rejected
+                                        // for the opposite reason: it would
+                                        // work, but it would cut the
+                                        // player-damage wail, and losing the
+                                        // one sound that says YOU HAVE BEEN HIT
+                                        // to a bonus chime is the worst trade
+                                        // available. Voice 2 loses only an
+                                        // occasional enemy noise, which is the
+                                        // cheapest thing on the chip to lose.
 
 sfxVoiceBase:                           // by channel: the SID register offset
     .byte 0 * SID_VOICE_LEN             // $d400
@@ -574,6 +597,7 @@ sfxCtrlTab:                             // the effect's waveform, read on the
     .byte SID_NOISE | SID_GATE          // this is the one the gate is dropped
     .byte SID_SAW   | SID_GATE          // from when the sweep runs out
     .byte SID_PULSE | SID_GATE          // the enemy shot, and the only pulse
+    .byte SID_TRI   | SID_GATE          // the token chime, and the only triangle
 
 sfxADTab:                               // attack 0 throughout: every one of
     .byte 0                             // these strikes rather than swells
@@ -581,10 +605,12 @@ sfxADTab:                               // attack 0 throughout: every one of
     .byte $07                           // decay 7 -> 240 ms
     .byte $09                           // decay 9 -> 750 ms
     .byte $03                           // decay 3 -> 72 ms: a spit, not a note
+    .byte $05                           // decay 5 -> 168 ms: a chime may ring
 
 sfxSRTab:                               // SUSTAIN ZERO, ALWAYS. See above.
     .byte 0
     .byte $00                           // release 0 -> 6 ms: no tail
+    .byte $00
     .byte $00
     .byte $00
     .byte $00
@@ -600,9 +626,10 @@ sfxPWHiTab:
     .byte $02                           // 12.5% of a nibble -- thin, hard and
                                         // buzzy, which is what makes it read as
                                         // machinery rather than as a tone
+    .byte 0                             // triangle: unused
 
 sfxLenTab:                              // sweep entries, and so frames
-    .byte 0, 3, 12, 30, 3
+    .byte 0, 3, 12, 30, 3, 6
 
 // Where each effect's slice of the shared sweep table starts. Stated before
 // the table that names them: KickAssembler resolves .const strictly in order.
@@ -610,10 +637,12 @@ sfxLenTab:                              // sweep entries, and so frames
 .const SFX_KILL_SWEEP  = 3
 .const SFX_HURT_SWEEP  = 15
 .const SFX_ESHOT_SWEEP = 45
-.const SFX_SWEEP_LEN   = 48
+.const SFX_TOKEN_SWEEP = 48
+.const SFX_SWEEP_LEN   = 54
 
 sfxBaseTab:                             // first sweep entry, by id
     .byte 0, SFX_FIRE_SWEEP, SFX_KILL_SWEEP, SFX_HURT_SWEEP, SFX_ESHOT_SWEEP
+    .byte SFX_TOKEN_SWEEP
 
 // ---------------------------------------------------------------------------
 // THE SHARED SWEEP TABLES. Three effects' per-frame data laid end to end, each
@@ -646,6 +675,10 @@ sfxSweepLo:
     .byte $61, $a6, $fb, $51, $b8, $30, $a7, $30, $b9, $42
     // enemy shot: 1800, 1200, 800 Hz -- a fast downward spit
     .byte $bb, $d2, $37
+    // token: 800, 1000, 1300, 1600, 2000, 2400 Hz -- a RISING chime. Every
+    // other effect in this game falls; a reward is the one thing that should
+    // go up, and the direction alone tells the player it was good news.
+    .byte $37, $84, $79, $6d, $09, $a4
 
 sfxSweepHi:
     .byte $26, $19, $10
@@ -654,6 +687,7 @@ sfxSweepHi:
     .byte $15, $13, $12, $10, $0f, $0e, $0d, $0b, $0b, $0a
     .byte $09, $08, $07, $07, $06, $06, $05, $05, $04, $04
     .byte $77, $4f, $35
+    .byte $35, $42, $56, $6a, $85, $9f
 
 sfxSweepCtrl:
     // fire: struck once, and held for the length of the sweep
@@ -667,6 +701,8 @@ sfxSweepCtrl:
     .fill 30, SID_SAW | SID_GATE
     // enemy shot: one gated pulse, struck once and held
     .fill 3, SID_PULSE | SID_GATE
+    // token: one gated triangle, struck once and held while the pitch climbs
+    .fill 6, SID_TRI | SID_GATE
 
 // --- the tables must agree with each other, and the assembler can say so ----
 .if (sfxSweepHi - sfxSweepLo != SFX_SWEEP_LEN)   { .error "the sweep low-byte table is not SFX_SWEEP_LEN entries" }
@@ -675,6 +711,7 @@ sfxSweepCtrl:
 .if (SFX_FIRE_SWEEP + 3  != SFX_KILL_SWEEP)      { .error "the fire sweep does not end where the kill sweep begins" }
 .if (SFX_KILL_SWEEP + 12 != SFX_HURT_SWEEP)      { .error "the kill sweep does not end where the hurt sweep begins" }
 .if (SFX_HURT_SWEEP + 30 != SFX_ESHOT_SWEEP)     { .error "the hurt sweep does not end where the enemy-shot sweep begins" }
-.if (SFX_ESHOT_SWEEP + 3 != SFX_SWEEP_LEN)       { .error "the enemy-shot sweep does not end where the table does" }
+.if (SFX_ESHOT_SWEEP + 3 != SFX_TOKEN_SWEEP)     { .error "the enemy-shot sweep does not end where the token sweep begins" }
+.if (SFX_TOKEN_SWEEP + 6 != SFX_SWEEP_LEN)       { .error "the token sweep does not end where the table does" }
 
 .if (* > $1e00) { .error "the sfx module has run into the sorter at $1e00" }

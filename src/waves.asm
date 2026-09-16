@@ -564,10 +564,39 @@
 //                     a formation that cannot shoot is the case the whole
 //                     representation has to support.
 .var trigFire  = List().add(%00000101, %00000010, %00000101, %00000000)
+
+// WHERE A COLLECTIBLE TOKEN APPEARS WITH THIS WAVE — a nine-bit X, or zero for
+// an appearance that brings no token.
+//
+// THE DIRECTOR ALREADY OWNS THE ONLY CLOCK THIS NEEDS. worldProgress and the
+// trigger cursor are the level's authored progression; a token is one more
+// thing an authored moment can bring, so it is a fifth COLUMN rather than a
+// fifth subsystem. There is no token timer, no drop table, no rarity roll and
+// no RNG anywhere in it -- the same token appears at the same X at the same
+// point of every cycle, which is what makes it something a player can learn
+// and a test can assert.
+//
+// ZERO MEANS NONE, and it is a legal X only in the sense that nothing can be
+// authored at the extreme left edge of the border; the visible playfield
+// starts at 24, so no real token is ever placed there.
+//
+// TWO OF FOUR, AND SPREAD ACROSS THE CYCLE. The deltas put trigger 1 at row 52
+// and trigger 3 at row 126 of a 126-row cycle, so the tokens are 74 rows apart
+// one way and 52 the other -- a token roughly every eight seconds, which is
+// enough to collect several in an ordinary run without the level becoming a
+// token gallery. Their lifetimes cannot overlap: a token is on screen for
+// about 220 frames and the closest two authored moments are 416 apart.
+//
+//     trigger 1  X=220  with the S-turn, which enters at X=90: the token sits
+//                       well right of the formation rather than inside it
+//     trigger 3  X=150  with the loop, the one formation that does not shoot,
+//                       so there is a calm pass in which to go and get it
+.var trigToken = List().add(0, 220, 0, 150)
 .const WAVE_TRIGGERS = 4
 
 .if (trigDelta.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS
-     || trigSpecies.size() != WAVE_TRIGGERS || trigFire.size() != WAVE_TRIGGERS) {
+     || trigSpecies.size() != WAVE_TRIGGERS || trigFire.size() != WAVE_TRIGGERS
+     || trigToken.size() != WAVE_TRIGGERS) {
     .error "the trigger list is not WAVE_TRIGGERS entries on every axis"
 }
 .for (var t = 0; t < WAVE_TRIGGERS; t++) {
@@ -586,6 +615,13 @@
     // knows how many members it sends, so the assembler can say so.
     .if ((trigFire.get(t) >> waveDefs.get(trigDef.get(t)).get(0)) != 0) {
         .error "a trigger's fire mask names a member this wave never sends"
+    }
+    // A TOKEN AUTHORED OFF THE PLAYFIELD is a token the player can never reach
+    // and never sees -- it would drift down behind a border and despawn. The
+    // visible window is 24..343 and a sprite is 24 wide, so a token must start
+    // inside 24..319 to be wholly on screen.
+    .if (trigToken.get(t) != 0 && (trigToken.get(t) < 24 || trigToken.get(t) > 319)) {
+        .error "a trigger authors a token outside the visible playfield"
     }
 }
 // THE ALTERNATION ITSELF IS CHECKED, including across the wrap -- the list
@@ -749,6 +785,26 @@ waveTick:
 // worse than one that does not arrive.
 // ---------------------------------------------------------------------------
 waveStartNext:
+    // ---- the token this appearance brings, if any -------------------------
+    // FIRST, AND DELIBERATELY BEFORE THE INSTANCE SCAN. A token is authored
+    // against the MOMENT, not against the formation: if both wave instances
+    // are busy the wave is dropped, and a token dropped with it would make the
+    // level quietly different every time the director happened to be behind.
+    // The two are independent authored content that share a trigger.
+    ldy wvNextTrig
+    lda waveTrigTokenLo,y
+    ora waveTrigTokenHi,y
+    beq !noToken+                       // this appearance brings none
+    lda waveTrigTokenLo,y
+    sta pkSpawnXLo
+    lda waveTrigTokenHi,y
+    sta pkSpawnXHi
+    lda #PICKUP_P                       // the only authored kind today
+    jsr pickupSpawn                     // carry set = the pool refused, which
+                                        // pickupSpawn counts and this does not
+                                        // need to care about
+!noToken:
+
     // ---- find a free instance --------------------------------------------
     ldx #WAVE_SLOTS - 1
 !scan:
@@ -1248,9 +1304,13 @@ waveTrigSpecies:
 .for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigSpecies.get(t) }
 waveTrigFire:
 .for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigFire.get(t) }
+waveTrigTokenLo:
+.for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte <trigToken.get(t) }
+waveTrigTokenHi:
+.for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte >trigToken.get(t) }
 waveTrigEnd:
-.if (waveTrigEnd - waveTrigDelta != 4 * WAVE_TRIGGERS) {
-    .error "the trigger table is not four bytes per trigger"
+.if (waveTrigEnd - waveTrigDelta != 6 * WAVE_TRIGGERS) {
+    .error "the trigger table is not six bytes per trigger"
 }
 
 .if (* > $8000) { .error "the wave code has outgrown its $7c00 segment" }

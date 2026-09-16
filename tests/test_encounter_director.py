@@ -39,7 +39,7 @@ sym = symbols(SYM)
 
 MAX_OBJECTS = 16
 WAVE_SLOTS = 2
-TYPE_NONE, TYPE_ENEMY, TYPE_EBULLET = 0, 1, 2
+TYPE_NONE, TYPE_ENEMY, TYPE_EBULLET, TYPE_PICKUP = 0, 1, 2, 3
 WM_ARC, WM_ARC_MIRROR = 1, 2
 ARC_PHASES_WANTED = 4      # "several", not all 16 -- enough to prove the
                            # primitive is actually running, not proof of the
@@ -146,7 +146,8 @@ def main():
                 mon, sym["frameCounter"], 1, lambda: sample(mon))[0]
             seen_frames += 1
 
-            if any(t not in (TYPE_NONE, TYPE_ENEMY, TYPE_EBULLET) for t in typ):
+            if any(t not in (TYPE_NONE, TYPE_ENEMY, TYPE_EBULLET,
+                             TYPE_PICKUP) for t in typ):
                 check("every active slot holds a known production type",
                       False, f"{typ}")
                 break
