@@ -430,7 +430,22 @@ frameD018B:   .byte 0, 0                // the same page with the BLANK charset.
                                         // afford an AND/ORA, and a record that
                                         // carries both values cannot disagree
                                         // with itself about which page it means.
+// THE VIC BANK, AS A COMPLETE $dd00 BYTE. It belongs in the frame record for
+// the same reason $d018 does: the bank and the screen/charset it selects are
+// ONE presentation decision made of two CPU writes, and a record that carries
+// both cannot disagree with itself about which 16 KB the VM and CB fields mean.
+//
+// v1.0 wrote $dd00 from the MAIN THREAD, at whatever raster line the boss
+// transition happened to reach, while $d018 was still adopted here at line 250.
+// Between those two instants the VIC fetched bank 2 through bank 0's VM and CB
+// -- the screen matrix resolved onto the raster executor's own machine code --
+// and that was the visible flicker manual play found.
+//
+// PRE-COMPUTED, NOT MASKED HERE. publishFrame does the read-modify-write that
+// preserves CIA 2's other six bits, on the main thread where there is time; the
+// frame IRQ only stores the finished byte.
 framePtrHi:   .byte 0, 0                // high byte of the sprite pointer table
+frameBank:    .byte 0, 0                // the complete $dd00 for this frame
 framePage:    .byte 0, 0                // 0 = page A, 1 = page B
 frameCurrent: .byte 0                   // record the EXECUTOR reads
 frameNext:    .byte 1                   // record the MAIN THREAD writes
@@ -1236,6 +1251,20 @@ exFrame:
     ldx frameCurrent
     lda frameD011,x
     sta $d011                           // fine scroll; RSEL=0, DEN=1, RST8=0
+
+    // THE BANK, IMMEDIATELY BEFORE THE $d018 IT BELONGS WITH. Two stores, eight
+    // cycles, adjacent on purpose: raster 250 is in the lower border, the
+    // aperture ended at 247 and MAX_SPRITE_Y guarantees the last sprite DMA was
+    // at line 246, so there is no character fetch and no sprite fetch between
+    // them. The pair therefore lands in one quiet window and the VIC never sees
+    // a bank that disagrees with its VM and CB fields.
+    //
+    // The bank goes FIRST so that the instant $d018 is written the whole
+    // presentation is already coherent, rather than being coherent only after
+    // the second store.
+    lda frameBank,x
+    sta $dd00
+
     lda frameD018B,x                    // the newly adopted page, BLANK charset
 exSetD018:
     sta $d018                           // THE page decision for the whole frame.
@@ -2128,8 +2157,24 @@ frameDiagnostics:
     lda $d018
     and #$f0
     cmp #(D018_A & $f0)
-    bne !expectB+
+    bne !notA+
     lda #>PTR_A
+    jmp !comparePtr+
+!notA:
+    // THE THIRD CASE, AND IT USED TO BE A LIE. This check knew two screens
+    // because the game had two, both in VIC bank 0 -- so when the boss arena
+    // put the VIC in bank 2 the VM nibble matched neither, the `bne` above fell
+    // through to "it must be page B", and a perfectly correct pointer
+    // destination was counted as a fault on every frame of the fight. The
+    // display was right and the instrument was wrong, which is the one failure
+    // mode this file's own notes warn about hardest.
+    //
+    // Still DERIVED FROM THE REGISTER, not from our intention: the bank 2
+    // screen has its own VM nibble and its own pointer table, and this asks
+    // $d018 which one is on screen exactly as it asks for the other two.
+    cmp #(D018_BOSS & $f0)
+    bne !expectB+
+    lda #>VB2_PTR
     jmp !comparePtr+
 !expectB:
     lda #>PTR_B

@@ -580,12 +580,17 @@ playerInit:
     rts
 
 // ---------------------------------------------------------------------------
-// readInput — sample joystick port 2. THE ONLY $dc00 READ IN THE GAME.
+// readInput — sample joystick port 2.
 //
 // Port A of CIA1 is the keyboard column drive AND joystick 2; reading it
 // returns the pin states. Nothing in this program drives $dc01 (port B is left
 // as an input), so no key can pull a column low and be mistaken for a stick
 // direction.
+//
+// IT IS NO LONGER THE ONLY $dc00 ACCESS. readKeyI below drives a column to scan
+// one key on the attract screen, and it is the reason the guarantee above still
+// holds: it restores $dc00 to "no column selected" in the instruction after the
+// row read, so this routine can never sample a driven column. See its note.
 // ---------------------------------------------------------------------------
 readInput:
     lda joyHold
@@ -594,6 +599,40 @@ readInput:
     and #JOY_MASK
     sta joyState
 !held:
+    rts
+
+// ---------------------------------------------------------------------------
+// readKeyI — is the I key held down? Exit: A = 1 if it is, 0 if not.
+// X clobbered.
+//
+// THE ONLY KEYBOARD READ IN THE GAME, and it lives here because this file
+// already owns CIA 1 and the note above is the one that has to stay true.
+//
+// Port A is the keyboard's COLUMN DRIVE and joystick 2 at the same time, which
+// is the whole hazard: a column left driven low reads back as a stick
+// direction or as FIRE. KEY_I_COL has bit 4 clear, so leaving it in place would
+// look exactly like the trigger being pulled. $dc00 is therefore restored to
+// "no column selected" in the instruction after the row read and BEFORE
+// anything branches -- there is no path out of here that leaves it driven.
+//
+// Port B stays an input, which is what readInput's note relies on; nothing here
+// writes $dc01 or either data-direction register.
+// ---------------------------------------------------------------------------
+.const KEY_I_COL = %11101111        // drive PA4 low: the column holding I
+.const KEY_I_ROW = %00000010        // ...and read PB1, which is the I key
+
+readKeyI:
+    lda #KEY_I_COL
+    sta $dc00
+    lda $dc01                       // the row bits, active LOW
+    ldx #$ff
+    stx $dc00                       // every column off again, at once
+    and #KEY_I_ROW
+    beq !down+
+    lda #0                          // bit still high: not pressed
+    rts
+!down:
+    lda #1
     rts
 
 // ---------------------------------------------------------------------------
@@ -637,6 +676,18 @@ playerTakeHit:
     // the value REPLACE that block rather than run beside it; this is that
     // owner, and the demo lives are gone. One writer, one truth.
 !lives:
+    // INFINITE LIVES IS A TESTING TOGGLE, AND IT CHEATS EXACTLY ONE THING.
+    // Everything above this point has already happened -- the hit was real, the
+    // sound is playing, plyHits counted it -- and everything below still
+    // happens: the craft is destroyed, the fireball runs, the respawn and its
+    // invulnerability follow. The only difference is that the stock is not
+    // touched and the death can never be the last one.
+    //
+    // The terminal guard is skipped with it. A stock of zero with the cheat on
+    // is not a terminal state, it is just a number nobody is spending.
+    lda gsInfLives
+    bne !noCost+
+
     lda hudLives
     beq !done+                          // already terminal: the fatal window is
                                         // running and a stray hit changes
@@ -645,6 +696,7 @@ playerTakeHit:
     lda hudDirty
     ora #HUD_DIRTY_LIVES
     sta hudDirty
+!noCost:
     // ---- the craft dies -------------------------------------------------
     // THE INVULNERABILITY WINDOW IS NO LONGER STARTED HERE. It used to be the
     // whole of "being hit": a hundred frames of blinking on an intact ship.
@@ -664,6 +716,9 @@ playerTakeHit:
     sta plyVisible                      // solid for the whole explosion; the
                                         // blink belongs to the respawn
 
+    lda gsInfLives
+    bne !done+                          // ...and with the cheat on there is no
+                                        // such thing as the last one
     lda hudLives
     bne !done+
     lda #1
@@ -1170,6 +1225,6 @@ pt_y:     .byte 0
 // immediately above -- but an explicit `* =` segment without one turns an
 // overlap into a run-time mystery instead of a build error.
 // ---------------------------------------------------------------------------
-.if (* > $4400) {
-    .error "the player code has outgrown its $4000 segment"
+.if (* > $4340) {
+    .error "the player code has run into the scroller at $4340"
 }

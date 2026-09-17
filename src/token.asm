@@ -177,7 +177,27 @@
 // State. MAIN THREAD ONLY, in the free run between the level asset state that
 // ends at $c401 and the pickup state at $c4c0.
 // ===========================================================================
-* = $c440 "token encounter state"
+// ONE BYTE LOWER THAN IT WAS, and deliberately so. The dropper flight state
+// begins at $c462, immediately after this block, so there is no room to grow
+// upward -- but there are sixty-two free bytes below. Starting here keeps every
+// EXISTING field at exactly the offset from tkActive it already had, which is
+// what the focused proofs read the block by.
+* = $c43f "token encounter state"
+
+// HOW MANY DEFENDERS THIS ENCOUNTER HAS EVER ENLISTED, and the whole of the
+// attrition rule. The complement is assembled ONCE -- promoted from live
+// enemies, topped up by reinforcement if there were not enough -- and once
+// TK_GUARDS of them have been created the encounter is CLOSED. A defender the
+// player destroys after that is simply gone.
+//
+// IT COUNTS CREATIONS, NOT OCCUPANCY, and that distinction is the point.
+// tokenFreePost answers "is a post empty right now", which cannot tell the
+// difference between a post never filled and a post whose guard has just been
+// shot; gating on it is what made a kill summon a replacement. A creation count
+// can only ever go up, so the initial fill can still run asynchronously over
+// several frames and can never reopen -- not even if the player kills a
+// defender while the group is still being assembled.
+tkEnlisted:   .byte 0
 
 tkActive:     .byte 0       // 1 = a token encounter is running
 tkSlot:       .byte 0       // pool slot of the live P
@@ -247,6 +267,7 @@ tokenStateEnd:
 // ---------------------------------------------------------------------------
 tokenInit:
     lda #0
+    sta tkEnlisted
     sta tkActive
     sta tkDropperLive
     sta tkOrbit
@@ -301,6 +322,7 @@ tokenDropperDied:
     lda #1
     sta tkActive
     lda #0
+    sta tkEnlisted                      // a new encounter enlists a new group
     sta tkOrbit                         // every encounter starts the ring at
                                         // the same place, so the transition is
                                         // reproducible when it is watched
@@ -379,6 +401,8 @@ tokenAssignRoles:
 
     sta enyRole,x                       // post it
     inc tkTmp
+    inc tkEnlisted                      // ...and it counts toward the one
+                                        // complement this encounter gets
     jsr tokenSilence
     jsr tokenHalt                       // ...and it stops being a thing with a
                                         // heading. See tokenHalt.
@@ -547,17 +571,32 @@ tokenTick:
     sta tkOrbit
 !noWrap:
 
-    // ---- keep three posts filled ------------------------------------------
+    // ---- ASSEMBLE THE COMPLEMENT, ONCE ------------------------------------
+    // THE DEFENCE IS ATTRITIONAL. This used to read "keep three posts filled",
+    // and that is precisely what was wrong with it: a post emptied by the
+    // player was indistinguishable from a post never filled, so shooting a
+    // defender summoned another one and the formation could not be broken down.
+    //
+    // The gate is a creation count, not an occupancy scan. Until TK_GUARDS
+    // defenders have been ENLISTED the encounter is still assembling its group
+    // and may still reinforce; from the moment the third is created this branch
+    // is taken for the rest of the encounter and nothing can reopen it.
+    //
+    //     3 defenders -> kill one -> 2 -> kill one -> 1 -> kill one -> 0
+    //
     // ONE ATTEMPT PER EXPIRY, never a loop: a pool that is momentarily full
-    // costs one replacement and the timer starts again, which is what bounds
-    // this. tokenFreePost returns the lowest unfilled post, so replacements
-    // are as deterministic as the original assignment.
+    // costs one attempt and the timer starts again, which is what bounds the
+    // assembly. tokenFreePost still chooses WHICH post an initial defender
+    // fills, so the group is assembled as deterministically as it ever was.
+    lda tkEnlisted
+    cmp #TK_GUARDS
+    bcs !noReinforce+                   // the complement is closed
     dec tkReinforce
     bne !noReinforce+
     lda #TK_REINFORCE_FRAMES
     sta tkReinforce
     jsr tokenFreePost
-    bcs !noReinforce+                   // all three filled
+    bcs !noReinforce+                   // every post filled right now
     jsr tokenReinforce
 !noReinforce:
     rts
@@ -710,6 +749,8 @@ tokenReinforce:
 
     jsr objectActivate
 
+    inc tkEnlisted                      // it is one of the complement now, and
+                                        // the count is what closes the group
     lda tkReinforced
     cmp #$ff
     beq !done+

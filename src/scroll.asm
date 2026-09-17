@@ -239,7 +239,11 @@ scrollStateEnd:
 // three engine frames is more pointer arithmetic and more presentation state
 // than the 512 bytes below $4200 could hold. The scroller still has over 240
 // bytes of slack before the weapon at $4600.
-* = $4300 "scroller"
+// MOVED UP FROM $4300. The player code below it grew past that boundary when it
+// gained the keyboard read, and the scroller had 239 bytes of slack above it
+// doing nothing. Nothing here is address-sensitive: it is main-thread code
+// reached by label.
+* = $4340 "scroller"
 
 // ===========================================================================
 // scrollInit — both pages built, page A displayed, frame 0 published.
@@ -526,6 +530,44 @@ publishFrame:
     sta frameD011,x
     lda dispPage
     sta framePage,x
+
+    // ---- WHICH BANK IS THE VIC LOOKING AT? --------------------------------
+    // THE ONE PLACE THE BANK REACHES THE RENDERER, and it reaches it as data:
+    // three bytes of a frame record the executor already adopts. No mux code,
+    // no schedule entry and no clipping decision learns that banks exist.
+    //
+    // Bank 2 has ONE screen matrix, not two. The arena it is used for is frozen
+    // -- scrollTick returned at its first instruction and nothing flips a page
+    // again -- so dispPage still says which bank-0 page the matrix was copied
+    // FROM, and there is nothing for it to select between here.
+    // ---- and the bank the whole thing is relative to ----------------------
+    // THE READ-MODIFY-WRITE LIVES HERE, on the main thread, where there is time
+    // for it. Bits 2-7 of $dd00 are CIA 2's serial bus and RS-232 lines and are
+    // preserved exactly as they were in v1.0; only the two select bits are
+    // replaced. The frame IRQ then stores the finished byte in one instruction.
+    lda $dd00
+    and #VIC_BANK_KEEP
+    ldy vicBank2
+    beq !b0+
+    ora #VIC_BANK_2
+    jmp !bankSet+
+!b0:
+    ora #VIC_BANK_0
+!bankSet:
+    sta frameBank,x
+
+    lda vicBank2
+    beq !bank0+
+    lda #D018_BOSS
+    sta frameD018,x
+    lda #D018_BOSS_BLANK
+    sta frameD018B,x
+    lda #>VB2_PTR
+    sta framePtrHi,x
+    jmp !armed+
+
+!bank0:
+    lda dispPage
     bne !pageB+
     lda #D018_A
     sta frameD018,x

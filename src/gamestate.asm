@@ -87,6 +87,8 @@
 .const SCREEN         = $0400
 .const GS_TITLE_AT    = SCREEN + 6 * 40 + 10        // "MY FIRST C64 SHOOTER"
 .const GS_PROMPT_AT   = SCREEN + 20 * 40 + 13       // "FIRE TO START"
+.const GS_INF_AT      = SCREEN + 23 * 40 + 10       // the testing toggle, low
+.const GS_INF_LEN     = 19                          // and out of the way
 .const GS_HEAD_AT     = SCREEN + 4 * 40 + 14        // "HIGH SCORES"
 .const GS_ROW0_AT     = SCREEN + 7 * 40 + 15        // rows 7,9,11..21, column 15
 .const GS_OVER_AT     = SCREEN + 12 * 40 + 15       // "GAME OVER"
@@ -130,6 +132,26 @@ gsAttractPage:  .byte 0
 gsAttractTimer: .byte 0
 gsOverTimer:    .byte 0
 
+// --- INFINITE LIVES: a testing aid, and an explicit flag ---------------------
+// IT IS A SEPARATE BYTE, NOT A FAKE LIVES COUNT. Stuffing $ff into hudLives
+// would make the HUD draw a stock nobody has, would still decrement on every
+// death, and would still reach zero eventually -- it would be a long game, not
+// an infinite one. This says what it means, and src/player.asm reads it at the
+// single point a life is consumed.
+//
+// IT CHEATS EXACTLY ONE THING. Damage, collision, the death fireball, the
+// respawn and the invulnerability blink all still happen; a death simply does
+// not cost a life. That is the whole of it.
+//
+// BOOT-SCOPED, like pkTokensP was before it. gsResetRun deliberately does NOT
+// clear this: a new game started from the attract screen keeps whatever the
+// tester set, which is the entire point of being able to set it there.
+gsInfLives:     .byte 0             // 0 = off, and a cold start is off
+
+// The I key's previous state, for the edge. Holding the key must toggle once,
+// not sixty times a second.
+gsKeyIDown:     .byte 0
+
 // --- initials entry, straight from the old implementation -------------------
 gsInitChars:    .byte 0, 0, 0       // 1..26, screen codes for A..Z
 gsInitSlot:     .byte 0
@@ -155,7 +177,14 @@ gameStateEnd:
 // ===========================================================================
 // Code
 // ===========================================================================
-* = $8b00 "game state code"
+// RELOCATED FOR THE BANK 2 PROOF. This code used to start at $8b00, which is
+// bank-relative $0b00 -- underneath where bank 2 now keeps its screen matrix.
+// It moves into the CHARACTER ROM SHADOW at $9000-$9fff instead: the VIC reads
+// ROM there in banks 0 and 2 alike, so RAM at these addresses can never be
+// fetched by the chip and is the one place in a VIC bank where code costs the
+// display nothing. Nothing about this code is timing-critical -- gsAttractIrq
+// only runs while gsNonGame is set, which is never during gameplay.
+* = $9700 "game state code"
 
 // ---------------------------------------------------------------------------
 // gsBoot — called once from entry, after the renderer owns the IRQ.
@@ -245,6 +274,7 @@ gsEnterAttract:
 gsAttractLoop:
     jsr gsWaitFrame
     jsr readInput
+    jsr gsInfToggle                     // the I key, title/attract ONLY
 
     lda gsAttractPage                   // re-stamp the current page every frame,
     bne !scoresNow+                     // exactly as the old attractMenu did
@@ -278,6 +308,31 @@ gsAttractLoop:
     rts                                 // back to the router, now PLAYING
 !noFire:
     jmp gsAttractLoop
+
+// ---------------------------------------------------------------------------
+// gsInfToggle — the I key flips Infinite Lives. ATTRACT ONLY.
+//
+// ON THE PRESS EDGE, not on the level. gsAttractLoop runs every frame, so a
+// held key would flip the flag fifty times a second and land on whichever side
+// the player happened to let go on. gsKeyIDown remembers the last sample and
+// only a 0 -> 1 transition does anything.
+//
+// It is called from the attract loop and from nowhere else, which is what keeps
+// the cheat out of gameplay: src/main.asm's gameFrame never reaches this, so
+// the key is inert once a game has started.
+// ---------------------------------------------------------------------------
+gsInfToggle:
+    jsr readKeyI                        // A = 1 while the key is down
+    cmp gsKeyIDown
+    beq !steady+                        // no edge: held, or still up
+    sta gsKeyIDown
+    cmp #1
+    bne !steady+                        // the RELEASE edge: nothing to do
+    lda gsInfLives
+    eor #1                              // the press edge: flip it
+    sta gsInfLives
+!steady:
+    rts
 
 // ===========================================================================
 // GAME OVER
@@ -727,6 +782,21 @@ gsStartGame:
     beq !counted+                       // diagnostic that only becomes true
     inc gsGames                         // after the work is a diagnostic that
 !counted:                               // cannot describe the work
+    // ---- THE VIC BANK IS PART OF STARTING A LEVEL ------------------------
+    // BEFORE gameInit and scrollInit, and the order is the whole point:
+    // scrollInit ends by publishing frame 0, and a frame record published while
+    // vicBank2 was still set would carry the BOSS's $d018 and pointer
+    // destination into ordinary play. That is precisely what the broken restart
+    // was -- the scroller advanced pages nobody was looking at while the VIC
+    // still displayed the frozen bank 2 arena, so the picture slid with the
+    // fine scroll and snapped back at every coarse step.
+    //
+    // THIS IS THE SEAM, not the FIRE handler. Any route that begins or restarts
+    // ordinary level gameplay comes through gsStartGame, so the contract is
+    // stated once here rather than patched into each caller -- which is what
+    // the upgrade screen and level 2 will need.
+    jsr vicSelectBank0
+
     jsr gsResetRun
     jsr gameInit                        // objects, sorter, player, weapon,
                                         // collision, sfx, level assets, enemy,
@@ -796,10 +866,34 @@ gsEnterGame:
     rts                                 // the display again
 
 gsBeginNonGame:
+    // THE VIC BANK IS PART OF THIS CONTRACT, and v1.0 of the bank 2 proof left
+    // it out. Everything else a non-game page needs is established explicitly
+    // -- $d011, $d018, $d015, $d020, $d021 and the multicolour bit -- but the
+    // BANK those registers are relative to was simply inherited, because until
+    // the boss arena there was only ever one.
+    //
+    // Arriving here from the boss meant arriving in bank 2, where GS_D018's VM
+    // field names $8400 instead of $0400: the raster executor's machine code
+    // rendered as a screen matrix. The font was right, because bank 2 shows the
+    // character ROM at the same bank-relative address bank 0 does, which is
+    // exactly why the corrupted LEVEL COMPLETE page was garbage characters in a
+    // legible typeface.
+    //
+    // It is done FIRST, before the screen is cleared: gsClearScreen writes the
+    // matrix at $0400, and there is no point writing a page the VIC is not
+    // looking at.
     jsr sfxSilence                      // every voice gated off and the channel
                                         // state reset, so no effect can resume
     lda #1
-    sta gsNonGame
+    sta gsNonGame                       // FIRST, and before the bank below:
+                                        // while this is clear the frame IRQ is
+                                        // still exFrame, which commits $dd00
+                                        // from the frame record every frame. A
+                                        // bank selected before this byte could
+                                        // be undone by the very next IRQ and
+                                        // the state would be stranded in bank 2
+                                        // with no executor left to fix it.
+    jsr vicSelectBank0
     lda $d016
     and #%11101111                      // MULTICOLOUR OFF: the text is hires
     sta $d016
@@ -868,6 +962,17 @@ gsDrawText:
 gsDrawTitle:
     gsText(gsTitleLine, GS_TITLE_AT, 20)
     gsText(gsPromptLine, GS_PROMPT_AT, 13)
+
+    // THE CHEAT IS VISIBLE OR IT IS A TRAP. Both lines are the same length, so
+    // the one being drawn always covers the other and the page needs no clear.
+    // The title page only: the high-score page does not carry it, and the flag
+    // survives the cycle regardless because it lives in state, not on screen.
+    lda gsInfLives
+    beq !off+
+    gsText(gsInfOnLine, GS_INF_AT, GS_INF_LEN)
+    rts
+!off:
+    gsText(gsInfOffLine, GS_INF_AT, GS_INF_LEN)
     rts
 
 gsDrawGameOver:
@@ -997,6 +1102,8 @@ gsClearScreen:
 .encoding "screencode_upper"
 gsTitleLine:   .text "MY FIRST C64 SHOOTER"       // 20
 gsPromptLine:  .text "FIRE TO START"              // 13
+gsInfOffLine:  .text "INFINITE LIVES: OFF"        // 19, and the same length
+gsInfOnLine:   .text "INFINITE LIVES: ON "        // 19, so one covers the other
 gsHeadLine:    .text "HIGH SCORES"                // 11
 gsOverLine:    .text "GAME OVER"                  // 9
 gsIPromptLine: .text "ENTER YOUR INITIALS"        // 19
@@ -1009,4 +1116,4 @@ gsPressLine:   .text "PRESS FIRE"                  // 10
 // room to grow into -- which is deliberate. The later Parallax-grade title will
 // replace gsAttractIrq and the draw routines with something much larger, and it
 // should not have to go looking for a home first.
-.if (* > $c000) { .error "the game state code has run into the schedule buffers at $c000" }
+.if (* > $9fff) { .error "the game state code has left the character ROM shadow at $9fff" }

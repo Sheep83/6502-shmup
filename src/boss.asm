@@ -239,6 +239,12 @@ bossWatchStage:
 !ending:
     lda #LP_CLEARING
     sta lvlPhase
+    jsr vicMirrorScreen                 // ARM the bank 2 screen mirror. The
+                                        // scroll froze on the step that set
+                                        // stageComplete, so the matrix is final
+                                        // from this instruction onwards and
+                                        // bossClearTick can walk it across a
+                                        // slice at a time. See src/vicbank.asm.
     lda #ARENA_CLEAR_DEADLINE
     sta lvlTimer
     rts
@@ -258,6 +264,12 @@ bossWatchStage:
 // removed outright, so nothing can hold the level open.
 // ---------------------------------------------------------------------------
 bossClearTick:
+    // BANK 2'S HUD IS BROUGHT UP TO DATE BEFORE THE SWITCH, not after it. The
+    // clearing phase is at least long enough to walk the whole block across a
+    // slice at a time, so the frame bank 2 is selected the mirror already shows
+    // the heat and score the player was last looking at. See src/vicbank.asm.
+    jsr vicMirrorTick
+
     jsr bossArenaBusy
     beq !clean+                         // nothing hostile is left
 
@@ -334,6 +346,33 @@ bossPurgeArena:
 // be worse than one that looks wrong for a moment.
 // ---------------------------------------------------------------------------
 bossSpawn:
+    // =======================================================================
+    // THE BANK SWITCH. THIS IS THE PHASE BOUNDARY, AND IT IS THE SAFEST ONE.
+    // =======================================================================
+    // Everything the VIC will fetch from bank 2 is already correct by the time
+    // this runs:
+    //
+    //   the sprite art, the blank charset and the terrain charset were copied
+    //   at boot and never change;
+    //   the HUD has been mirrored slice by slice through the whole clearing
+    //   phase;
+    //   the screen matrix is frozen -- the final coarse step has happened, the
+    //   fine phase is pinned at zero and scrollTick returns at its first
+    //   instruction -- so the one kilobyte copied here is the last complete
+    //   authored screenful, and nothing will ever write it again.
+    //
+    // It also happens BEFORE the cells are allocated, so the first frame that
+    // has a boss in it is already a bank 2 frame: there is no frame in which
+    // the arena is half switched.
+    //
+    // NO RASTER CLEVERNESS. The bank changes from the main thread between
+    // frames, the picture on both sides of it is the same picture, and the
+    // executor adopts the new $d018 and pointer destination through the frame
+    // record it already adopts every frame.
+    jsr vicMirrorFinish                 // normally nothing: the clearing phase
+                                        // has already walked the matrix across
+    jsr vicSelectBank2
+
     lda #BOSS_HP_FULL
     sta bossHP
     lda #0

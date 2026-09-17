@@ -147,6 +147,33 @@
 .const D018_B_BLANK   = $ae             // VM = $2800, CB = $3800
 
 .if (BLANK_CHARSET != $3800) { .error "CB = %111 is $3800 and nothing else" }
+// ---------------------------------------------------------------------------
+// THE BANK 2 BOSS-ARENA LAYOUT — the second set of VIC-visible addresses.
+//
+// These live HERE, with the rest of the memory map, for two reasons: this file
+// is where a reader looks to find out what the VIC can see, and src/renderer.asm
+// -- imported long before src/vicbank.asm -- needs D018_BOSS for the pointer
+// self-check that has to know which of the three screens is on display.
+//
+// src/vicbank.asm owns the CODE, the copies and the $dd00 selection, and
+// carries the full explanation of why each address is what it is.
+// ---------------------------------------------------------------------------
+.const VB2_BASE      = $8000            // bank 2's CPU base; the mirror offset
+
+.const VB2_SCREEN    = $8c00            // bank-relative $0c00
+.const VB2_PTR       = VB2_SCREEN + $3f8
+.const VB2_CHARSET   = $a800            // bank-relative $2800, terrain
+.const VB2_SPRITES   = $a000            // bank-relative $2000, the mirror
+.const VB2_BLANK     = $b800            // bank-relative $3800, and $bfff idle
+
+// $d018 for bank 2. VM = screen / $0400 in bits 7-4; CB = charset / $0800 in
+// bits 3-1. Both relative to the bank, which is the whole reason this is only
+// two numbers instead of a renderer change.
+.const VB2_VM_BITS     = ((VB2_SCREEN - VB2_BASE) / $0400) * 16
+.const D018_BOSS       = VB2_VM_BITS + ((VB2_CHARSET - VB2_BASE) / $0800) * 2
+.const D018_BOSS_BLANK = VB2_VM_BITS + ((VB2_BLANK   - VB2_BASE) / $0800) * 2
+
+
 .if ((D018_A & $f0) != (D018_A_BLANK & $f0)) { .error "page A VM bits differ between charsets" }
 .if ((D018_B & $f0) != (D018_B_BLANK & $f0)) { .error "page B VM bits differ between charsets" }
 .if (SCREEN_B + $400 > BLANK_CHARSET) { .error "screen page B overlaps the blank charset" }
@@ -377,6 +404,10 @@ BasicUpstart2(entry)
                                         // scroll.asm, whose renderBackgroundRow
                                         // composes the overlay onto the row
                                         // terrain has just decoded
+#import "vicbank.asm"                   // AFTER hud.asm (HUD_SPRITES, HUD_BLOCKS,
+                                        // the block it mirrors) and BEFORE
+                                        // scroll.asm, whose publishFrame reads
+                                        // the D018_BOSS constants declared here
 #import "scroll.asm"
 #import "movement.asm"                  // AFTER objects.asm (MAX_OBJECTS) and
                                         // renderer.asm (the production Y band
@@ -441,6 +472,10 @@ entry:
     lda #SPR_MC_LIGHT
     sta $d026
 
+    jsr vicBankInit                     // SAY WHICH BANK, rather than inherit it.
+                                        // The game ran in bank 0 for its whole
+                                        // life without one instruction ever
+                                        // selecting it -- see src/vicbank.asm.
     jsr clearCharset                    // MUST precede any display: it is both
                                         // the aperture mask and the idle byte
     jsr terrainInit                     // colour RAM, $d022/$d023, the
@@ -474,6 +509,10 @@ entry:
                                         // the player at its start position, and
                                         // the first schedule published
     jsr hudInit                         // draw every HUD bitmap once
+    jsr vicMirrorStatic                 // bank 2's unchanging VIC-visible set.
+                                        // AFTER clearCharset (it copies the
+                                        // blank charset) and after hudInit (it
+                                        // copies the HUD's first draw).
     jsr scrollInit                      // build both pages, publish frame 0
     jsr installRenderer                 // renderer owns the IRQ chain from here
     cli
