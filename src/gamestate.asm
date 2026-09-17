@@ -45,12 +45,17 @@
 //          sets the MCM bit once at boot and nothing rewrites it per frame, so
 //          gsEnterGame puts it back explicitly.
 //
-// COLOUR RAM IS NEVER TOUCHED, and that is what makes the return to gameplay
-// free. It is uniformly TERRAIN_COLOUR_RAM (9 = multicolour-cell | white); with
-// MCM off the cell simply reads as white, so every text routine below writes
-// SCREEN RAM ONLY. The old game coloured its text per line and per initials
-// slot; that is the one piece of old presentation this could not keep, and the
-// initials highlight is reverse video instead. See the report.
+// COLOUR RAM IS OWNED BY THE PAGE, and gsClearScreen is where it is claimed.
+// This file used to say colour RAM was never touched because it was "uniformly
+// TERRAIN_COLOUR_RAM" -- an assumption that was true when src/terrain.asm was
+// its only writer and has not been true since turrets and the boss health bar
+// started colouring cells of their own. See gsClearScreen for what went wrong
+// and why the fill uses the terrain value rather than a text colour.
+//
+// Every text routine below still writes SCREEN RAM ONLY: the colour is uniform,
+// so there is nothing per-line to say. The old game coloured its text per line
+// and per initials slot; that is the one piece of old presentation this could
+// not keep, and the initials highlight is reverse video instead.
 // ===========================================================================
 
 // --- the states, in the old order and with the old values -------------------
@@ -848,7 +853,13 @@ gsResetRun:
     lda #HUD_LIVES_MAX
     sta hudLives
     lda #0
-    sta pkTokensP                       // P currency is RUN scoped
+    sta pkTokensP                       // P currency is RUN scoped...
+    sta pkCharge                        // ...and so is the partial charge
+                                        // toward the next unit. A new run
+                                        // starts at [][][] 0, not part way
+                                        // through somebody else's set.
+    jsr hudPReset                       // and the HUD shows that, rather than
+                                        // the last run's boxes
     lda hudDirty
     ora #HUD_DIRTY_LIVES | HUD_DIRTY_SCORE
     sta hudDirty
@@ -1087,6 +1098,7 @@ gsDrawInitials:
 // touched: they belong to the renderer's published schedule.
 // ---------------------------------------------------------------------------
 gsClearScreen:
+    // ---- the matrix ------------------------------------------------------
     lda #GS_SPACE
     ldx #0
 !fill:
@@ -1096,6 +1108,36 @@ gsClearScreen:
     sta SCREEN + $2e8,x
     inx
     bne !fill-
+
+    // ---- ...AND THE COLOUR RAM THAT GOES WITH IT --------------------------
+    // THE PAGE OWNS ITS OWN COLOURS. The header of this file used to say colour
+    // RAM was never touched because it was "uniformly TERRAIN_COLOUR_RAM", and
+    // that was true when src/terrain.asm was the only thing that wrote it. It
+    // has not been true for a long time: src/turrets.asm colours a turret's four
+    // body cells and only restores them when that body leaves, and
+    // src/boss.asm's health bar paints BOSS_BAR_FULL -- red -- across row 1.
+    // Anything still coloured when the level ended stayed coloured, and the
+    // attract page drew its white text straight on top of it. That is why a few
+    // letters of the title came back pink.
+    //
+    // Colour RAM is NOT part of the VIC bank and NOT double buffered, so no
+    // amount of bank or page discipline could have fixed this; the page simply
+    // had no colour owner. It has one now.
+    //
+    // THE VALUE IS TERRAIN_COLOUR_RAM, not a text colour, and that is
+    // deliberate: bit 3 selects multicolour for the cell and the low nibble is
+    // white, so with $d016's MCM bit off -- which gsBeginNonGame guarantees --
+    // every cell reads as plain white text, and the value gameplay expects to
+    // find is restored at the same time. One fill satisfies both readers.
+    lda #TERRAIN_COLOUR_RAM
+    ldx #0
+!col:
+    sta COLOUR_RAM + $000,x
+    sta COLOUR_RAM + $100,x
+    sta COLOUR_RAM + $200,x
+    sta COLOUR_RAM + $2e8,x
+    inx
+    bne !col-
     rts
 
 // --- the text, in screen codes ---------------------------------------------

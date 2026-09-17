@@ -564,6 +564,13 @@ gamePlayLoop:
     // again on the next pass, which is a fraction of a millisecond later.
     jsr hudUpdate
 
+    // ...AND THE BANK 2 COPY OF WHAT IT JUST DREW, for the same reason and
+    // under the same raster rule. In bank 0 this is five cycles and an rts; in
+    // the boss arena it walks one slice of the HUD bitmaps across per displayed
+    // frame, which is what keeps the score, the heat gauge and the P economy
+    // alive once the VIC has stopped looking at the originals. See
+    // src/vicbank.asm's vicMirrorLive.
+    jsr vicMirrorLive
 
     lda frameCounter
     cmp lastFrameSeen
@@ -752,6 +759,9 @@ gameFrame:
     // phase tests for is this frame's, not last frame's.
     jsr bossTick                        // src/boss.asm
 
+    jsr hudPTick                      // the P set celebration: a countdown and
+                                      // a colour. Gameplay is NOT paused for
+                                      // it; see src/hud.asm.
     jsr hudDemoTick                   // score, lives and upgrade only: their
 
                                         // systems do not exist yet. Heat is fed

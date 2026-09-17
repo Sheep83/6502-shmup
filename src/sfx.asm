@@ -147,7 +147,17 @@
                                         // Declared here rather than beside the
                                         // other sweep bases because sfxLenTab
                                         // names it and .const resolves in order.
-.const SFX_COUNT      = 8
+// THE P SET COMPLETED. Six rising notes, eight frames each, on VOICE 2 -- the
+// enemy/world channel, which is where the token chime it replaces already
+// lived. Voice 1 is the gun and voice 3 carries the player's own damage and the
+// victory launch; putting a reward jingle on either would mean the player's
+// weapon or the player's death cutting it, or worse, it cutting them.
+.const SFX_PEARN      = 8               // three P collected: a set is complete
+.const SFX_PEARN_NOTES = 6
+.const SFX_PEARN_HOLD  = 8              // frames a note is held
+.const SFX_PEARN_LEN   = SFX_PEARN_NOTES * SFX_PEARN_HOLD    // 48, ~1 s
+
+.const SFX_COUNT      = 9
 
 // --- the channels -----------------------------------------------------------
 // One per SID voice, and the channel index is the voice number less one. An
@@ -222,7 +232,10 @@ sfxStateEnd:
 // planned boss VIC-bank switch untouched: $1000-$1fff is plain RAM to the CPU
 // whichever bank the VIC is looking at.
 // ===========================================================================
-* = $1780 "sfx"
+// MOVED UP FROM $1780. The HUD code below grew past that boundary when the P
+// economy replaced the placeholder, and there were 1,000 free bytes above this
+// segment doing nothing. Nothing here is address-sensitive.
+* = $1840 "sfx"
 
 // ---------------------------------------------------------------------------
 // sfxInit — the cold start. Called ONCE, from entry, before the renderer owns
@@ -363,6 +376,14 @@ sfxRequest:
     beq !accept+                        // a ping may retrigger a ping
     cmp #SFX_KILL
     beq !accept+                        // ...and a destruction ends one
+    cmp #SFX_PEARN
+    beq !accept+                        // ...as does completing a P set, which
+                                        // happens a handful of times a level
+                                        // and is the one reward sound in the
+                                        // game. The ping is protected from
+                                        // ROUTINE voice 2 traffic; it is not
+                                        // more important than the events the
+                                        // player is being told about.
 
     lda sfxRefused                      // saturating: that a sound was held
     cmp #$ff                            // off is worth being able to see
@@ -536,6 +557,7 @@ sfxVoiceTab:                            // by effect id: the channel it owns
     .byte SFX_CH_KILL                   // a token collected-> voice 2
     .byte SFX_CH_KILL                   // the Dropper ping -> voice 2
     .byte SFX_CH_HURT                   // the victory launch-> voice 3.
+    .byte SFX_CH_KILL                   // the P set jingle  -> voice 2
                                         // VOICE 3 BECAUSE IT IS THE QUIET ONE.
                                         // The launch runs for over a second,
                                         // which is longer than anything else on
@@ -672,6 +694,8 @@ sfxCtrlTab:                             // the effect's waveform, read on the
                                         // ENGINE -- every harmonic present, and
                                         // the one waveform that still reads as
                                         // thrust while it climbs
+    .byte SID_TRI   | SID_GATE          // the P jingle: a clean bell, restruck
+                                        // once a note. See sfxSweepCtrl.
 
 sfxADTab:                               // attack 0 throughout: every one of
     .byte 0                             // these strikes rather than swells
@@ -685,6 +709,24 @@ sfxADTab:                               // attack 0 throughout: every one of
                                         // The gate is only held for 80 ms; the
                                         // rest of what the ear hears is this
                                         // envelope falling away
+    .byte $00                           // THE VICTORY LAUNCH, AND THIS ENTRY
+                                        // WAS MISSING. This table had seven
+                                        // rows against an SFX_COUNT of eight,
+                                        // so the launch has been reading the
+                                        // first byte of sfxSRTab -- a zero --
+                                        // as its envelope ever since it was
+                                        // added. Zero is written here
+                                        // DELIBERATELY: it is exactly what the
+                                        // effect reads today, so naming the row
+                                        // changes nothing that can be heard.
+                                        // reports/end-level-boss-placeholder.md
+                                        // says it was designed as $1c, a three
+                                        // second decay; restoring that is a
+                                        // sound change nobody asked this task
+                                        // for. Flagged in the report.
+    .byte $05                           // the P jingle: decay 5 -> 168 ms, so
+                                        // each of its six notes rings for about
+                                        // the eight frames it is held
 
 sfxSRTab:                               // SUSTAIN ZERO, ALWAYS. See above.
     .byte 0
@@ -696,6 +738,8 @@ sfxSRTab:                               // SUSTAIN ZERO, ALWAYS. See above.
     .byte $00
     .byte $00                           // the launch too: its length comes from
                                         // a long DECAY, never from sustain
+    .byte $00                           // ...and the jingle's notes ring and
+                                        // stop on their own, six times over
 
 // PULSE DUTY, high four bits of twelve, and only the enemy shot reads it. The
 // low byte is the zero sfxInit wrote at boot and nothing changes it: duty is
@@ -716,9 +760,10 @@ sfxPWHiTab:
                                         // not to be mistaken for the token's
                                         // triangle chime on the same voice
     .byte 0                             // sawtooth: unused
+    .byte 0                             // triangle: unused
 
 sfxLenTab:                              // sweep entries, and so frames
-    .byte 0, 3, 12, 30, 3, 6, 4, SFX_LAUNCH_LEN
+    .byte 0, 3, 12, 30, 3, 6, 4, SFX_LAUNCH_LEN, SFX_PEARN_LEN
 
 // Where each effect's slice of the shared sweep table starts. Stated before
 // the table that names them: KickAssembler resolves .const strictly in order.
@@ -729,12 +774,14 @@ sfxLenTab:                              // sweep entries, and so frames
 .const SFX_TOKEN_SWEEP = 48
 .const SFX_PING_SWEEP  = 54
 .const SFX_LAUNCH_SWEEP = 58
+.const SFX_PEARN_SWEEP  = SFX_LAUNCH_SWEEP + SFX_LAUNCH_LEN
 
-.const SFX_SWEEP_LEN   = 118
+.const SFX_SWEEP_LEN   = SFX_PEARN_SWEEP + SFX_PEARN_LEN
 
 sfxBaseTab:                             // first sweep entry, by id
     .byte 0, SFX_FIRE_SWEEP, SFX_KILL_SWEEP, SFX_HURT_SWEEP, SFX_ESHOT_SWEEP
     .byte SFX_TOKEN_SWEEP, SFX_PING_SWEEP, SFX_LAUNCH_SWEEP
+    .byte SFX_PEARN_SWEEP
 
 // ---------------------------------------------------------------------------
 // THE SHARED SWEEP TABLES. Three effects' per-frame data laid end to end, each
@@ -785,6 +832,15 @@ sfxSweepLo:
     .byte $ef, $c3, $a3, $90, $89, $8f, $a0, $bd, $e7, $1c
     .byte $5d, $aa, $03, $67, $d6, $51, $d8, $6a, $07, $b0
 
+    // the P set jingle: C E G C E G rising, each note held
+    // SFX_PEARN_HOLD frames
+    .byte $ca, $ca, $ca, $ca, $ca, $ca, $ca, $ca
+    .byte $d6, $d6, $d6, $d6, $d6, $d6, $d6, $d6
+    .byte $26, $26, $26, $26, $26, $26, $26, $26
+    .byte $a5, $a5, $a5, $a5, $a5, $a5, $a5, $a5
+    .byte $bc, $bc, $bc, $bc, $bc, $bc, $bc, $bc
+    .byte $4d, $4d, $4d, $4d, $4d, $4d, $4d, $4d
+
 sfxSweepHi:
     .byte $26, $19, $10
     .byte $42, $3a, $32, $2b, $24, $1e, $19, $14, $10, $0c, $09, $06
@@ -801,6 +857,13 @@ sfxSweepHi:
     .byte $34, $36, $39, $3b, $3e, $40, $43, $45, $48, $4b
     .byte $4d, $50, $53, $56, $59, $5c, $5f, $62, $65, $69
     .byte $6c, $6f, $73, $76, $79, $7d, $80, $84, $88, $8b
+
+    .byte $22, $22, $22, $22, $22, $22, $22, $22
+    .byte $2b, $2b, $2b, $2b, $2b, $2b, $2b, $2b
+    .byte $34, $34, $34, $34, $34, $34, $34, $34
+    .byte $45, $45, $45, $45, $45, $45, $45, $45
+    .byte $57, $57, $57, $57, $57, $57, $57, $57
+    .byte $68, $68, $68, $68, $68, $68, $68, $68
 
 sfxSweepCtrl:
     // fire: struck once, and held for the length of the sweep
@@ -822,7 +885,52 @@ sfxSweepCtrl:
     // launch: one gated sawtooth, held while the pitch climbs
     .fill 60, SID_SAW | SID_GATE
 
+    // the P jingle: SIX SEPARATE STRIKES. This is the one effect in the
+    // game that moves its gate mid-sweep, which is what the per-frame
+    // control column was put here for -- a held gate would slide between
+    // the notes instead of playing them.
+    .fill 7, SID_TRI | SID_GATE
+    .byte SID_TRI                       // gate low: the
+                                        // falling edge that
+                                        // lets the next note
+                                        // strike, not slur
+    .fill 7, SID_TRI | SID_GATE
+    .byte SID_TRI                       // gate low: the
+                                        // falling edge that
+                                        // lets the next note
+                                        // strike, not slur
+    .fill 7, SID_TRI | SID_GATE
+    .byte SID_TRI                       // gate low: the
+                                        // falling edge that
+                                        // lets the next note
+                                        // strike, not slur
+    .fill 7, SID_TRI | SID_GATE
+    .byte SID_TRI                       // gate low: the
+                                        // falling edge that
+                                        // lets the next note
+                                        // strike, not slur
+    .fill 7, SID_TRI | SID_GATE
+    .byte SID_TRI                       // gate low: the
+                                        // falling edge that
+                                        // lets the next note
+                                        // strike, not slur
+    .fill 7, SID_TRI | SID_GATE
+    .byte SID_TRI                       // gate low: the
+                                        // falling edge that
+                                        // lets the next note
+                                        // strike, not slur
+
 // --- the tables must agree with each other, and the assembler can say so ----
+// --- THE PER-EFFECT TABLES MUST ALL BE SFX_COUNT LONG -----------------------
+// sfxADTab was SEVEN rows against an SFX_COUNT of eight, and the launch effect
+// read the next table's first byte as its envelope for as long as it existed.
+// Nothing said so, because nothing checked. These do -- and they sit here, at
+// the bottom, because a .if over label arithmetic needs both labels already
+// placed.
+.if (sfxSRTab - sfxADTab != SFX_COUNT)    { .error "sfxADTab is not SFX_COUNT rows" }
+.if (sfxLenTab - sfxPWHiTab != SFX_COUNT) { .error "sfxPWHiTab is not SFX_COUNT rows" }
+.if (sfxBaseTab - sfxLenTab != SFX_COUNT) { .error "sfxLenTab is not SFX_COUNT rows" }
+
 .if (sfxSweepHi - sfxSweepLo != SFX_SWEEP_LEN)   { .error "the sweep low-byte table is not SFX_SWEEP_LEN entries" }
 .if (sfxSweepCtrl - sfxSweepHi != SFX_SWEEP_LEN) { .error "the sweep high-byte table is not SFX_SWEEP_LEN entries" }
 .if (* - sfxSweepCtrl != SFX_SWEEP_LEN)          { .error "the sweep control table is not SFX_SWEEP_LEN entries" }
@@ -832,6 +940,7 @@ sfxSweepCtrl:
 .if (SFX_ESHOT_SWEEP + 3 != SFX_TOKEN_SWEEP)     { .error "the enemy-shot sweep does not end where the token sweep begins" }
 .if (SFX_TOKEN_SWEEP + 6 != SFX_PING_SWEEP)      { .error "the token sweep does not end where the ping sweep begins" }
 .if (SFX_PING_SWEEP + 4 != SFX_LAUNCH_SWEEP)     { .error "the ping sweep does not end where the launch sweep begins" }
-.if (SFX_LAUNCH_SWEEP + SFX_LAUNCH_LEN != SFX_SWEEP_LEN) { .error "the launch sweep does not end where the table does" }
+.if (SFX_LAUNCH_SWEEP + SFX_LAUNCH_LEN != SFX_PEARN_SWEEP) { .error "the launch sweep does not end where the P jingle begins" }
+.if (SFX_PEARN_SWEEP + SFX_PEARN_LEN != SFX_SWEEP_LEN) { .error "the P jingle sweep does not end where the table does" }
 
 .if (* > $1e00) { .error "the sfx module has run into the sorter at $1e00" }

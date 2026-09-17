@@ -22,10 +22,28 @@
 //   HW4  heat, right    rendered   (adjacent to HW3: one continuous 48px bar)
 //   HW5  score, left    rendered   digits 0-2
 //   HW6  score, right   rendered   digits 3-5  (adjacent to HW5)
-//   HW7  upgrade        precomputed bitmap per value, selected by POINTER
+//   HW7  P economy      three charge boxes, precomputed per value and selected
+//                      by POINTER, plus ONE spendable-P digit stamped into the
+//                      right-hand column of whichever block is current
 .const HUD_SPRITE_COUNT = 6
 .const HUD_LIVES_MAX    = 5                 // hard cap; see hudLivesByte
-.const HUD_UPGRADE_MAX  = 3                 // states 0..3
+// THE CHARGE BOXES: empty, one, two, three. This file is imported before
+// src/pickup.asm, so the number is DECLARED here and the economy derives its
+// PICKUP_P_PER_UNIT from it -- one definition, and the two cannot drift.
+.const HUD_PCHARGE_MAX  = 3                  // states 0..3 inclusive
+
+// Where the spendable-P digit is stamped inside that sprite. Column 2 is the
+// right-hand eight pixels, which the boxes deliberately leave alone.
+.const HUD_PDIGIT_COL   = 2
+.const HUD_PDIGIT_ROW0  = 7
+
+// THE CELEBRATION. About a second: long enough to read as a reward, short
+// enough that a second set cannot realistically arrive on top of it. The flash
+// cadence is a power of two so the test is an AND.
+.const HUD_P_CELEB_FRAMES = 50
+.const HUD_P_FLASH_MASK   = %00001000       // swaps every 8 frames: ~6 changes
+.const HUD_P_COL_NORMAL   = $0a             // the slot's ordinary colour
+.const HUD_P_COL_FLASH    = $01             // white, and only while celebrating
 .const HUD_HEAT_MAX     = 300
 .const HUD_HEAT_PIXELS  = 48                // 24 + 24, HW3 and HW4 side by side
 
@@ -45,7 +63,7 @@
 .const HUD_SCORE_L      = HUD_SPRITES + 2 * 64      // ptr $ca
 .const HUD_SCORE_R      = HUD_SPRITES + 3 * 64      // ptr $cb
 .const HUD_LIVES_0      = HUD_SPRITES + 4 * 64      // ptr $cc .. $d1
-.const HUD_UPGRADE_0    = HUD_SPRITES + 10 * 64     // ptr $d2 .. $d5
+.const HUD_PCHARGE_0    = HUD_SPRITES + 10 * 64     // ptr $d2 .. $d5
 .const HUD_BLOCKS       = 14
 .const HUD_SPRITES_END  = HUD_SPRITES + HUD_BLOCKS * 64
 .const HUD_PTR_FIRST    = HUD_SPRITES / 64          // $c8
@@ -54,7 +72,7 @@
 .const HUD_PTR_SCORE_L  = HUD_PTR_FIRST + 2
 .const HUD_PTR_SCORE_R  = HUD_PTR_FIRST + 3
 .const HUD_PTR_LIVES_0  = HUD_PTR_FIRST + 4
-.const HUD_PTR_UPGRADE_0 = HUD_PTR_FIRST + 10
+.const HUD_PTR_PCHARGE_0 = HUD_PTR_FIRST + 10
 
 .if ((HUD_SPRITES & 63) != 0) { .error "the HUD sprite block must be 64-byte aligned" }
 .if (HUD_SPRITES_END > BLANK_CHARSET) { .error "HUD bitmaps run into the blank charset at $3800" }
@@ -86,7 +104,7 @@
 .const HUD_DIRTY_LIVES   = %00000001
 .const HUD_DIRTY_HEAT    = %00000010
 .const HUD_DIRTY_SCORE   = %00000100
-.const HUD_DIRTY_UPGRADE = %00001000
+.const HUD_DIRTY_PCHARGE = %00001000
 
 // --- the safe window for writing HUD bitmap RAM -----------------------------
 // THE VIC READS THESE BITMAPS ON RASTERS 16..37, AND NOWHERE ELSE.
@@ -116,7 +134,18 @@
 
 // --- logical state, independent of which hardware slot displays it ----------
 hudLives:      .byte HUD_LIVES_MAX
-hudUpgrade:    .byte 0
+// --- the P economy, AS THE HUD SHOWS IT -------------------------------------
+// THESE ARE PRESENTATION, NOT TRUTH. src/pickup.asm owns pkCharge and
+// pkTokensP and moves them the instant a token is collected; these two lag them
+// for the length of the celebration, which is exactly the point. On the third
+// pickup the unit is banked immediately and the boxes stay full, showing the
+// OLD number, until the flashing has finished. A transition during that second
+// cannot lose currency, because the currency was never waiting on it.
+hudPCharge:    .byte 0     // boxes lit, 0..3. 3 only ever during a celebration
+hudPShown:     .byte 0     // the digit on screen, which may be one behind
+
+// Frames of celebration left. Zero is the ordinary state.
+hudPCeleb:     .byte 0
 hudHeatLo:     .byte 0                      // 0..HUD_HEAT_MAX, 16-bit
 hudHeatHi:     .byte 0
 hudScore:      .fill 6, 0                   // one digit per byte, most significant first
@@ -126,7 +155,7 @@ hudDirty:      .byte 0
 // Lives and upgrade "render" by writing ONE byte of this table, which is atomic
 // against the interrupt that reads it -- exHud reads each entry once.
 hudPtrLive:    .byte HUD_PTR_LIVES_0 + HUD_LIVES_MAX, HUD_PTR_HEAT_L, HUD_PTR_HEAT_R
-               .byte HUD_PTR_SCORE_L, HUD_PTR_SCORE_R, HUD_PTR_UPGRADE_0
+               .byte HUD_PTR_SCORE_L, HUD_PTR_SCORE_R, HUD_PTR_PCHARGE_0
 
 // The pixel count last drawn into the bar. Heat changes every frame while it
 // ramps, but 300 logical units map onto 48 pixels, so the BITMAP only changes
@@ -221,15 +250,36 @@ hudGlyphsEnd:
     .return (v >> (16 - b * 8)) & $ff
 }
 
-// Upgrade state n shows n+1 filled blocks: unmistakably different at a glance,
-// and four states is the whole range.
-.function upgradeByte(n, r, b) {
-    .if (r < 7 || r > 13) { .return 0 }
+// THREE BOXES, AND THE RIGHT-HAND COLUMN IS NOT MINE. State n fills the first n
+// of three boxes; an unfilled box is drawn as an outline so that "empty" reads
+// as a container waiting to be filled rather than as nothing at all.
+//
+// The boxes live in the left sixteen pixels -- four wide, one apart -- because
+// the last eight belong to the spendable-P digit that hudStampPDigit writes
+// into whichever of these four blocks is currently on the pointer. Bit 23 is
+// the leftmost pixel, so byte b is bits (23 - b*8) .. (16 - b*8).
+.const HUD_PBOX_W    = 4        // pixels across a box
+.const HUD_PBOX_STEP = 5        // ...and to the next one, so a 1px gap
+.const HUD_PBOX_TOP  = 7
+.const HUD_PBOX_BOT  = 13
+
+.function pchargeByte(n, r, b) {
+    .if (r < HUD_PBOX_TOP || r > HUD_PBOX_BOT) { .return 0 }
     .var v = 0
-    .for (var i = 0; i <= n; i++) {
-        .eval v = v | ($3f << (18 - i * 6))
+    .for (var i = 0; i < 3; i++) {
+        .var filled = (i < n)
+        .var edgeRow = (r == HUD_PBOX_TOP || r == HUD_PBOX_BOT)
+        .for (var px = 0; px < HUD_PBOX_W; px++) {
+            .var edgeCol = (px == 0 || px == HUD_PBOX_W - 1)
+            .if (filled || edgeRow || edgeCol) {
+                .eval v = v | (1 << (23 - i * HUD_PBOX_STEP - px))
+            }
+        }
     }
     .return (v >> (16 - b * 8)) & $ff
+}
+.if (3 * HUD_PBOX_STEP > 16) {
+    .error "the charge boxes run into the column the P digit owns"
 }
 
 * = HUD_SPRITES "hud bitmaps"
@@ -244,9 +294,9 @@ hudBitmaps:
     }
     .byte $00
 }
-.for (var n = 0; n <= HUD_UPGRADE_MAX; n++) {   // upgrade 0..3, precomputed
+.for (var n = 0; n <= HUD_PCHARGE_MAX; n++) {   // upgrade 0..3, precomputed
     .for (var r = 0; r < 21; r++) {
-        .byte upgradeByte(n, r, 0), upgradeByte(n, r, 1), upgradeByte(n, r, 2)
+        .byte pchargeByte(n, r, 0), pchargeByte(n, r, 1), pchargeByte(n, r, 2)
     }
     .byte $00
 }
@@ -264,12 +314,12 @@ hudBitmapsEnd:
 // hudInit — draw every run-time bitmap once, so nothing is blank at boot.
 // ---------------------------------------------------------------------------
 hudInit:
-    lda #HUD_DIRTY_LIVES | HUD_DIRTY_HEAT | HUD_DIRTY_SCORE | HUD_DIRTY_UPGRADE
+    lda #HUD_DIRTY_LIVES | HUD_DIRTY_HEAT | HUD_DIRTY_SCORE | HUD_DIRTY_PCHARGE
     sta hudDirty
     lda #$ff
     sta hudHeatPix                      // force the bar to be drawn
     jsr hudRenderLives
-    jsr hudRenderUpgrade
+    jsr hudRenderPCharge
     jsr hudHeatFrame                    // static, drawn once
     jsr hudRenderHeat
     jsr hudRenderScore
@@ -318,9 +368,9 @@ hudUpdWork:                             // traced: the cost of a real update is
     jsr hudRenderLives
 !noLives:
     lda hudDirty
-    and #HUD_DIRTY_UPGRADE
+    and #HUD_DIRTY_PCHARGE
     beq !noUpg+
-    jsr hudRenderUpgrade
+    jsr hudRenderPCharge
 !noUpg:
     lda hudDirty
     and #HUD_DIRTY_HEAT
@@ -378,7 +428,7 @@ hudDefer:
 hu_start:  .byte 0
 
 // ---------------------------------------------------------------------------
-// hudRenderLives / hudRenderUpgrade — the pointer IS the update.
+// hudRenderLives / hudRenderPCharge — the pointer IS the update.
 //
 // Six lives values and four upgrade states, each with its own bitmap built at
 // assembly time, so there is nothing to draw. One byte of hudPtrLive changes,
@@ -398,15 +448,167 @@ hudRenderLives:
     sta hudPtrLive + 0                  // HW2
     rts
 
-hudRenderUpgrade:
-    lda hudUpgrade
-    cmp #HUD_UPGRADE_MAX + 1
+hudRenderPCharge:
+    lda hudPCharge
+    cmp #HUD_PCHARGE_MAX + 1
     bcc !ok+
-    lda #HUD_UPGRADE_MAX
+    lda #HUD_PCHARGE_MAX
 !ok:
+    pha                                 // the state, for the digit below
     clc
-    adc #HUD_PTR_UPGRADE_0
+    adc #HUD_PTR_PCHARGE_0
     sta hudPtrLive + 5                  // HW7
+    pla
+    // falls through, deliberately: the digit belongs to the block the pointer
+    // above has just selected, and stamping it anywhere else would show the
+    // previous number for one frame every time a box lights.
+
+// ---------------------------------------------------------------------------
+// hudStampPDigit — draw the spendable-P digit into charge block A.
+// Entry: A = the charge state, 0..HUD_PCHARGE_MAX. Clobbers A, X, Y.
+//
+// THE FOUR BLOCKS ARE PRECOMPUTED BOXES AND NOTHING ELSE, so the number has to
+// be written into whichever one is on the pointer. Only the current block is
+// kept up to date; the other three carry a stale digit that nobody can see, and
+// they are re-stamped the moment they become current.
+//
+// TWO INDEX REGISTERS, NO ZERO PAGE AND NO SELF-MODIFICATION. X holds the
+// block's byte offset -- 0, 64, 128 or 192, which fits a byte because there are
+// only four blocks -- and indexes an absolute,X store off a constant base; Y
+// walks the glyph. The same digitGlyph table the score uses, so there is one
+// set of numerals in this game.
+// ---------------------------------------------------------------------------
+hudStampPDigit:
+    .for (var i = 0; i < 6; i++) { asl }   // state * 64
+    tax
+
+    lda hudPShown
+    cmp #10
+    bcc !inRange+
+    lda #9                              // ONE COLUMN, ONE DIGIT. Nine is the
+!inRange:                               // most that fits; see the caveat in the
+                                        // report about a second digit
+    asl
+    asl
+    asl                                 // digit * 8 = its row 0 in digitGlyph
+    tay
+
+    .for (var r = 0; r < 8; r++) {
+        lda digitGlyph + r, y
+        sta HUD_PCHARGE_0 + (HUD_PDIGIT_ROW0 + r) * 3 + HUD_PDIGIT_COL, x
+    }
+    rts
+
+// ---------------------------------------------------------------------------
+// hudPCharged / hudPEarned / hudPReset — what src/pickup.asm tells this file.
+// Entry/exit: X and Y PRESERVED. pickupCollect calls these from inside its walk
+// of the pool, and a HUD that ate the slot index would be a corruption bug in
+// the thing that drew the picture.
+//
+// hudPCharged   a pickup that did not complete a set: light one more box.
+// hudPEarned    the third: the unit is ALREADY banked by the caller, so the
+//               boxes latch full, the number stays as it was, and the
+//               celebration begins.
+// hudPReset     a new run: empty boxes, zero, no celebration.
+// ---------------------------------------------------------------------------
+hudPCharged:
+    txa
+    pha
+    tya
+    pha
+    lda pkCharge
+    sta hudPCharge
+    lda pkTokensP
+    sta hudPShown
+    jmp hudPDone
+
+hudPEarned:
+    txa
+    pha
+    tya
+    pha
+    lda #HUD_PCHARGE_MAX
+    sta hudPCharge                      // all three, and they stay lit...
+                                        // hudPShown is NOT updated: the number
+                                        // the player is watching is the one
+                                        // they had, and it steps up when the
+                                        // flashing stops
+    lda #HUD_P_CELEB_FRAMES
+    sta hudPCeleb
+    jmp hudPDone
+
+hudPReset:
+    txa
+    pha
+    tya
+    pha
+    lda #0
+    sta hudPCharge
+    sta hudPCeleb
+    sta hudPShown
+    lda #HUD_P_COL_NORMAL
+    sta hudCol + 5
+    // falls through
+
+hudPDone:
+    lda hudDirty
+    ora #HUD_DIRTY_PCHARGE
+    sta hudDirty
+    pla
+    tay
+    pla
+    tax
+    rts
+
+// ---------------------------------------------------------------------------
+// hudPTick — one frame of the celebration. MAIN THREAD, from gameFrame.
+//
+// GAMEPLAY IS NOT PAUSED FOR THIS. It is a countdown and a colour, and the only
+// thing it can do to the game is change the shade of one HUD sprite: no input
+// is locked, no collision suppressed, no token-encounter cleanup delayed. The
+// three seconds after a set completes are ordinary seconds.
+//
+// Five cycles and an rts when nothing is being celebrated, which is nearly
+// always.
+// ---------------------------------------------------------------------------
+hudPTick:
+    lda hudPCeleb
+    bne !running+
+    rts
+!running:
+    dec hudPCeleb
+    bne !flash+
+
+    // ---- the celebration is over: the boxes empty and the number steps ----
+    // TAKEN FROM THE AUTHORITATIVE STATE, not from an assumption about what it
+    // ought to be. If a new run started during the celebration the charge is
+    // zero and the count is zero, and this shows that rather than the set that
+    // was being celebrated when the run ended.
+    lda pkCharge
+    sta hudPCharge
+    lda pkTokensP
+    sta hudPShown
+    lda #HUD_P_COL_NORMAL
+    sta hudCol + 5
+    lda hudDirty
+    ora #HUD_DIRTY_PCHARGE
+    sta hudDirty
+    rts
+
+!flash:
+    // A READABLE CADENCE, not a strobe. One swap every eight frames is about
+    // six changes across the celebration -- visible from the corner of the eye
+    // without being the brightest thing on the screen. It is a colour swap
+    // rather than a second set of bitmaps because the boxes are already drawn.
+    lda hudPCeleb
+    and #HUD_P_FLASH_MASK
+    beq !dim+
+    lda #HUD_P_COL_FLASH
+    jmp !paint+
+!dim:
+    lda #HUD_P_COL_NORMAL
+!paint:
+    sta hudCol + 5
     rts
 
 // ---------------------------------------------------------------------------
@@ -634,27 +836,15 @@ hudDemoTick:
     // on a 128-frame timer is gone, because two writers of one logical value is
     // how a HUD starts disagreeing with the game it is describing.
 
-    // ---- upgrade: next state every 192 frames ----------------------------
-    inc hudDemoUpgTick
-    lda hudDemoUpgTick
-    cmp #192
-    bcc !noUpg+
-    lda #0
-    sta hudDemoUpgTick
-    inc hudUpgrade
-    lda hudUpgrade
-    cmp #HUD_UPGRADE_MAX + 1
-    bcc !upgOk+
-    lda #0
-    sta hudUpgrade
-!upgOk:
-    lda hudDirty
-    ora #HUD_DIRTY_UPGRADE
-    sta hudDirty
-!noUpg:
+    // ---- the P boxes: NOT DRIVEN HERE ANY MORE ---------------------------
+    // The placeholder walked the four states on a 192-frame timer, so the HUD
+    // cheerfully reported a charge nobody had collected and reset one nobody
+    // had spent. src/pickup.asm owns the economy now and tells this file when
+    // it changes -- see hudPCharged and hudPEarned -- for exactly the reason
+    // the lives placeholder above it was removed: two writers of one logical
+    // value is how a HUD starts disagreeing with the game it describes.
     rts
 
 hudDemoFrame:   .byte 0, 0
-hudDemoUpgTick: .byte 0
 
-.if (* > $1800) { .error "the HUD code has grown past its $1800 ceiling" }
+.if (* > $1840) { .error "the HUD code has run into the sfx module at $1840" }

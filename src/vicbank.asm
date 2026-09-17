@@ -160,6 +160,27 @@ vicMirrorAt:  .byte 0
 vicScreenAt:   .byte 0
 vicScreenPage: .byte 0
 
+// EVERYTHING BANK 2 NEEDS HAS CROSSED: the frozen screen matrix once, and the
+// HUD block at least once in full. Armed low by vicMirrorScreen and raised by
+// the wrap at the end of a complete HUD pass, so it means "a whole picture, not
+// most of one". src/boss.asm holds the bank switch until it is set.
+vicMirrorDone: .byte 0
+
+// The displayed frame the live mirror last copied a slice on. The main loop's
+// idle spin runs thousands of times a frame and the mirror must run ONCE, so
+// the frame number is the gate rather than a countdown.
+vicMirrorFrame: .byte 0
+
+// Live slices actually copied while bank 2 was up. Saturating.
+//
+// THE INSTRUMENT IS "IS THE FEED ALIVE", not "was it ever deferred". The first
+// draft counted refusals, which the idle spin produces in their hundreds per
+// frame whenever gameFrame happens to end below raster 56 -- it saturated
+// before the boss had finished arriving and said nothing about anything. This
+// advances once per displayed frame in bank 2 and not at all in bank 0, which
+// is the property the regression test can hold on to.
+vicMirrorRuns: .byte 0
+
 // --- the block copy's working set ------------------------------------------
 vbPages:      .byte 0
 vbClipHi:     .byte 0
@@ -200,6 +221,9 @@ vicBankInit:
     sta vicMirrorAt
     sta vicSwitches
     sta vicScreenPage
+    sta vicMirrorDone
+    sta vicMirrorFrame
+    sta vicMirrorRuns
     lda #VB_SCREEN_SLICES               // no screen mirror is pending: the
     sta vicScreenAt                     // clearing phase arms it
     // falls through: a cold start is in bank 0, said out loud
@@ -316,25 +340,89 @@ vicMirrorScreen:
     sta vicScreenPage
     lda #0
     sta vicScreenAt
+    sta vicMirrorAt                     // THE HUD PASS STARTS HERE TOO. The
+                                        // cursor is free-running, so arming the
+                                        // screen without arming this would
+                                        // declare the block complete part of a
+                                        // pass early -- see vicMirrorDone.
+    sta vicMirrorDone
     rts
 
 // ---------------------------------------------------------------------------
-// vicMirrorFinish — make sure the screen has finished crossing.
+// vicMirrorFinish — make sure the whole picture has finished crossing.
 // Clobbers A, X, Y.
 //
-// Normally does nothing at all: the clearing phase has already walked the
-// whole matrix over, a slice a frame. It exists for the case where the arena
-// was already empty when the stage ended and LP_CLEARING lasted a single
-// frame, and it is deliberately the only place the copy is allowed to be
-// expensive -- at that point there is nothing else on screen to be late for.
+// THE SAFETY NET, AND IT SHOULD NEVER DO ANYTHING. src/boss.asm holds the bank
+// switch until vicMirrorDone is set, so by the time this runs both the screen
+// matrix and the HUD block have already crossed a slice a frame. It stays
+// because a spawn path that reached bank 2 some other way must not be able to
+// select it over a half-copied picture.
+//
+// BOUNDED BY CONSTRUCTION: every vicMirrorTick advances one of the two cursors,
+// and the HUD cursor raises vicMirrorDone when it wraps, so this cannot run
+// more than VB_SCREEN_SLICES + VB_HUD_SLICES times.
+//
+// It used to wait on the SCREEN cursor alone, which is the half of the picture
+// that crosses once -- so a clearing phase too short to walk the HUD across
+// left the arena displaying the HUD the machine booted with.
 // ---------------------------------------------------------------------------
 vicMirrorFinish:
-    lda vicScreenAt
-    cmp #VB_SCREEN_SLICES
-    bcs !done+
+    lda vicMirrorDone
+    bne !done+
     jsr vicMirrorTick
     jmp vicMirrorFinish
 !done:
+    rts
+
+// ---------------------------------------------------------------------------
+// vicMirrorLive — keep bank 2's HUD current for AS LONG AS BANK 2 IS UP.
+// MAIN THREAD, from the main loop's idle spin. Clobbers A and X.
+//
+// THE MIRROR IS A FEED, NOT A PHOTOGRAPH, and this is the routine that makes
+// that true. vicMirrorTick used to be called from bossClearTick and nowhere
+// else, so the block stopped crossing at the instant the bank changed and the
+// whole boss fight displayed whatever the HUD had held one frame before it.
+// The score, the heat bar and the P economy all kept working perfectly in bank
+// 0 and none of it could be seen.
+//
+// FIVE CYCLES AND AN RTS IN BANK 0, which is all of ordinary play: the VIC is
+// reading the originals then, and there is nothing to mirror.
+//
+// TWO GATES, AND BOTH ARE LOAD-BEARING:
+//
+//   the frame gate   the idle spin runs thousands of times a frame. One slice
+//                    per DISPLAYED frame is the cadence src/vicbank.asm's own
+//                    reasoning chose -- a few hundred cycles, and the whole
+//                    block current again within VB_HUD_SLICES frames.
+//
+//   the raster gate  THESE ARE THE BYTES THE VIC FETCHES ON RASTERS 16..37.
+//                    src/hud.asm refuses to write the bank 0 originals outside
+//                    56..200 for exactly that reason, and the bank 2 copies are
+//                    the same bytes seen through a different bank. Copying them
+//                    across the fetch would tear a digit. The spin gets many
+//                    passes per frame, so a refusal costs microseconds.
+// ---------------------------------------------------------------------------
+vicMirrorLive:
+    lda vicBank2
+    beq !idle+                          // bank 0: the VIC reads the originals
+
+    lda frameCounter
+    cmp vicMirrorFrame
+    beq !idle+                          // this frame's slice is already across
+
+    ldx $d012
+    cpx #HUD_SAFE_LO
+    bcc !idle+                          // REFUSED, not delayed: the spin comes
+    cpx #HUD_SAFE_HI                    // back around in microseconds and the
+    bcs !idle+                          // frame gate above is still open
+
+    sta vicMirrorFrame                  // A still holds frameCounter
+    ldx vicMirrorRuns
+    cpx #$ff
+    beq vicMirrorHud
+    inc vicMirrorRuns
+    jmp vicMirrorHud
+!idle:
     rts
 
 // ---------------------------------------------------------------------------
@@ -399,12 +487,26 @@ vicMirrorTick:
     jmp vicMirrorSlice
 
 vicMirrorHud:
+    // THE SLICE'S BYTE OFFSET IS n * 128, AND IT IS SIXTEEN BITS.
+    //
+    // This read `asl` for the low byte, which is n * 2 -- the right answer only
+    // for n = 0. Every other slice copied from a couple of bytes past the page
+    // it belonged to and stopped short of the next one, so the block was walked
+    // with three 130-byte holes in it that no cursor ever revisited. MEASURED:
+    // 506 of 896 bytes crossed per pass, and the two holes that mattered sat
+    // exactly over the score sprites and P charge blocks 0 and 1. That is why
+    // the boss arena's score read 000000 -- the boot image, never once
+    // overwritten -- rather than freezing at the score the player had.
+    //
+    // n * 128 is n shifted left seven, which is a shift RIGHT by one with the
+    // bytes swapped: the high byte is n >> 1 and the whole low byte is the bit
+    // that fell out of it.
     lda vicMirrorAt
-    asl                                 // slice -> 128-byte offset, 16 bits
-    tax                                 // low byte of the offset
-    lda vicMirrorAt
-    lsr                                 // ...and its high byte
+    lsr                                 // n >> 1 IS the high byte...
     tay
+    lda #0
+    ror                                 // ...and carry -> bit 7 is the low one:
+    tax                                 // $00 for an even slice, $80 for an odd
 
     txa
     clc
@@ -427,7 +529,9 @@ vicMirrorHud:
     cmp #VB_HUD_SLICES
     bcc vicMirrorSlice
     lda #0
-    sta vicMirrorAt
+    sta vicMirrorAt                     // ...and a WHOLE pass has now crossed,
+    lda #1                              // which is the thing the bank switch
+    sta vicMirrorDone                   // waits on. See src/boss.asm.
 
 vicMirrorSlice:
     ldy #VB_SLICE - 1

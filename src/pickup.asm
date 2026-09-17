@@ -42,6 +42,13 @@
 // enySpecies relies on objType to mean anything. See src/enemy.asm, which
 // makes the same choice for the same reason.
 .const PICKUP_P      = 0
+
+// HOW MANY PICKUPS MAKE A SPENDABLE UNIT. The HUD's three charge boxes are the
+// same number said visually, so it is DERIVED from them rather than restated:
+// src/hud.asm is imported first and declares HUD_PCHARGE_MAX, and taking the
+// value from there makes it impossible for the picture and the economy to
+// disagree about how big a set is.
+.const PICKUP_P_PER_UNIT = HUD_PCHARGE_MAX
 .const PICKUP_KINDS  = 1
 
 // --- drift and lifetime -----------------------------------------------------
@@ -195,10 +202,25 @@ tokenBitmapEnd:
 // and the exact count past 255 is not one this game will ever need.
 //
 // IT IS PERSISTENT GAMEPLAY STATE, not a diagnostic. pickupInit clears it at
-// COLD START only -- see the note there -- so it survives everything a session
-// does short of a reboot, and it is the hook the weapon-upgrade system will
-// read when there is one. Nothing in this file acts on its value.
-pkTokensP:   .byte 0
+// COLD START only -- see the note there -- and gsResetRun clears it for a new
+// RUN, so it survives a death and a respawn. It is the hook the weapon-upgrade
+// system will read when there is one. Nothing in this file acts on its value.
+//
+// THREE PICKUPS MAKE ONE, AND THE TWO CONCEPTS ARE SEPARATE BYTES. This counter
+// used to be incremented once per token picked up, which meant it was doing
+// duty as both the collection tally and the thing gsResetRun already called "P
+// currency" -- so eight pickups read as eight spendable P. They are now
+// unambiguous:
+//
+//     pkTokensP  completed, SPENDABLE units. What the level-complete page
+//                shows, and what an upgrade screen will one day spend.
+//     pkCharge   0..2, the partial charge toward the next unit
+//
+// THE NAME IS KEPT because gsResetRun already described this byte as the run's
+// P currency: it is the MEANING that was wrong, not the label. The HUD shows
+// both values, and nothing outside this file writes either.
+pkTokensP:   .byte 0     // spendable currency units
+pkCharge:    .byte 0     // pickups banked toward the next one, 0..2
 
 // --- diagnostics, saturating ------------------------------------------------
 pkSpawned:   .byte 0                    // tokens that reached the world
@@ -250,7 +272,7 @@ pickupStateEnd:
 //
 // COLD START ONLY, AND DELIBERATELY NOT FROM gameInit. Every other subsystem's
 // init is safe to re-enter on a restart because it describes the WORLD -- no
-// enemies, no projectiles, no waves running. pkTokensP describes the PLAYER,
+// enemies, no projectiles, no waves running. The P economy describes the PLAYER,
 // and the day there is a restart or a game-over it is a decision for that day
 // whether collected tokens survive it. Putting this in gameInit would answer
 // that question silently, by accident, in the direction nobody chose.
@@ -261,6 +283,7 @@ pickupStateEnd:
 pickupInit:
     lda #0
     sta pkTokensP
+    sta pkCharge
     sta pkSpawned
     sta pkDropped
     sta pkDespawned
@@ -560,11 +583,33 @@ pickupCollect:
     // an omission: the counter is the proof that collection happened and the
     // hook the upgrade system will read. Inventing a weapon upgrade here would
     // be inventing the thing the next slice exists to design.
+    // ---- three pickups make one spendable unit ---------------------------
+    // THE UNIT IS AWARDED ON THE THIRD PICKUP, AT THIS INSTRUCTION, and not
+    // when the HUD has finished celebrating it. The celebration is a second of
+    // flashing boxes during which the game carries on -- the player can die,
+    // the level can end, the boss can start -- and currency that only became
+    // real at the end of an animation would be currency a transition could
+    // lose. The authoritative state moves first and the HUD catches up.
+    inc pkCharge
+    lda pkCharge
+    cmp #PICKUP_P_PER_UNIT
+    bcc !partial+
+
+    lda #0
+    sta pkCharge                        // the set is banked...
     lda pkTokensP
     cmp #$ff
-    beq !sound+
-    inc pkTokensP
-!sound:
+    beq !earned+                        // saturating, like every other count
+    inc pkTokensP                        // ...and the unit exists NOW
+!earned:
+    jsr hudPEarned                      // latch the full boxes and start the
+                                        // celebration; X and Y preserved
+    lda #SFX_PEARN
+    jsr sfxRequest                      // the jingle, in place of the chime
+    jmp !unknown+
+
+!partial:
+    jsr hudPCharged                     // one more box lit, number unchanged
     lda #SFX_TOKEN
     jsr sfxRequest                      // src/sfx.asm; preserves X and Y
 

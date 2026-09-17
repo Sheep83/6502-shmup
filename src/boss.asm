@@ -283,6 +283,27 @@ bossClearTick:
     sta lvlForced                       // visible, rather than a silent stall
     jsr bossPurgeArena
 !clean:
+    // THE PICTURE CROSSES BEFORE THE BANK DOES.
+    //
+    // The arena being empty is only half of "ready". The other half is that
+    // everything the VIC will fetch from bank 2 is actually there, and the
+    // screen matrix and the HUD block are both still walking across a slice a
+    // frame at this point. vicMirrorDone is set by the HUD pass's own wrap,
+    // which the screen pass gates, so one byte answers for both.
+    //
+    // BOUNDED, AND SHORT: VB_SCREEN_SLICES + VB_HUD_SLICES is fifteen frames
+    // from the arm in bossWatchStage, so an arena that was already empty when
+    // the stage ran out waits three tenths of a second that nobody can see. The
+    // alternative is a boss fight whose first frames show the HUD the machine
+    // booted with, and then a snap -- which is the flicker this lifecycle was
+    // rebuilt to remove.
+    //
+    // The deadline path above falls in here too, and needs no wait of its own:
+    // ARENA_CLEAR_DEADLINE is two hundred frames and the mirror needs fifteen.
+    lda vicMirrorDone
+    bne !ready+
+    rts
+!ready:
     jmp bossSpawn
 
 // ---------------------------------------------------------------------------
