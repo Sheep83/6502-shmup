@@ -771,6 +771,16 @@ waveInit:
 // grow with the length of the authored stage.
 // ---------------------------------------------------------------------------
 waveTick:
+    // THE LEVEL IS ENDING. Every system that can put something new into the
+    // arena tests this for itself rather than being switched off from
+    // elsewhere, so each one stops in its own terms and nothing has to keep a
+    // list of what to suppress. See src/boss.asm.
+    // the authored encounter list is finished with: no trigger may start a
+// wave once the stage has run out
+    lda lvlPhase
+    beq !playing+
+    rts
+!playing:
     // ---- has the world reached the next authored trigger? -----------------
     lda worldProgressHi
     cmp wvNextAtHi
@@ -987,6 +997,15 @@ waveRunInstance:
 // formation.
 // ---------------------------------------------------------------------------
 waveFireTick:
+    // THE LEVEL IS ENDING. Every system that can put something new into the
+    // arena tests this for itself rather than being switched off from
+    // elsewhere, so each one stops in its own terms and nothing has to keep a
+    // list of what to suppress. See src/boss.asm.
+    // no enemy may open fire during the arena clear or the boss fight
+    lda lvlPhase
+    beq !playing+
+    rts
+!playing:
     dec wvFirePhase
     beq !opportunity+
     rts

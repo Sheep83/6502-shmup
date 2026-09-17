@@ -207,6 +207,16 @@ class Vice:
         # lifecycle itself with start_game=False.
         poke(mon, sym["hudLives"], 250)
 
+        # ...AND THE LEVEL IS HELD OPEN, for the same kind of reason. The stage
+        # is finite now: one traversal freezes the arena, stops every encounter
+        # and spawns the end-of-level boss. A human reaches that after
+        # sixty-three seconds; in warp a five-second probe reaches it, so every
+        # pre-existing test that free-runs for a while would be measuring the
+        # boss arena instead of ordinary play. stageHold is src/scroll.asm's
+        # own diagnostic switch, beside pinFine, and it makes the stage endless
+        # exactly as it used to be. A test about the END of a level clears it.
+        poke(mon, sym["stageHold"], 1)
+
     def close(self):
         if self.mon: self.mon.close(); self.mon = None
         if self.proc:

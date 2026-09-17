@@ -501,6 +501,15 @@ tokenDismissAt:
 // late.
 // ---------------------------------------------------------------------------
 tokenTick:
+    // THE LEVEL IS ENDING. Every system that can put something new into the
+    // arena tests this for itself rather than being switched off from
+    // elsewhere, so each one stops in its own terms and nothing has to keep a
+    // list of what to suppress. See src/boss.asm.
+    // no new token encounter may start once the level is ending
+    lda lvlPhase
+    beq !playing+
+    rts
+!playing:
     lda tkActive
     bne !running+
     rts

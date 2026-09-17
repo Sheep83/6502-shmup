@@ -218,8 +218,16 @@ collisionTick:
     txa
     pha                                 // traceRay walks X over the pool
     jsr traceRay
-    bcs !miss+
+    bcs !tryBoss+
     jsr applyDamage                     // X = the chosen target
+    jmp !miss+
+!tryBoss:
+    // NOTHING ORDINARY WAS IN THE WAY, so the ray may reach the boss. One ray
+    // reaches one target here, exactly as it always has, which is the whole
+    // reason a ray crossing a seam between the boss's four render cells cannot
+    // count twice: the cells are not targets, and this is one test against one
+    // rectangle. See src/boss.asm.
+    jsr bossRayHit
 !miss:
     pla
     tax

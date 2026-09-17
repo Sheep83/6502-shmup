@@ -113,7 +113,7 @@ VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 .PHONY: all build d64 test
 .PHONY: test-boot test-production test-turret-regression
 .PHONY: test-encounter-director test-player-ship test-flight-paths test-ingress-egress test-clip-scratch
-.PHONY: test-sfx test-enemy-fire test-pickup test-lifecycle test-player-death
+.PHONY: test-sfx test-enemy-fire test-pickup test-lifecycle test-player-death test-boss
 .PHONY: run run-d64 clean
 
 all: build
@@ -223,6 +223,15 @@ d64: build
 #                               GAME OVER, and ramming a LIVE enemy damages the
 #                               player through the existing playerTakeHit path
 #                               while a dying enemy, a bolt and a token do not.
+#   test_boss.py               the end of a level: the stage boundary derived
+#                               from the authored geometry, the scroller frozen
+#                               on the last full screen with no wrap, encounter
+#                               generation stopped, an arena clear that cannot
+#                               deadlock, one 50-HP boss drawn by four TYPE_BOSS
+#                               cells, a seam ray counting once, the health bar
+#                               and hit flash, death into a 100-frame pause, an
+#                               accelerating scripted exit and LEVEL COMPLETE
+#                               with the run intact.
 #   test_encounter_director.py the encounter director: an authored trigger off
 #                               worldProgress starts a wave, a SECOND wave
 #                               instance runs concurrently with the first,
@@ -266,6 +275,7 @@ test: build
 	python3 tests/test_pickup.py
 	python3 tests/test_lifecycle.py
 	python3 tests/test_player_death.py
+	python3 tests/test_boss.py
 
 test-boot: build
 	python3 tests/test_boot.py
@@ -299,6 +309,9 @@ test-lifecycle: build
 
 test-player-death: build
 	python3 tests/test_player_death.py
+
+test-boss: build
+	python3 tests/test_boss.py
 
 # NON-DEFAULT ON PURPOSE. The composable-movement vocabulary (v1.1): stage
 # transitions, a three-stage path walked end to end, an arc and its mirror on

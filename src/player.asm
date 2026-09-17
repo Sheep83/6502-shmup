@@ -363,6 +363,12 @@ plyInvuln:   .byte 0
 // is why the player's own death behaviour did not have to change at all.
 plyFatal:    .byte 0
 
+// plyExit -- "the level has been won and the player no longer has agency" --
+// lives in src/boss.asm's state block, not here. The player's own block is
+// full to its $c540 ceiling, and the byte belongs to the level's ending in any
+// case: boss.asm sets it, clears it and flies the ship out with it. This file
+// only ever READS it, in playerTick and playerTakeHit.
+
 // ---------------------------------------------------------------------------
 // THE DEATH PHASE. Non-zero from the instant the craft is killed until its
 // explosion has finished burning, and it is the one byte that answers "is the
@@ -604,6 +610,8 @@ readInput:
 // the property, not "the caller is careful".
 // ---------------------------------------------------------------------------
 playerTakeHit:
+    lda plyExit                         // the level is won: nothing can hurt it
+    bne !done+
     lda plyInvuln
     bne !done+
     lda plyDead                         // already dying: the explosion is the
@@ -860,8 +868,12 @@ playerTick:
     // frozen exactly where it was destroyed. weaponFire refuses separately, so
     // the trigger is dead too.
     lda plyDead
-    beq !alive+
+    beq !notDead+
     jmp playerDeathTick                 // its rts is ours
+!notDead:
+    lda plyExit                         // the victory launch flies the ship;
+    beq !alive+                         // the stick does not
+    rts
 !alive:
     jsr playerInvulnTick
     jsr playerBankTick                  // presentation only; reads joyState,

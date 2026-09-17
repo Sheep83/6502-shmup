@@ -229,6 +229,8 @@ weaponFire:
     // it and the player-fire SFX -- is downstream of this one branch.
     lda plyDead
     bne !refuse+
+    lda plyExit                         // ...and neither does a departing one
+    bne !refuse+
     lda wpnOverheated
     bne !refuse+
     lda wpnCooldown

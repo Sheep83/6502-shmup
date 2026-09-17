@@ -1407,6 +1407,15 @@ turretBit: .byte 1, 2, 4, 8, 16, 32, 64, 128
 // could shoot, and at most two ever can at once.
 // ---------------------------------------------------------------------------
 turretFireTick:
+    // THE LEVEL IS ENDING. Every system that can put something new into the
+    // arena tests this for itself rather than being switched off from
+    // elsewhere, so each one stops in its own terms and nothing has to keep a
+    // list of what to suppress. See src/boss.asm.
+    // the turrets stand down: the arena has to become clean and stay clean
+    lda lvlPhase
+    beq !playing+
+    rts
+!playing:
     lda trtVisibleMask
     bne !any+
     rts                                 // the whole cost of an ordinary frame

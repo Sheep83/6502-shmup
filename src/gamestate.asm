@@ -58,6 +58,11 @@
 .const GS_PLAYING  = 1
 .const GS_GAMEOVER = 2
 .const GS_INITIALS = 3
+// LEVEL COMPLETE. A genuine lifecycle state rather than a detour inside the
+// game loop: gameplay has stopped, the executor is off the display and the RUN
+// is still alive -- score, lives and the P currency are all intact and waiting
+// for the upgrade screen that will replace this screen's FIRE destination.
+.const GS_LEVELDONE = 4
 
 // --- the old timers, unchanged ----------------------------------------------
 .const GS_ATTRACT_CYCLE = 250       // ~5 PAL seconds per attract page
@@ -85,7 +90,10 @@
 .const GS_HEAD_AT     = SCREEN + 4 * 40 + 14        // "HIGH SCORES"
 .const GS_ROW0_AT     = SCREEN + 7 * 40 + 15        // rows 7,9,11..21, column 15
 .const GS_OVER_AT     = SCREEN + 12 * 40 + 15       // "GAME OVER"
-.const GS_IPROMPT_AT  = SCREEN + 10 * 40 + 10       // "ENTER YOUR INITIALS"
+.const GS_DONE_AT     = SCREEN + 8 * 40 + 13        // "LEVEL COMPLETE"
+.const GS_TOKENS_AT   = SCREEN + 12 * 40 + 14      // "P TOKENS: nn"
+.const GS_DFIRE_AT    = SCREEN + 18 * 40 + 13      // "PRESS FIRE"
+.const GS_IPROMPT_AT  = SCREEN + 10 * 40 + 10      // "ENTER YOUR INITIALS"
 .const GS_ISLOTS_AT   = SCREEN + 14 * 40 + 18       // three letters, cols 18/20/22
 
 // --- the non-game display ---------------------------------------------------
@@ -175,6 +183,11 @@ gsRouter:
     jsr gsGameOverLoop
     jmp gsRouter
 !notOver:
+    cmp #GS_LEVELDONE
+    bne !notDone+
+    jsr gsLevelDoneLoop
+    jmp gsRouter
+!notDone:
     cmp #GS_INITIALS
     bne !attract+
     jsr gsInitialsLoop
@@ -375,6 +388,78 @@ gsMul3:
     asl                                 // *2
     clc
     adc gsTmp2                          // *3
+    rts
+
+// ===========================================================================
+// LEVEL COMPLETE
+// ===========================================================================
+// ---------------------------------------------------------------------------
+// gsEnterLevelDone — called by src/boss.asm when the ship has left the top of
+// the screen. THE RUN SURVIVES: this routine resets nothing at all. Score,
+// lives and the P currency are exactly as the level left them, which is the
+// whole point of the state -- the upgrade screen that replaces this one spends
+// that currency.
+// ---------------------------------------------------------------------------
+gsEnterLevelDone:
+    lda #GS_LEVELDONE
+    sta gsState
+    jsr gsBeginNonGame
+    jmp gsDrawLevelDone
+
+// ---------------------------------------------------------------------------
+// gsLevelDoneLoop — hold the screen until FIRE, then go back to attract.
+//
+// THE DESTINATION IS TEMPORARY AND SAYS SO. Starting level 2 would mean level
+// loading and a level-scoped reset that do not exist yet, so pressing FIRE
+// returns to the attract loop -- an existing, harmless endpoint. The NEXT task
+// replaces this with the upgrade screen and then the next level.
+// ---------------------------------------------------------------------------
+gsLevelDoneLoop:
+    jsr gsWaitFrame
+    jsr readInput
+    jsr gsDrawLevelDone                 // re-stamped every frame, as every
+                                        // other non-game page is
+    lda joyState
+    and #GS_FIRE
+    bne !wait+
+    jsr gsWaitFireRelease               // the old gate: one press cannot also
+                                        // start the game it returns to
+    lda #GS_ATTRACT
+    sta gsState
+    jsr gsEnterAttract
+    rts
+!wait:
+    jmp gsLevelDoneLoop
+
+// ---------------------------------------------------------------------------
+// gsDrawLevelDone — the functional placeholder: what happened, what you are
+// carrying, and what to press.
+// ---------------------------------------------------------------------------
+gsDrawLevelDone:
+    gsText(gsDoneLine, GS_DONE_AT, 14)
+    gsText(gsTokensLine, GS_TOKENS_AT, 10)
+    gsText(gsPressLine, GS_DFIRE_AT, 10)
+
+    // the P count, as two digits, straight from the run's own counter
+    lda pkTokensP
+    ldx #0
+!tens:
+    cmp #10
+    bcc !units+
+    sec
+    sbc #10
+    inx
+    jmp !tens-
+!units:
+    pha
+    txa
+    clc
+    adc #GS_DIGIT0
+    sta GS_TOKENS_AT + 10
+    pla
+    clc
+    adc #GS_DIGIT0
+    sta GS_TOKENS_AT + 11
     rts
 
 // ===========================================================================
@@ -915,6 +1000,9 @@ gsPromptLine:  .text "FIRE TO START"              // 13
 gsHeadLine:    .text "HIGH SCORES"                // 11
 gsOverLine:    .text "GAME OVER"                  // 9
 gsIPromptLine: .text "ENTER YOUR INITIALS"        // 19
+gsDoneLine:    .text "LEVEL COMPLETE"              // 14
+gsTokensLine:  .text "P TOKENS: "                  // 10, then two digits
+gsPressLine:   .text "PRESS FIRE"                  // 10
 .encoding "petscii_upper"
 
 // The next thing above is the schedule buffers at $c000, so this segment has

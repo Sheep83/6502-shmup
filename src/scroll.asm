@@ -79,6 +79,21 @@
 .if (STAGE_ROWS < SCREEN_ROWS + 1) { .error "a stage must be taller than one screen" }
 .if (STAGE_START_ROW < 0)          { .error "STAGE_START_ROW is negative" }
 
+// ---------------------------------------------------------------------------
+// WHERE THE AUTHORED STAGE RUNS OUT
+// ---------------------------------------------------------------------------
+// stageTopRow starts at STAGE_START_ROW and walks DOWN one per coarse step, so
+// it reaches ZERO after exactly STAGE_START_ROW steps -- and at zero the page
+// shows stage rows 0..SCREEN_ROWS-1, which is the top of the authored map and
+// the LAST COMPLETE SCREENFUL there is. One more step takes stageTopRow to -1,
+// the invariant's modulo folds it to STAGE_ROWS-1, and the level wraps back to
+// its own beginning.
+//
+// So the final legal progress is STAGE_START_ROW, and it is DERIVED: it is the
+// authored height (STAGE_METATILE_ROWS, from the level package) less the
+// viewport. A longer level moves it without a line changing here.
+.const STAGE_FINAL_VIEW_PROGRESS = STAGE_START_ROW
+
 
 // Back-page regeneration is SPREAD, not burst: 25 rows in one go would be
 // ~12,000 cycles of the 19,656 in a frame, leaving nothing for anything else
@@ -126,6 +141,28 @@ stageTopRowLo:   .byte 0                // the STAGE row at matrix row 0; steps
 stageTopRowHi:   .byte 0                // BACK one per coarse step
 worldProgressLo: .byte 0                // coarse rows travelled since the stage
 worldProgressHi: .byte 0                // start; only ever INCREASES
+
+// THE STAGE HAS BEEN TRAVERSED ONCE and the scroller has stopped itself. Set
+// by the coarse step below, at the instant worldProgress reaches the derived
+// final view; read by scrollTick to freeze, and by src/boss.asm to begin the
+// end of the level. Cleared only by scrollInit, which is a new level.
+stageComplete:   .byte 0
+
+// --- a diagnostic hold, exactly like pinFine below --------------------------
+// NON-ZERO: the stage never ends. The coarse step still runs, stageTopRow
+// still wraps at zero the way it always did, and stageComplete is never set --
+// so the level is endless and the boss phase never begins.
+//
+// IT EXISTS FOR THE AUTOMATED SUITE, and the reason is warp. A human plays
+// this level for sixty-three seconds; a test harness covers the same 395
+// coarse rows in about four wall-clock seconds, so EVERY probe that free-runs
+// for five or ten seconds of "ordinary play" now ends up sitting in the frozen
+// boss arena measuring nothing. Holding the stage open lets those probes go on
+// measuring the thing they were written to measure.
+//
+// This is the same kind of switch as pinFine and joyHold, and it is never
+// written by the game.
+stageHold:       .byte 0
 stageLoopsLo:    .byte 0                // times the map has wrapped end-to-end
 stageLoopsHi:    .byte 0                // (see "end of stage" below)
 dispPage:     .byte 0                   // 0 = A, 1 = B. The page to display NEXT.
@@ -212,6 +249,7 @@ scrollInit:
     sta scrollFine                      // counts UP from here
     sta worldProgressLo                 // nothing travelled yet
     sta worldProgressHi
+    sta stageComplete                   // ...and the stage is not over
     lda #<STAGE_START_ROW               // the BOTTOM of the authored map
     sta stageTopRowLo
     lda #>STAGE_START_ROW
@@ -310,6 +348,15 @@ rowBack:
 // the frame record the NEXT frame IRQ will adopt.
 // ===========================================================================
 scrollTick:
+    // THE ARENA IS FROZEN. Not the fine scroll either: the last coarse step
+    // left scrollFine at zero with the authored top row exactly at matrix row
+    // 0, and that is the picture the boss is fought over. Letting the fine
+    // phase run on would slide the terrain down by up to seven pixels and
+    // expose the strip above a row that has nothing above it.
+    lda stageComplete
+    beq !running+
+    jmp scrollPublish
+!running:
     lda pinFine                         // diagnostic mode: hold the phase
     beq !natural+
     lda pinFineValue
@@ -373,6 +420,25 @@ scrollTick:
     bne !nohi+
     inc worldProgressHi
 !nohi:
+
+    // HAS THE STAGE RUN OUT? Checked HERE, immediately after the counter
+    // moves, so the step that arrives at the final view is allowed to
+    // complete -- the page flip below puts that view on screen -- and the NEXT
+    // one never starts. Checking before the step would stop a row early and
+    // show the second-to-last screenful instead.
+    lda stageHold                       // diagnostic: an endless stage
+    bne !more+
+    lda worldProgressHi
+    cmp #>STAGE_FINAL_VIEW_PROGRESS
+    bcc !more+
+    bne !final+
+    lda worldProgressLo
+    cmp #<STAGE_FINAL_VIEW_PROGRESS
+    bcc !more+
+!final:
+    lda #1
+    sta stageComplete
+!more:
     lda dispPage
     eor #1
     sta dispPage                        // flip to the page prepared last time

@@ -8,7 +8,8 @@ What this proves
 * level 1's compiled-in artwork really landed on the slots its package claims,
   checked against the bytes in the PRG rather than against the constants that
   placed them;
-* the Ring's former pinned home at $3580 is genuinely vacated;
+* the Ring's former pinned home at $3580 is genuinely vacated (the run now
+  holds the end-of-level boss, which is not the Ring);
 * at boot, enemyAnimSeq holds POINTERS resolved from level 1's descriptor --
   the table is RAM built by levelAssetsLoad, not constants baked at assembly;
 * REPLACEMENT: loading the dummy Level B package re-resolves every entry to
@@ -117,9 +118,16 @@ def main():
         # THE OLD PINNED HOME IS VACATED. $3580 was the Ring's permanent
         # address; if anything still assembled there the window would not be
         # the single source of enemy art it claims to be.
+        # THE POINT OF THIS CHECK IS THE RING, NOT THE ADDRESS. It was written
+        # as "is $3580 empty" because nothing had claimed the run yet; the
+        # end-of-level boss now lives there (src/boss_art.asm), which does not
+        # resurrect the Ring's old pinned home in the slightest. So it asks the
+        # question it always meant: the Ring's artwork is NOT resident there.
         old = rd(mon, RING_OLD_HOME, FRAMES * 64)
-        check("the Ring's former pinned home at $3580 is empty",
-              not any(old), f"{sum(1 for b in old if b)} non-zero bytes")
+        ring_now = rd(mon, WINDOW + L1_RING * 64, FRAMES * 64)
+        check("the Ring's artwork is not resident at its former pinned home",
+              old != ring_now,
+              "the bytes at $3580 are the Ring's own frames")
 
         # --- 3. the resident table is RESOLVED, not assembled ----------------
         seq = sym["enemyAnimSeq"]

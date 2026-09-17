@@ -49,6 +49,12 @@
 // shoot its own pickups down, and ebulletPlayerTick filters on TYPE_EBULLET so
 // a token can never be mistaken for something that hurts. See src/pickup.asm.
 .const TYPE_PICKUP   = 3
+// A BOSS RENDER CELL: position, pointer and colour, and nothing else. Four of
+// them compose one boss, whose health and lifecycle live in src/boss.asm. The
+// type exists so that everything which hunts TYPE_ENEMY -- traceRay,
+// playerBodyTick, the enemy tick -- cannot see them, and so the dispatch chain
+// below falls straight through: a boss cell has no per-frame work at all.
+.const TYPE_BOSS     = 4
 
 // --- what an ENEMY object is currently doing with itself ---------------------
 // A second per-slot identity beside the type, and it lives HERE rather than in

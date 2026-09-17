@@ -353,6 +353,16 @@ BasicUpstart2(entry)
 #import "player_boom_art.asm"           // AFTER player.asm and pickup.asm: it
                                         // pins itself between the token bitmap
                                         // and screen page B
+#import "boss.asm"                      // AFTER objects.asm (TYPE_BOSS,
+                                        // MAX_OBJECTS), collision.asm
+                                        // (SHOT_DAMAGE), renderer.asm
+                                        // (MIN_SPRITE_Y, SPRITE_HEIGHT),
+                                        // terrain.asm (TERRAIN_COLOUR_RAM) and
+                                        // sfx.asm (SFX_LAUNCH). The end of a
+                                        // level: see reports/end-level-boss-placeholder.md
+#import "boss_art.asm"                  // AFTER boss.asm, whose BOSS_SPRITES it
+                                        // fills, and hud.asm, which it pins
+                                        // itself above
 #import "gamestate.asm"                 // AFTER hud.asm (HUD_LIVES_MAX,
                                         // HUD_DIRTY_*), renderer.asm
                                         // (FRAME_IRQ_LINE, PH_FRAME) and
@@ -698,6 +708,11 @@ gameFrame:
     // of the level.
     jsr tokenTick                       // src/token.asm
 
+    // THE END OF THE LEVEL, after every system that could still add something
+    // to the arena has had its turn this frame -- so the emptiness the clear
+    // phase tests for is this frame's, not last frame's.
+    jsr bossTick                        // src/boss.asm
+
     jsr hudDemoTick                   // score, lives and upgrade only: their
 
                                         // systems do not exist yet. Heat is fed
@@ -861,6 +876,11 @@ gameInit:
                                         // trigger one delta of worldProgress
                                         // away. AFTER objectInit, whose empty
                                         // pool it assumes
+    jsr bossInit                        // LEVEL-scoped, not run-scoped: the
+                                        // phase, the boss and the arena's
+                                        // colours. Score, lives and the P
+                                        // currency belong to the RUN and are
+                                        // gsResetRun's, not this.
     jsr dropperInit                     // no Dropper in flight, no ping pending
     jsr tokenInit                       // no encounter, no roles, and above all
                                         // NO LIVE DROPPER: a restart that

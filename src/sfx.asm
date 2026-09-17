@@ -141,7 +141,13 @@
 .const SFX_ESHOT      = 4               // a moving enemy fires
 .const SFX_TOKEN      = 5               // the player collects a token
 .const SFX_PING       = 6               // the Orbital Dropper's sonar locator
-.const SFX_COUNT      = 7
+.const SFX_LAUNCH     = 7               // the victory exit: the ship leaving
+.const SFX_LAUNCH_LEN = 60              // frames, and so sweep entries: 1.2 s,
+                                        // about how long the exit itself takes.
+                                        // Declared here rather than beside the
+                                        // other sweep bases because sfxLenTab
+                                        // names it and .const resolves in order.
+.const SFX_COUNT      = 8
 
 // --- the channels -----------------------------------------------------------
 // One per SID voice, and the channel index is the voice number less one. An
@@ -529,6 +535,18 @@ sfxVoiceTab:                            // by effect id: the channel it owns
     .byte SFX_CH_KILL                   // an enemy fires   -> voice 2
     .byte SFX_CH_KILL                   // a token collected-> voice 2
     .byte SFX_CH_KILL                   // the Dropper ping -> voice 2
+    .byte SFX_CH_HURT                   // the victory launch-> voice 3.
+                                        // VOICE 3 BECAUSE IT IS THE QUIET ONE.
+                                        // The launch runs for over a second,
+                                        // which is longer than anything else on
+                                        // the chip, and voice 3 carries only
+                                        // the player-damage wail -- an effect
+                                        // that cannot happen during a victory,
+                                        // since plyExit makes the ship
+                                        // invulnerable before the sound starts.
+                                        // Voices 1 and 2 would have been cut by
+                                        // the gun and by world effects, neither
+                                        // of which is silent by construction.
                                         //
                                         // THREE EFFECTS ON ONE VOICE, and the
                                         // arbitration is the one this module
@@ -650,6 +668,10 @@ sfxCtrlTab:                             // the effect's waveform, read on the
     .byte SID_TRI   | SID_GATE          // the token chime, and the only triangle
     .byte SID_PULSE | SID_GATE          // the sonar ping: pulse, but at a duty
                                         // nothing else uses -- see sfxPWHiTab
+    .byte SID_SAW   | SID_GATE          // the victory launch: a sawtooth is an
+                                        // ENGINE -- every harmonic present, and
+                                        // the one waveform that still reads as
+                                        // thrust while it climbs
 
 sfxADTab:                               // attack 0 throughout: every one of
     .byte 0                             // these strikes rather than swells
@@ -672,6 +694,8 @@ sfxSRTab:                               // SUSTAIN ZERO, ALWAYS. See above.
     .byte $00
     .byte $00
     .byte $00
+    .byte $00                           // the launch too: its length comes from
+                                        // a long DECAY, never from sustain
 
 // PULSE DUTY, high four bits of twelve, and only the enemy shot reads it. The
 // low byte is the zero sfxInit wrote at boot and nothing changes it: duty is
@@ -691,9 +715,10 @@ sfxPWHiTab:
                                         // read as a locator tone, hard enough
                                         // not to be mistaken for the token's
                                         // triangle chime on the same voice
+    .byte 0                             // sawtooth: unused
 
 sfxLenTab:                              // sweep entries, and so frames
-    .byte 0, 3, 12, 30, 3, 6, 4
+    .byte 0, 3, 12, 30, 3, 6, 4, SFX_LAUNCH_LEN
 
 // Where each effect's slice of the shared sweep table starts. Stated before
 // the table that names them: KickAssembler resolves .const strictly in order.
@@ -703,11 +728,13 @@ sfxLenTab:                              // sweep entries, and so frames
 .const SFX_ESHOT_SWEEP = 45
 .const SFX_TOKEN_SWEEP = 48
 .const SFX_PING_SWEEP  = 54
-.const SFX_SWEEP_LEN   = 58
+.const SFX_LAUNCH_SWEEP = 58
+
+.const SFX_SWEEP_LEN   = 118
 
 sfxBaseTab:                             // first sweep entry, by id
     .byte 0, SFX_FIRE_SWEEP, SFX_KILL_SWEEP, SFX_HURT_SWEEP, SFX_ESHOT_SWEEP
-    .byte SFX_TOKEN_SWEEP, SFX_PING_SWEEP
+    .byte SFX_TOKEN_SWEEP, SFX_PING_SWEEP, SFX_LAUNCH_SWEEP
 
 // ---------------------------------------------------------------------------
 // THE SHARED SWEEP TABLES. Three effects' per-frame data laid end to end, each
@@ -749,6 +776,14 @@ sfxSweepLo:
     // slight give in it: the give is what stops a pure square reading as a
     // test tone and makes it read as a locator.
     .byte $b0, $b2, $b4, $0c
+    // launch: the curve is weighted so it starts slowly and then runs
+    // away -- the same shape as the acceleration it describes
+    .byte $f9, $19, $61, $c8, $4a, $e5, $98, $61, $40, $32
+    .byte $39, $52, $7e, $bc, $0b, $6c, $de, $60, $f2, $94
+    .byte $46, $08, $d9, $b8, $a7, $a4, $b0, $ca, $f2, $28
+    .byte $6c, $bd, $1c, $89, $03, $8a, $1e, $bf, $6d, $28
+    .byte $ef, $c3, $a3, $90, $89, $8f, $a0, $bd, $e7, $1c
+    .byte $5d, $aa, $03, $67, $d6, $51, $d8, $6a, $07, $b0
 
 sfxSweepHi:
     .byte $26, $19, $10
@@ -759,6 +794,13 @@ sfxSweepHi:
     .byte $77, $4f, $35
     .byte $35, $42, $56, $6a, $85, $9f
     .byte $8b, $87, $83, $80
+    // launch: 180 Hz climbing to 2100 Hz over sixty frames
+    .byte $0b, $0c, $0c, $0c, $0d, $0d, $0e, $0f, $10, $11
+    .byte $12, $13, $14, $15, $17, $18, $19, $1b, $1c, $1e
+    .byte $20, $22, $23, $25, $27, $29, $2b, $2d, $2f, $32
+    .byte $34, $36, $39, $3b, $3e, $40, $43, $45, $48, $4b
+    .byte $4d, $50, $53, $56, $59, $5c, $5f, $62, $65, $69
+    .byte $6c, $6f, $73, $76, $79, $7d, $80, $84, $88, $8b
 
 sfxSweepCtrl:
     // fire: struck once, and held for the length of the sweep
@@ -777,6 +819,8 @@ sfxSweepCtrl:
     // ping: one gated pulse, struck once. Short on purpose -- the sound is
     // mostly its own decay, and the silence after it is half the cue
     .fill 4, SID_PULSE | SID_GATE
+    // launch: one gated sawtooth, held while the pitch climbs
+    .fill 60, SID_SAW | SID_GATE
 
 // --- the tables must agree with each other, and the assembler can say so ----
 .if (sfxSweepHi - sfxSweepLo != SFX_SWEEP_LEN)   { .error "the sweep low-byte table is not SFX_SWEEP_LEN entries" }
@@ -787,6 +831,7 @@ sfxSweepCtrl:
 .if (SFX_HURT_SWEEP + 30 != SFX_ESHOT_SWEEP)     { .error "the hurt sweep does not end where the enemy-shot sweep begins" }
 .if (SFX_ESHOT_SWEEP + 3 != SFX_TOKEN_SWEEP)     { .error "the enemy-shot sweep does not end where the token sweep begins" }
 .if (SFX_TOKEN_SWEEP + 6 != SFX_PING_SWEEP)      { .error "the token sweep does not end where the ping sweep begins" }
-.if (SFX_PING_SWEEP + 4 != SFX_SWEEP_LEN)        { .error "the ping sweep does not end where the table does" }
+.if (SFX_PING_SWEEP + 4 != SFX_LAUNCH_SWEEP)     { .error "the ping sweep does not end where the launch sweep begins" }
+.if (SFX_LAUNCH_SWEEP + SFX_LAUNCH_LEN != SFX_SWEEP_LEN) { .error "the launch sweep does not end where the table does" }
 
 .if (* > $1e00) { .error "the sfx module has run into the sorter at $1e00" }
