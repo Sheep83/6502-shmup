@@ -61,6 +61,43 @@ levelDefsEnd:
 }
 
 // ---------------------------------------------------------------------------
+// THE MOVEMENT PROGRAM POOL, at the base of the encounter reservation.
+//
+// THESE ARE THE AUTHORITATIVE BYTES. The engine holds no copy: src/waves.asm
+// declares `waveStageTable` as a label at this address and src/movement.asm
+// reads the records straight out of the loaded file, so what is emitted here is
+// what the game actually flies.
+//
+// Both builds import src/wave_programs.asm, so the offsets the wave definitions
+// name in the engine and the bytes emitted here are computed from one source.
+// ---------------------------------------------------------------------------
+#import "wave_programs.asm"
+
+* = LEVELPKG_MOVE "level movement pool"
+levelMoveStart:
+.for (var p = 0; p < progs.size(); p++) {
+    .var prog = progs.get(p)
+    .for (var s = 0; s < prog.size(); s++) {
+        .var rec = prog.get(s)
+        .byte rec.get(0), rec.get(1), rec.get(2) & $ff, rec.get(3) & $ff
+    }
+}
+levelMoveEnd:
+
+.if (levelMoveEnd - levelMoveStart != progBytes) {
+    .error "the emitted movement pool is not WM_STAGE_SIZE bytes per record"
+}
+.if (mod(levelMoveEnd - levelMoveStart, WM_STAGE_SIZE) != 0) {
+    .error "the movement pool is not a whole number of stage records"
+}
+.if (levelMoveEnd - levelMoveStart > LEVELPKG_MOVE_MAX) {
+    .error "the emitted movement pool has outgrown its budget: wmStage is one byte"
+}
+.if (levelMoveEnd > LEVELPKG_ENC + LEVELPKG_ENC_MAX) {
+    .error "the movement pool has run past the encounter reservation"
+}
+
+// ---------------------------------------------------------------------------
 // THE SIGNATURE, emitted LAST and highest, so that finding it proves the WHOLE
 // file arrived rather than merely its first sector.
 // ---------------------------------------------------------------------------

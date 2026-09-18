@@ -107,114 +107,11 @@
 // bytes of state and no code at all.
 .const WAVE_SLOTS = 2
 
-// ===========================================================================
-// THE STAGE PROGRAMS — the flight paths, as sequences of movement stages
-// ===========================================================================
-// src/movement.asm owns the four-byte stage record format and the interpreter
-// that runs it; these are the bytes. A pattern is a short list of stages ended
-// by WM_EXIT, and the interesting shapes come from the ORDER rather than from
-// any stage being clever:
-//
-//     kind             arg                 byte 2              byte 3
-//     WM_STRAIGHT      frames              vx                  vy
-//     WM_HOLD          frames              vx                  vy
-//     WM_ARC           heading steps       frames per step     --
-//     WM_ARC_MIRROR    heading steps       frames per step     --
-//     WM_EXIT          --                  --                  --
-//
-// HEADINGS, because every one of these is authored in them: the heading table
-// runs clockwise from east in WM_HEAD_LEN steps, so with +y DOWN --
-//
-//     0 east (+6,0)   8 down-right (+4,+4)   16 south (0,+6)
-//    24 down-left (-4,+4)                    32 west (-6,0)
-//
-// and a quarter turn is WM_QUARTER = 16 steps. WM_ARC increases the heading
-// (clockwise: east -> south -> west), WM_ARC_MIRROR decreases it.
-//
-// FRAMES PER STEP IS THE TURN RADIUS: 4 gives a wide 61-pixel sweep, 2 a tight
-// 31-pixel snap. It is what lets one arc primitive be both a lazy hook and a
-// dogfight loop.
-.var progs = List()
+// THE MOVEMENT PROGRAM POOL is authored in src/wave_programs.asm and emitted
+// into the level package, not into this binary. It is imported here because
+// this file computes the program offsets and flies every path at assembly time.
+#import "wave_programs.asm"
 
-// --- 0: ECHELON SWEEP -------------------------------------------------------
-// Level flight east, a quarter turn, then away down. The straight leg's
-// velocity is heading 0's own (+6,0), so the turn begins with no
-// discontinuity at all.
-.eval progs.add(List()
-    .add(List().add(WM_STRAIGHT, 34, 6, 0))     // run in along the top
-    .add(List().add(WM_ARC, WM_QUARTER, 4, 0))     // wide quarter turn to south
-    .add(List().add(WM_EXIT, 0, 0, 0)))
-
-// --- 1: S-TURN --------------------------------------------------------------
-// COMPOSED, NOT A CURVE ENGINE: one arc anticlockwise and one clockwise, and
-// the S is the join between them. Launched steep (heading 12), the first arc
-// unwinds it to level east and the second rolls it over past south to
-// down-left, so the silhouette is a bulge right followed by a sweep away left.
-//
-// The heading never leaves 0..20, so vy is never negative and the path never
-// climbs -- which is why this one needs no special pleading about the top of
-// the aperture.
-.eval progs.add(List()
-    .add(List().add(WM_ARC_MIRROR, 12, 3, 0))      // steep -> level: bulge right
-    .add(List().add(WM_ARC, 20, 3, 0))             // level -> down-left: the turn back
-    .add(List().add(WM_EXIT, 0, 0, 0)))
-
-// --- 2: LINGER AND BREAK ----------------------------------------------------
-// Runs in on a diagonal, nearly stops for about a second in the middle of the
-// screen, then accelerates away through a turn.
-//
-// THE HOLD IS (0,+1), NOT (0,0). A dead stop reads as a bug -- a sprite frozen
-// mid-screen looks like something has hung -- while a quarter pixel a frame is
-// visibly deliberate drift, and it keeps the object descending so that even a
-// hold is making progress toward the despawn rule.
-//
-// The velocity jump from the hold's (0,+1) to the arc's full (+3,+5) is the
-// POINT of the pattern rather than a discontinuity to apologise for: the enemy
-// hangs, then breaks away.
-.eval progs.add(List()
-    .add(List().add(WM_STRAIGHT, 28, 3, 5))     // run in, down-right
-    .add(List().add(WM_HOLD, 48, 0, 1))         // hang there, drifting
-    .add(List().add(WM_ARC, 12, 4, 0))             // break away down-left
-    .add(List().add(WM_EXIT, 0, 0, 0)))
-
-// --- 3: LOOP ----------------------------------------------------------------
-// A FULL CIRCLE AND A BIT: 76 heading steps is 64 for the loop plus 12 to
-// leave on a steep descent instead of back on the entry heading. Two frames a
-// step makes it tight (about a 31-pixel radius) and quick enough to read as a
-// manoeuvre rather than a drift.
-//
-// THE DIVE IN FRONT OF IT IS THE INGRESS STAGE, and it is needed: a loop
-// launched due east on the spawn line never descends into view, because level
-// flight from off-screen stays off-screen. Rather than give the loop a special
-// entrance it gets a stage, which is what a composable stage system is for.
-// Forty frames of (+4,+4) carry it into view and the loop then starts from a
-// diagonal heading, tilting the circle without changing what it is.
-//
-// The circle's centre sits ninety degrees clockwise of the entry heading, so a
-// descending-diagonal entry hangs it down and left of the entry point and it
-// clears the top of the aperture. The flight proof below checks that.
-.eval progs.add(List()
-    .add(List().add(WM_STRAIGHT, 40, 4, 4))        // dive in from above
-    .add(List().add(WM_ARC, 76, 2, 0))             // loop, and keep turning
-    .add(List().add(WM_EXIT, 0, 0, 0)))
-
-.const PROG_SWEEP  = 0
-.const PROG_S      = 1
-.const PROG_LINGER = 2
-.const PROG_LOOP   = 3
-
-// Byte offsets of each program's first record, computed rather than authored:
-// a hand-maintained offset is a number that is right until somebody inserts a
-// stage.
-.var progAt = List()
-.var progBytes = 0
-.for (var p = 0; p < progs.size(); p++) {
-    .eval progAt.add(progBytes)
-    .eval progBytes = progBytes + WM_STAGE_SIZE * progs.get(p).size()
-}
-.if (progBytes > 256) {
-    .error "the stage table has outgrown the one-byte cursor in wmStage"
-}
 
 // --- the authored wave definitions ------------------------------------------
 // Ten bytes each, and the record is deliberately flat: the director reads it
@@ -381,6 +278,12 @@
         .if (rec.get(1) < 1) { .error "a stage of zero length would never advance" }
         .if (rec.get(0) == WM_ARC || rec.get(0) == WM_ARC_MIRROR) {
             .if (rec.get(2) < 1) { .error "an arc stage with no frames per step would turn infinitely fast" }
+            // BYTE 3 IS A HEADING OR IT IS THE CONTINUE SENTINEL, and nothing
+            // else. A value between WM_HEAD_LEN and WM_HEAD_CONT would index
+            // off the end of the heading table at run time.
+            .if (rec.get(3) != WM_HEAD_CONT && (rec.get(3) < 0 || rec.get(3) >= WM_HEAD_LEN)) {
+                .error "an arc's entry heading is neither a heading nor WM_HEAD_CONT"
+            }
         } else {
             // The wrap guard in src/enemy.asm runs once a frame, so no
             // authored leg may out-run its clearance window either.
@@ -422,6 +325,13 @@
         .for (var s = 0; s < prog.size() && !freed && frames <= SIM_FRAME_BUDGET; s++) {
             .var rec = prog.get(s)
             .var isArc = (rec.get(0) == WM_ARC || rec.get(0) == WM_ARC_MIRROR)
+            // AN ARC NAMES THE HEADING IT STARTS ON, or asks to continue from
+            // the one already held. The simulation has to honour that or it
+            // would be proving a path the engine does not fly; see the record
+            // format in src/movement_format.asm.
+            .if (isArc && rec.get(3) != WM_HEAD_CONT) {
+                .eval head = rec.get(3)
+            }
             // An EXIT keeps the velocity it inherited and runs until an edge;
             // everything else has an authored length.
             .var outer = rec.get(0) == WM_EXIT ? SIM_FRAME_BUDGET : (isArc ? rec.get(1) : 1)
@@ -1434,17 +1344,17 @@ wvScratch:  .byte 0                     // waveDefBase's partial product
 // KickAssembler resolves labels late even though it resolves constants in
 // import order.
 // ---------------------------------------------------------------------------
-waveStageTable:
-.for (var p = 0; p < progs.size(); p++) {
-    .var prog = progs.get(p)
-    .for (var s = 0; s < prog.size(); s++) {
-        .var rec = prog.get(s)
-        .byte rec.get(0), rec.get(1), rec.get(2) & $ff, rec.get(3) & $ff
-    }
-}
-waveStageTableEnd:
-.if (waveStageTableEnd - waveStageTable != progBytes) {
-    .error "the stage table is not WM_STAGE_SIZE bytes per record"
+// THE MOVEMENT POOL IS NOT IN THIS BINARY. It lives in the separately loaded
+// level package at LEVELPKG_MOVE, emitted by src/level_package.asm from the same
+// src/wave_programs.asm this file imports. What stays here is the ADDRESS the
+// interpreter reads and the offsets the wave definitions name.
+//
+// src/movement.asm indexes it as `lda waveStageTable + n,y` -- absolute,Y, which
+// costs the same four cycles wherever the table lives, so the move is free.
+.label waveStageTable = LEVELPKG_MOVE
+
+.if (progBytes > LEVELPKG_MOVE_MAX) {
+    .error "the movement pool has outgrown its level-package budget"
 }
 
 waveDefTable:

@@ -54,67 +54,10 @@
 // puts them in, which costs no 6502 cycles at all.
 // ===========================================================================
 
-// --- the primitives ---------------------------------------------------------
-.const WM_STRAIGHT   = 0        // constant velocity for wmTimer frames
-.const WM_ARC        = 1        // rotate the heading CLOCKWISE, one step per
-                                // stage-authored frame count
-.const WM_ARC_MIRROR = 2        // ...ANTICLOCKWISE: the same turn, handed
-.const WM_EXIT       = 3        // constant velocity, until the despawn rule
-.const WM_HOLD       = 4        // a bounded linger: an authored (usually slow
-                                // or zero) velocity for wmTimer frames. Same
-                                // mechanics as WM_STRAIGHT, kept distinct so
-                                // that "this enemy is deliberately loitering"
-                                // is visible in the state rather than inferred
-                                // from a small number.
-.const WM_MODES      = 5
-
-// --- the stage record -------------------------------------------------------
-// Four bytes, and the third and fourth mean different things to different
-// primitives because an arc has no use for a velocity and a straight leg has
-// no use for a step length. The FORMAT lives here, beside the interpreter that
-// executes it; the BYTES live in src/waves.asm, beside the rest of the
-// authored content.
-//
-//   0  kind       WM_*
-//   1  arg        STRAIGHT/HOLD: frames.  ARC/ARC_MIRROR: heading steps.
-//   2  vx / step  STRAIGHT/HOLD: vx.      ARC/ARC_MIRROR: frames per step.
-//   3  vy         STRAIGHT/HOLD: vy.      ARC/ARC_MIRROR: unused.
-//
-// WM_EXIT reads none of them: it is terminal and it KEEPS whatever velocity
-// the stage before it left behind, which is what makes ARC -> EXIT continuous.
-//
-// FRAMES PER STEP IS THE TURN RADIUS, and it is per stage rather than global
-// for one byte that was going spare. The heading sweeps a full circle in
-// WM_HEAD_LEN steps whatever happens, so a step held for f frames travels
-// WM_ARC_SPEED*f/4 pixels and the circle it is walking round has radius
-// WM_ARC_SPEED*f*WM_HEAD_LEN/(8*PI) -- 61 pixels at f=4, 31 at f=2. A wide
-// sweeping hook and a tight snap loop are therefore the same primitive with a
-// different byte, not two primitives.
-.const WM_STAGE_SIZE = 4
-
-// --- the heading table ------------------------------------------------------
-// WM_HEAD_LEN directions at a constant speed of WM_ARC_SPEED quarter pixels a
-// frame (1.5 px/frame, 75 px/second), measured CLOCKWISE FROM EAST in screen
-// coordinates -- +x right, +y DOWN, so clockwise is right, down, left, up.
-//
-//     heading  0   east   (+6,  0)
-//     heading 16   south  ( 0, +6)
-//     heading 32   west   (-6,  0)
-//     heading 48   north  ( 0, -6)
-//
-// Sixty-four so that the wrap is AND #63 rather than a compare and a fixup,
-// and so that a quarter turn is sixteen steps of WM_ARC_STEP frames: 64 frames.
-//
-// GENERATED, NOT HAND-WRITTEN: nobody verifies the sixty-fourth cosine by eye,
-// so a typo in a literal table would be invisible. The assembly-time proofs
-// below therefore check not the arithmetic but the PROPERTIES the movement code
-// depends on -- the quadrant anchors, the smoothness, and that no heading
-// stands still.
-.const WM_HEAD_LEN  = 64
-.const WM_HEAD_MASK = WM_HEAD_LEN - 1
-.const WM_ARC_STEP  = 4         // default frames per heading step
-.const WM_ARC_SPEED = 6         // quarter pixels per frame
-.const WM_QUARTER   = WM_HEAD_LEN / 4
+// THE RECORD FORMAT LIVES IN ITS OWN FILE, because the level package build
+// needs it too and the two builds share no labels. See src/movement_format.asm
+// for the primitives, the four-byte stage record and the heading geometry.
+#import "movement_format.asm"
 
 .var headVX = List()
 .var headVY = List()
@@ -432,6 +375,20 @@ wmEnterStage:
     sta wmSteps,x
     lda waveStageTable + 2,y
     sta wmTimer,x
+
+    // ---- WHERE THE TURN STARTS, from the record rather than from history --
+    // The arc names its entry heading, or asks to continue from the one the
+    // object already holds. See the record format in src/movement_format.asm:
+    // this is what makes a movement program self-contained and therefore
+    // shareable between encounters.
+    //
+    // Five cycles on the continue path and nine on the explicit one, ONCE PER
+    // ARC STAGE ENTERED -- a handful of times in an object's whole life, never
+    // per frame.
+    lda waveStageTable + 3,y
+    cmp #WM_HEAD_CONT
+    beq wmLoadHeading                   // inherit: wmPhase is already right
+    sta wmPhase,x
     jmp wmLoadHeading
 
 !exit:

@@ -136,7 +136,7 @@ VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 
 
 .PHONY: all build d64 proof420 test
-.PHONY: test-boot test-production test-turret-regression
+.PHONY: test-boot test-production test-movement-pool test-turret-regression
 .PHONY: test-encounter-director test-player-ship test-flight-paths test-ingress-egress test-clip-scratch
 .PHONY: test-sfx test-enemy-fire test-pickup test-lifecycle test-player-death test-boss
 .PHONY: run run-proof420 run-d64 clean
@@ -324,6 +324,9 @@ test-boot: build
 
 test-production: build
 	python3 tests/test_production.py
+
+test-movement-pool: build
+	@python3 tests/test_movement_pool.py
 
 test-turret-regression: build
 	python3 tests/test_turret_regression.py
