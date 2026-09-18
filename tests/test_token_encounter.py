@@ -87,6 +87,10 @@ SPRITE_HEIGHT = 21
 
 ROLE_NORMAL, ROLE_EGRESS, ROLE_GUARD = 0, 1, 2
 TK_GUARDS = 3
+# Restated from src/token.asm: the ring's half-width and the clamp its posts
+# are held inside. Used only to derive where a kill leaves an unclamped ring.
+TK_RADIUS_X = 46
+TK_X_MIN, TK_X_MAX = 28, 330
 TK_REINFORCE_FRAMES = 24
 
 # --- how long each phase is allowed to take ---------------------------------
@@ -140,6 +144,31 @@ SPREAD_MIN_DEG = 70             # three posts a third of a ring apart subtend
                                 # 120 deg; the slack absorbs the ellipse (which
                                 # is not angle-preserving), the per-guard
                                 # stagger and a guard still closing on its post
+# HOW MUCH OF THE FORMATION MUST BE WATCHED BEFORE ANYTHING IS DESTROYED.
+#
+# THE RING'S OWN PERIOD IS THE UNIT. src/token.asm turns the ring one phase
+# every TK_ORBIT_HOLD frames through TK_ORBIT_STEPS phases, so a full lap is
+# 24 * 4 = 96 frames. Sixty settled frames is well over half a lap: long enough
+# for a guard to sweep the ORBIT_QUADRANTS_WANTED quadrants, and long enough for
+# the spread and lockstep percentages below to be measurements rather than
+# anecdotes.
+#
+# IT EXISTS BECAUSE THE TEST USED TO SHOOT ITS OWN SUBJECT. The kill that proves
+# the attrition rule was gated on `quad_best >= 2`, which a guard satisfies
+# within a few frames of setting off, so the victim died on frame 7 -- before
+# the three had ever been on station together. src/token.asm's defence is
+# deliberately ATTRITIONAL and never refills a post, so the complement stayed at
+# two for the rest of the encounter, `len(on_station) == TK_GUARDS` could never
+# be true again, and six assertions below were left judging zero samples.
+# WHERE THE DROPPER MAY BE KILLED, so that the ring it leaves behind is not
+# clamped against a playfield edge. src/token.asm clamps every post into
+# TK_X_MIN..TK_X_MAX and the ring's half-width is TK_RADIUS_X, so these are the
+# token positions whose whole orbit survives the clamp.
+TOKEN_X_MIN = TK_X_MIN + TK_RADIUS_X        # 28 + 46 = 74
+TOKEN_X_MAX = TK_X_MAX - TK_RADIUS_X        # 330 - 46 = 284
+
+SPREAD_SAMPLES_WANTED = 60
+
 LOCKSTEP_MAX_PCT = 8.0          # share of settled frames on which all three
                                 # guards may be stationary at once. v2's
                                 # ten-frame hold against a five-frame walk put
@@ -347,7 +376,27 @@ def main():
             # already dying would make the kill below a no-op.
             if d and not dropper_seen:
                 i = d[0]
-                if s["hp"][i] > 0 and 70 <= s["logY"][i] <= 150:
+                # ...AND IT MUST BE SOMEWHERE A PLAYER COULD ACTUALLY SHOOT IT.
+                #
+                # THE X WINDOW IS NOT COSMETIC. A Dropper enters at
+                # DROP_ENTRY_LEFT = 0, which is BEHIND the left border -- the
+                # visible playfield starts at column 24 -- so a kill taken on
+                # the first eligible frame drops the token at x = 0, where no
+                # player could have shot it.
+                #
+                # The token is the centre of the protector ring, and the ring is
+                # TK_RADIUS_X = 46 wide with its posts clamped into
+                # TK_X_MIN..TK_X_MAX (28..330). A token at x = 0 therefore has
+                # four fifths of its orbit clamped flat onto the line x = 28,
+                # the three guards can only occupy the narrow arc that survives,
+                # and every assertion below about a threefold ring is measuring
+                # a shape the geometry forbids. That is what made them fail.
+                #
+                # So the window is the one in which the WHOLE ring fits inside
+                # the clamp, derived rather than chosen:
+                #     TK_X_MIN + TK_RADIUS_X  ..  TK_X_MAX - TK_RADIUS_X
+                if (s["hp"][i] > 0 and 70 <= s["logY"][i] <= 150
+                        and TOKEN_X_MIN <= x_of(s, i) <= TOKEN_X_MAX):
                     dropper_seen = True
                     target = i
                     prev = s
@@ -571,7 +620,22 @@ def main():
                 # crossing -- usually straight above, on top of another guard.
                 # That is a guard arriving, not a formation bunching, and
                 # sampling it made the measured spread meaningless.
+                # ...AND IT MUST STILL BE ALIVE. A guard killed by the player
+                # keeps its slot, its TYPE_ENEMY and its ROLE_GUARD for the
+                # twelve frames of its death animation -- the check above
+                # deliberately still counts it as a guard -- but it stops
+                # holding station: src/token.asm walks live defenders round the
+                # ring and a corpse simply sits where it fell.
+                #
+                # MEASURED, NOT ASSUMED. Counting one made the formation geometry
+                # decay frame by frame after the deliberate kill below --
+                # 82.9 -> 75.0 -> 69.3 -> ... -> 44.4 degrees over the eight
+                # frames of g0's death timer, while the two survivors went on
+                # orbiting correctly. The worst gap BEFORE the kill was 84.2
+                # degrees. The formation was never bunched; a dead guard was
+                # being counted as part of it.
                 if (posted_for.get(i, 0) >= GUARD_SETTLE_FRAMES
+                        and s["hp"][i] > 0
                         and RING_BAND_MIN * RING_BAND_MIN <= d2
                         <= RING_BAND_MAX * RING_BAND_MAX):
                     on_station[i] = (dx, dy)
@@ -614,9 +678,20 @@ def main():
                                         # over: the pool reissues slots, and the
                                         # next occupant has its own walk to make
 
-            # --- once settled, kill one guard and watch it be replaced -----
+            # --- once the formation has been JUDGED, destroy one -----------
+            # ORDER IS THE WHOLE OF THIS. Everything above measures a THREE
+            # guard ring, and src/token.asm never refills a post once the
+            # complement is enlisted -- so a guard destroyed here is destroyed
+            # for the rest of the encounter and every later sample would be of
+            # a two-guard formation. The evidence is banked first.
+            # GATED ON THE SAMPLE COUNT ALONE, deliberately. Gating it on
+            # quad_best as well would chain this kill -- and the attrition
+            # assertion that depends on it -- to the orbit-coverage property,
+            # which currently FAILS for a production reason documented in
+            # reports/test-token-encounter-exact-boot-repair.md. A test must not
+            # stop exercising one contract because a different one is broken.
             if (killed_a_guard_at is None and len(g) == TK_GUARDS
-                    and quad_best >= 2):
+                    and spread_samples >= SPREAD_SAMPLES_WANTED):
                 victim = g[0]
                 kill(mon, victim)
                 killed_a_guard_at = f
@@ -682,13 +757,36 @@ def main():
               max(guards_history) <= TK_GUARDS if guards_history else False,
               f"max {max(guards_history) if guards_history else '-'}")
 
-        check("a killed guard was replaced", refilled_after_kill is not None,
-              f"killed at frame {killed_a_guard_at}, refilled after "
-              f"{refilled_after_kill} frames")
-        if refilled_after_kill is not None:
-            check("the replacement was rapid and bounded",
-                  refilled_after_kill <= DEATH_TIME + TK_REINFORCE_FRAMES + 90,
-                  f"{refilled_after_kill} frames")
+        # --- the formation was actually WATCHED before it was broken -------
+        # Without this the two assertions below could both be satisfied by an
+        # encounter nobody ever measured: no samples, no kill, nothing refilled.
+        check("the three-guard formation was observed for long enough to judge "
+              "it BEFORE anything was destroyed",
+              spread_samples >= SPREAD_SAMPLES_WANTED,
+              f"{spread_samples} settled frames, wanted >= {SPREAD_SAMPLES_WANTED}")
+        check("a guard was then deliberately destroyed, once the evidence was in",
+              killed_a_guard_at is not None,
+              f"killed at frame {killed_a_guard_at}")
+
+        # --- THE DEFENCE IS ATTRITIONAL ------------------------------------
+        # THIS ASSERTION USED TO SAY THE OPPOSITE, and it was testing behaviour
+        # the engine deliberately removed. src/token.asm's reinforcement gate is
+        # a creation count, not an occupancy scan:
+        #
+        #     "a post emptied by the player was indistinguishable from a post
+        #      never filled, so shooting a defender summoned another one and the
+        #      formation could not be broken down ... 3 defenders -> kill one ->
+        #      2 -> kill one -> 1 -> kill one -> 0"
+        #
+        # Once TK_GUARDS have been ENLISTED the branch closes for the rest of the
+        # encounter and nothing can reopen it. So the honest statement -- and the
+        # one that would catch the old summon-another-one behaviour coming back
+        # -- is that the post stays empty.
+        check("the defence is ATTRITIONAL: a destroyed guard is NOT replaced, "
+              "so the formation can be broken down",
+              refilled_after_kill is None,
+              f"killed at frame {killed_a_guard_at}, a third guard reappeared "
+              f"after {refilled_after_kill} frames")
 
         # --- the descent cadence ------------------------------------------
         # One pixel every two frames. The claim is made against the MACHINE's
