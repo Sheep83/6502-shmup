@@ -3,15 +3,17 @@
 
 What this proves
 ----------------
-* AUTHORED AND DETERMINISTIC: the trigger list carries a token X per appearance
-  and two of the four are authored; driving the REAL waveStartNext for a
-  trigger that has one produces a token at exactly that X, and for a trigger
-  that has none produces nothing;
+* DETERMINISTIC AND EARNED, NOT RANDOM: no authored trigger creates a token at
+  all, and driving the REAL tokenDropperDied produces exactly one P at exactly
+  the position the Dropper died at. (This replaces an obsolete premise -- the
+  trigger list used to carry a token X per appearance. See section 2.);
 * IDENTITY: the spawned object is TYPE_PICKUP of kind PICKUP_P wearing the P
   bitmap, with no health and no velocity but the authored downward drift;
 * IT LIVES THROUGH THE ORDINARY OBJECT PATH: in the real frame loop it descends
-  one pixel a frame -- the scroll's own speed -- and despawns by itself past the
-  bottom of the aperture, returning its slot;
+  one pixel every OTHER frame -- half the scroll rate, on a strictly alternating
+  cadence -- and despawns by itself past the bottom of the aperture, returning
+  its slot. (Also a replaced premise: it used to match the scroll exactly. See
+  section 4.);
 * THE FLASH IS PRESENTATION ONLY: logCol alternates between the two authored
   colours while objType, pkKind, logPtr and logActive do not move at all;
 * COLLECTION: the ship overlapping a token collects it EXACTLY ONCE, the
@@ -54,17 +56,41 @@ PICKUP_P      = 0
 PICKUP_VY     = 1
 PICKUP_SPAWN_Y = 30
 PICKUP_Y_MAX  = 250
+PICKUP_P_PER_UNIT = 3          # src/pickup.asm: three pickups = one unit
 TOKEN_PTR     = 0x2580 // 64            # $96
 COL_LIT, COL_DARK = 1, 15
 FLASH_BIT     = 0x10
-AUTHORED_X    = [0, 220, 0, 150]        # src/waves.asm trigToken
-TOKEN_TRIGGER = 1                       # ...an appearance that brings one
-BARE_TRIGGER  = 0                       # ...and one that does not
+WAVE_SLOTS    = 2                       # src/waves.asm
+WAVE_TRIGGERS = 4
+# Where the notional Dropper dies. Deliberately NOT the old fixed spawn line
+# (PICKUP_SPAWN_Y) and not an authored X, so "it appeared where it died" cannot
+# pass by coincidence against either of the values the old model used.
+DEATH_X       = 173
+DEATH_Y       = 118
 PORT = 6673
 
 
 def pool(mon, sym):
     return rd(mon, sym["logActive"], MAX_OBJECTS)
+
+
+def pickups_taken(mon, sym):
+    """How many tokens have been collected, under the CURRENT P economy.
+
+    A THIRD REPLACED PREMISE. This file used to read pkTokensP as "tokens
+    collected" and that was right until the P economy landed: pkTokensP now
+    counts SPENDABLE UNITS and only moves on every third pickup, with pkCharge
+    holding the 0..2 partial. Collecting one token therefore leaves pkTokensP
+    exactly where it was, and the old assertion failed for a reason that had
+    nothing to do with collection.
+
+    units * 3 + charge is the total number of tokens the player has picked up,
+    which is precisely what the old check meant. It is stricter than reading
+    either byte alone: a collection that bumped the charge without carrying, or
+    carried without clearing the charge, both fail here.
+    """
+    return (rd1(mon, sym["pkTokensP"]) * PICKUP_P_PER_UNIT
+            + rd1(mon, sym["pkCharge"]))
 
 
 def align(mon, sym):
@@ -93,14 +119,50 @@ def run_frames(mon, sym, n=1, read_fn=None):
     return step_n(mon, sym["frameCounter"], n, read_fn or (lambda: None))
 
 
-def spawn_token(mon, sym, trigger=TOKEN_TRIGGER):
+def drop_token(mon, sym, x=DEATH_X, y=DEATH_Y):
+    """Create a token the way the game now does: a Dropper dies.
+
+    src/enemy.asm copies the dying Dropper's own position into pkSpawnXLo/Hi/Y
+    and then calls tokenDropperDied, which is the one entry point for the whole
+    mechanic. Setting those three bytes and calling it is therefore the real
+    production path with the DEATH arranged and nothing else -- the token's
+    placement, kind, presentation and lifecycle are all the production path's
+    own work, exactly as they were when a trigger did the arranging.
+
+    The encounter tokenDropperDied also opens is stood down afterwards:
+    tests/test_token_encounter.py owns that subsystem, and this file is about
+    the pickup.
+    """
+    poke(mon, sym["tkActive"], 0)
+    poke(mon, sym["pkSpawnXLo"], x & 0xff)
+    poke(mon, sym["pkSpawnXHi"], x >> 8)
+    poke(mon, sym["pkSpawnY"], y)
+    before = pool(mon, sym)
+    call(mon, sym, "tokenDropperDied")
+    after = pool(mon, sym)
+    poke(mon, sym["tkActive"], 0)
+    born = [i for i in range(MAX_OBJECTS)
+            if after[i] and not before[i]
+            and rd1(mon, sym["objType"] + i) == TYPE_PICKUP]
+    return born[0] if len(born) == 1 else None
+
+
+def trigger_spawns_token(mon, sym, trigger):
     """Drive the REAL director entry point for one authored trigger.
 
-    Returns the new slot, or None. waveStartNext is what waveTick calls when a
-    trigger comes due; calling it directly arranges the MOMENT and nothing else
-    -- the token's placement, kind, presentation and lifecycle are all the
-    production path's own work.
+    Returns the pickup slot the trigger created, or None -- and None is now the
+    only correct answer for every trigger. waveStartNext is what waveTick calls
+    when a trigger comes due; calling it directly arranges the MOMENT and
+    nothing else.
+
+    BOTH WAVE INSTANCES ARE FREED FIRST, so every trigger genuinely arms. There
+    are only WAVE_SLOTS of them and waveStartNext returns early when none is
+    free -- without this, the third and fourth triggers would take the
+    "dropped" path and never read their own columns at all, which would make
+    "no trigger creates a token" true for a reason the test did not intend.
     """
+    for s in range(WAVE_SLOTS):
+        poke(mon, sym["wvActive"] + s, 0)
     poke(mon, sym["wvNextTrig"], trigger)
     before = pool(mon, sym)
     call(mon, sym, "waveStartNext")
@@ -143,29 +205,63 @@ def main():
               f"{rd1(mon, sym['pkDespawned'])}, dropped "
               f"{rd1(mon, sym['pkDropped'])} during that run")
 
-        # --- 2. the authored data --------------------------------------------
-        lo = rd(mon, sym["waveTrigTokenLo"], 4)
-        hi = rd(mon, sym["waveTrigTokenHi"], 4)
-        authored = [(h << 8) | l for l, h in zip(lo, hi)]
-        check("the trigger list carries an authored token X per appearance",
-              authored == AUTHORED_X, f"{authored} vs {AUTHORED_X}")
-        check("...and at least one appearance deliberately brings none",
-              0 in authored, str(authored))
+        # --- 2. NO TRIGGER CREATES A TOKEN ------------------------------------
+        # THIS SECTION REPLACES AN OBSOLETE PREMISE, and the replacement asserts
+        # the same INTENT against the mechanism that now carries it.
+        #
+        # Until src/waves.asm's token slice, a token was authored CONTENT: the
+        # trigger list carried a fifth and sixth column (waveTrigTokenLo/Hi) and
+        # two of the four appearances brought a P at an authored X. This file
+        # proved determinism by reading those columns. They were deleted when a
+        # token became a REWARD rather than a placement -- "No trigger creates
+        # one, and no P appears merely because a wave started" -- and this test
+        # has referenced the removed symbol ever since, crashing on a KeyError
+        # before it could run.
+        #
+        # The intent was never "there is a token column"; it was "a P's
+        # appearance is DETERMINISTIC AND AUTHORED, never a random drop". That
+        # intent survives intact, so it is asserted here in its current terms:
+        # no trigger produces a token at all (below), and a Dropper's death
+        # produces exactly one at exactly the place it died (section 3).
+        check("no authored trigger creates a token any more -- a P is a reward, "
+              "not a placement",
+              all(trigger_spawns_token(mon, sym, t) is None
+                  for t in range(WAVE_TRIGGERS)),
+              "one of the four triggers spawned a TYPE_PICKUP")
+        check("...and the removed token columns are gone from the build",
+              "waveTrigTokenLo" not in sym and "waveTrigTokenHi" not in sym)
 
-        # --- 3. the authored spawn, through the real director ----------------
+        # --- 3. the spawn that DOES happen: a Dropper's death ------------------
+        # tokenDropperDied is the one entry point for the whole mechanic
+        # (src/token.asm), and src/enemy.asm reaches it having first copied the
+        # dying Dropper's own position into pkSpawnXLo/Hi/Y. Setting those and
+        # calling it is therefore the real production path with the DEATH
+        # arranged and nothing else -- exactly the shape the old section used
+        # for waveStartNext.
+        poke(mon, sym["tkActive"], 0)       # tokenDropperDied refuses if an
+                                            # encounter is already running
+        poke(mon, sym["pkSpawnXLo"], DEATH_X & 0xff)
+        poke(mon, sym["pkSpawnXHi"], DEATH_X >> 8)
+        poke(mon, sym["pkSpawnY"], DEATH_Y)
         before = pool(mon, sym)
-        slot = spawn_token(mon, sym, BARE_TRIGGER)
-        check("a trigger authored with no token spawns none", slot is None,
-              str(slot))
-
-        slot = spawn_token(mon, sym, TOKEN_TRIGGER)
-        check("a trigger authored with a token spawns exactly one",
-              slot is not None, str(slot))
+        call(mon, sym, "tokenDropperDied")
+        after = pool(mon, sym)
+        born = [i for i in range(MAX_OBJECTS)
+                if after[i] and not before[i]
+                and rd1(mon, sym["objType"] + i) == TYPE_PICKUP]
+        check("a Dropper's death spawns exactly one token", len(born) == 1,
+              f"{len(born)} pickups born: {born}")
+        slot = born[0] if born else 0
         x = rd1(mon, sym["logX"] + slot) | (rd1(mon, sym["logXHi"] + slot) << 8)
-        check("...at the authored X, above the aperture",
-              x == AUTHORED_X[TOKEN_TRIGGER]
-              and rd1(mon, sym["logY"] + slot) == PICKUP_SPAWN_Y,
-              f"({x}, {rd1(mon, sym['logY'] + slot)})")
+        check("...at EXACTLY the position the Dropper died at, not a fixed line",
+              x == DEATH_X and rd1(mon, sym["logY"] + slot) == DEATH_Y,
+              f"({x}, {rd1(mon, sym['logY'] + slot)}) "
+              f"wanted ({DEATH_X}, {DEATH_Y})")
+        # THE ENCOUNTER IS THE OTHER SUBSYSTEM'S BUSINESS. tokenDropperDied also
+        # opens a defender encounter; tests/test_token_encounter.py owns that.
+        # This file is about the PICKUP, so the encounter is stood down and the
+        # token left to live its ordinary object life through the sections below.
+        poke(mon, sym["tkActive"], 0)
         check("...as a TYPE_PICKUP of kind P wearing the P bitmap",
               rd1(mon, sym["objType"] + slot) == TYPE_PICKUP
               and rd1(mon, sym["pkKind"] + slot) == PICKUP_P
@@ -194,12 +290,31 @@ def main():
         # side of a frame that demonstrably ran. Consecutive Y readings need no
         # such trust: a frame that did not run shows up as a step of zero and
         # fails this check, which is exactly what it should do.
+        # A SECOND STALE PREMISE, REPLACED RATHER THAN RELAXED. This used to
+        # assert one pixel EVERY frame -- "the scroll's own speed" -- and that
+        # was right when it was written. src/pickup.asm now applies the step on
+        # one frame in two, deliberately and with its reasoning recorded beside
+        # the constant: "the token is now the centre of an encounter that has to
+        # be watched, so it descends at half the scroll rate... The token no
+        # longer matches the scroll, and that is now correct."
+        #
+        # PICKUP_VY_MASK is the mechanism -- a frameCounter bit, no accumulator
+        # and no per-token byte -- so the cadence is exactly alternating, and
+        # asserting that is STRICTER than the old check rather than looser: a
+        # token that moved every frame, or every third frame, or irregularly,
+        # all fail here.
         align(mon, sym)
-        ys = run_frames(mon, sym, 7, lambda: rd1(mon, sym["logY"] + slot))
-        steps = {b - a for a, b in zip(ys, ys[1:])}
-        check("the token descends exactly one pixel per frame through "
-              "objectUpdateAll -- the scroll's own speed",
-              steps == {PICKUP_VY}, f"{ys}, steps {sorted(steps)}")
+        ys = run_frames(mon, sym, 9, lambda: rd1(mon, sym["logY"] + slot))
+        steps = [b - a for a, b in zip(ys, ys[1:])]
+        check("the token descends one pixel every OTHER frame -- half the "
+              "scroll rate, by src/pickup.asm's frameCounter bit",
+              set(steps) == {0, PICKUP_VY}, f"{ys}, steps {steps}")
+        check("...on a strictly alternating cadence, not an irregular one",
+              all(a != b for a, b in zip(steps, steps[1:])),
+              f"steps {steps}")
+        check("...so it covers exactly half the ground the scroll does",
+              ys[-1] - ys[0] == (len(ys) - 1) // 2,
+              f"{ys[0]} -> {ys[-1]} over {len(ys) - 1} frames")
 
         # --- 5. the flash is presentation and NOTHING else --------------------
         # Sampled over a whole flash period; identity is read on every sample.
@@ -223,7 +338,13 @@ def main():
         poke(mon, sym["logY"] + slot, PICKUP_Y_MAX - 1)
         despawned0 = rd1(mon, sym["pkDespawned"])
         live0 = rd1(mon, sym["logCount"])
-        run_frames(mon, sym, 1)
+        # TWO FRAMES, NOT ONE, and for the same reason as the cadence check
+        # above: the token steps on one frame in two, so from an arbitrary
+        # alignment it needs up to two frames to take its next step. One frame
+        # was right when it moved every frame. It still despawns on the very
+        # step that crosses PICKUP_Y_MAX -- this waits for that step, it does
+        # not give the engine extra rope.
+        run_frames(mon, sym, 2)
         check("a token that falls past the aperture despawns itself",
               rd1(mon, sym["logActive"] + slot) == 0
               and rd1(mon, sym["pkDespawned"]) == despawned0 + 1,
@@ -238,7 +359,7 @@ def main():
               f"count {live0}->{rd1(mon, sym['logCount'])}")
 
         # --- 7. collection ----------------------------------------------------
-        slot = spawn_token(mon, sym)
+        slot = drop_token(mon, sym)
         check("a token to collect", slot is not None, str(slot))
         eb0 = (rd1(mon, sym["ebCount"]), rd1(mon, sym["ebFired"]))
         align(mon, sym)                         # arrange AT a frame top
@@ -249,12 +370,14 @@ def main():
         poke(mon, sym["plyX"], 150)
         poke(mon, sym["plyXHi"], 0)
         poke(mon, sym["plyInvuln"], 0)
-        tokens0 = rd1(mon, sym["pkTokensP"])
+        tokens0 = pickups_taken(mon, sym)
         live0 = rd1(mon, sym["logCount"])
         run_frames(mon, sym, 1)                 # ONE frame consumes the overlap
         check("the ship overlapping a token collects it, once",
-              rd1(mon, sym["pkTokensP"]) == tokens0 + 1,
-              f"pkTokensP {tokens0}->{rd1(mon, sym['pkTokensP'])}")
+              pickups_taken(mon, sym) == tokens0 + 1,
+              f"pickups {tokens0}->{pickups_taken(mon, sym)} "
+              f"(units {rd1(mon, sym['pkTokensP'])}, "
+              f"charge {rd1(mon, sym['pkCharge'])})")
         check("...the token disappears and its slot is released whole",
               rd1(mon, sym["logActive"] + slot) == 0
               and rd1(mon, sym["objType"] + slot) == 0
@@ -262,11 +385,11 @@ def main():
               and rd1(mon, sym["logCount"]) == live0 - 1,
               f"active {rd1(mon, sym['logActive'] + slot)}, "
               f"count {live0}->{rd1(mon, sym['logCount'])}")
-        tokens1 = rd1(mon, sym["pkTokensP"])
+        tokens1 = pickups_taken(mon, sym)
         run_frames(mon, sym, 3)
         check("...and it cannot be collected a second time",
-              rd1(mon, sym["pkTokensP"]) == tokens1,
-              f"{tokens1} -> {rd1(mon, sym['pkTokensP'])}")
+              pickups_taken(mon, sym) == tokens1,
+              f"{tokens1} -> {pickups_taken(mon, sym)}")
         check("collecting a token is not a projectile event: the hostile cap "
               "and its counters are untouched",
               (rd1(mon, sym["ebCount"]), rd1(mon, sym["ebFired"])) == eb0,
@@ -284,12 +407,12 @@ def main():
         poke(mon, sym["logY"] + ghost, rd1(mon, sym["plyY"]))
         poke(mon, sym["logX"] + ghost, rd1(mon, sym["plyX"]))
         poke(mon, sym["logXHi"] + ghost, rd1(mon, sym["plyXHi"]))
-        tokens0 = rd1(mon, sym["pkTokensP"])
+        tokens0 = pickups_taken(mon, sym)
         call(mon, sym, "pickupPlayerTick")
         call(mon, sym, "pickupPlayerTick")
         check("an INACTIVE slot carrying a token cannot be collected",
-              rd1(mon, sym["pkTokensP"]) == tokens0,
-              f"{tokens0} -> {rd1(mon, sym['pkTokensP'])}")
+              pickups_taken(mon, sym) == tokens0,
+              f"{tokens0} -> {pickups_taken(mon, sym)}")
         poke(mon, sym["objType"] + ghost, 0)
         poke(mon, sym["pkKind"] + ghost, 0)
 
@@ -313,7 +436,7 @@ def main():
               f"{rd1(mon, sym['logCount'])} of {MAX_OBJECTS}")
         dropped0 = rd1(mon, sym["pkDropped"])
         spawned0 = rd1(mon, sym["pkSpawned"])
-        slot = spawn_token(mon, sym)
+        slot = drop_token(mon, sym)
         check("a token authored into a full pool is refused, counted and lost",
               slot is None
               and rd1(mon, sym["pkDropped"]) == dropped0 + 1
@@ -329,6 +452,28 @@ def main():
             call(mon, sym, "objectFree", x=s)
 
         # --- 10. the game carries on ------------------------------------------
+        # THE DIRECTOR IS RE-ARMED FIRST, and that is setup rather than a
+        # relaxation. The question this section asks is "is the encounter
+        # director still alive after all that pool abuse" -- it is not "does
+        # Level 1 still have content left". Since Wave Contract Stage 1 the four
+        # authored encounters happen once, at rows 48/52/90/126, and this file's
+        # own earlier sections drive waveStartNext several times; by the time we
+        # reach here the cursor is legitimately exhausted and no wave can start
+        # however healthy the director is.
+        #
+        # So one disposable trigger is placed two coarse rows ahead of the world
+        # and the cursor wound back to it. Everything the check then observes --
+        # the due test, the instance arming, the member spawning -- is the real
+        # production path doing its real work.
+        here = rd1(mon, sym["worldProgressLo"]) \
+            | (rd1(mon, sym["worldProgressHi"]) << 8)
+        due = here + 2
+        poke(mon, sym["waveTrigRowLo"], due & 0xff)
+        poke(mon, sym["waveTrigRowHi"], (due >> 8) & 0xff)
+        poke(mon, sym["wvNextTrig"], 0)
+        for s in range(WAVE_SLOTS):
+            poke(mon, sym["wvActive"] + s, 0)
+
         poke(mon, sym["plyY"], 200)
         spawned0 = rd1(mon, sym["wvSpawned"])
         started0 = rd1(mon, sym["wvStarted"])

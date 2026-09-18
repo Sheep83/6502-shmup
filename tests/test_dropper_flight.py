@@ -312,9 +312,17 @@ def main():
     print("=== dropper flight v1: three passes + sonar ping ===")
     v = None
     try:
-        v = Vice(6665, PRG, warp=True)
+        # boot="exact" AND NO WARM-UP WARP. This file needs live ordinary
+        # enemies in its sampling window, and since Wave Contract Stage 1 they
+        # exist only around the four authored encounters at coarse rows 48, 52,
+        # 90 and 126 -- Level 1 is deliberately quiet afterwards. The fast boot
+        # arrives at row ~107 (measured 107..395) and the two-second warp that
+        # used to follow is a further ~220 rows, so the window landed in the
+        # quiet stretch and the enemies it asserts about did not exist.
+        # It used to work by accident: waves repeated every 126 rows for ever.
+        # From row 0 this file's own frame budget covers all four encounters.
+        v = Vice(6665, PRG, warp=True, boot="exact")
         mon = v.mon
-        free_run(mon, sym["frameCounter"], 2)
         mon.cmd("delete")
         check_layout()
 

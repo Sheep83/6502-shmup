@@ -458,6 +458,24 @@ def main():
         # FIVE-SECOND RUN AT THE TOP OF THIS FILE, before anything was touched.
         # What is asked here is only the behavioural question: is the encounter
         # director still running the level after all of that?
+        # THE DIRECTOR IS RE-ARMED FIRST, and that is setup rather than a
+        # relaxation. The question here is "is the encounter director still
+        # alive after all that", not "does Level 1 still have content left".
+        # Since Wave Contract Stage 1 the four authored encounters happen once,
+        # at rows 48/52/90/126, so by this point in the file the cursor is
+        # legitimately exhausted and no wave can start however healthy the
+        # director is. One disposable trigger two coarse rows ahead of the world
+        # restores the question this check means to ask; everything it then
+        # observes is the real production path.
+        _here = rd1(mon, sym["worldProgressLo"]) \
+            | (rd1(mon, sym["worldProgressHi"]) << 8)
+        _due = _here + 2
+        poke(mon, sym["waveTrigRowLo"], _due & 0xff)
+        poke(mon, sym["waveTrigRowHi"], (_due >> 8) & 0xff)
+        poke(mon, sym["wvNextTrig"], 0)
+        for _s in range(2):                     # WAVE_SLOTS
+            poke(mon, sym["wvActive"] + _s, 0)
+
         mon.cmd("delete")
         free_run(mon, sym["frameCounter"], 4)
         mon.cmd("delete")

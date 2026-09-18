@@ -101,9 +101,25 @@ def main():
     print("=== encounter director v1 (slim) ===")
     v = None
     try:
-        v = Vice(6661, PRG, warp=True)
+        # boot="exact" IS LOAD-BEARING FOR THIS FILE. Every behaviour below
+        # requires an authored trigger to fire inside the sampling window, and
+        # since Wave Contract Stage 1 the four authored encounters happen ONCE,
+        # at coarse rows 48, 52, 90 and 126, after which the director is
+        # permanently exhausted. The fast boot arrives at row ~107 (measured
+        # 107..395 across repeats), so it lands at or past the end of the
+        # content and this file could witness nothing at all.
+        #
+        # It used to work by accident: ordinary waves repeated every 126 rows
+        # for ever, so any arrival point had a wave along shortly.
+        #
+        # MAX_FRAMES = 1250 is 156 coarse rows, so from row 0 the window covers
+        # all four authored encounters with room to spare -- and the loop below
+        # still stops as soon as every behaviour has been witnessed.
+        v = Vice(6661, PRG, warp=True, boot="exact")
         mon = v.mon
-        free_run(mon, sym["frameCounter"], 2)
+        # NO free_run HERE. A second of warp is ~70 coarse rows and two seconds
+        # would put the world past row 126 before the first sample, which is
+        # exactly the overshoot boot="exact" was chosen to avoid.
         mon.cmd("delete")
 
         check_layout()

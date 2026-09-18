@@ -90,12 +90,46 @@ def main():
     print("=== production smoke ===")
     v = None
     try:
-        v = Vice(6651, PRG, warp=True)
+        # boot="exact" AND THE SAMPLE FIRST, and the two go together.
+        #
+        # Section D asks whether the object pool CYCLES during ordinary play.
+        # That needs ordinary enemies to exist while the sample is being taken,
+        # and since Wave Contract Stage 1 they exist only around the four
+        # authored encounters at coarse rows 48, 52, 90 and 126 -- after which
+        # Level 1 is deliberately quiet for its remaining ~270 rows.
+        #
+        # The fast boot arrives at row ~107 (measured 107..395) and the ten
+        # second health window below is a further ~700 rows of warp, so the
+        # sample used to be taken deep in the quiet stretch: the population was
+        # frozen because there was genuinely nothing alive, and the check failed
+        # for a real reason that had nothing to do with the pool.
+        v = Vice(6651, PRG, warp=True, boot="exact")
         mon = v.mon
-        free_run(mon, sym["frameCounter"], 1)
+        mon.cmd("delete")
+
+        # --- per-frame sample, feeding C, D and part of G -------------------
+        # gameFrame is the once-per-frame call site (main.asm), so a
+        # breakpoint there samples exactly one instant per displayed frame --
+        # not a guess at monitor round-trip timing.
+        #
+        # SAMPLE_FRAMES IS DERIVED FROM THE CONTENT, not tuned until it passed.
+        # One coarse row is eight displayed frames, so from worldProgress 0 this
+        # window spans rows 0..87 and therefore contains the first two authored
+        # encounters (48 and 52) in full -- their spawns, their concurrent
+        # flight and their despawns. No waiting, no warp, no staged scene: the
+        # sample simply covers where the content is.
+        SAMPLE_FRAMES = 700
+        bp = set_bp(mon, sym["gameFrame"])
+        samples = frames(mon, bp, SAMPLE_FRAMES)
+        mon.cmd(f"delete {bp}")
         mon.cmd("delete")
 
         # --- B: production health, over a representative stretch -----------
+        # AFTER the sample, for the reason above: ten seconds of warp is several
+        # hundred coarse rows and would carry the world past every encounter
+        # before a single frame had been sampled. The counters are zeroed here,
+        # so measuring them over the stretch that follows is unaffected by the
+        # sampling that precedes it.
         print("\n--- B. production health ---")
         for name in ("gameOverrun", "publishSkip", "schedBuildDefer",
                      "scrollLate", "edgeLate"):
@@ -107,15 +141,6 @@ def main():
             got = rd1(mon, sym[name])
             check(f"{name} is zero over 10s of ordinary play", got == 0,
                   str(got))
-
-        # --- per-frame sample, feeding C, D and part of G -------------------
-        # gameFrame is the once-per-frame call site (main.asm), so a
-        # breakpoint there samples exactly one instant per displayed frame --
-        # not a guess at monitor round-trip timing.
-        bp = set_bp(mon, sym["gameFrame"])
-        samples = frames(mon, bp, 150)
-        mon.cmd(f"delete {bp}")
-        mon.cmd("delete")
 
         # --- C: scroll / terrain continuity ---------------------------------
         print("\n--- C. scroll / terrain continuity ---")

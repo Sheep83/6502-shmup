@@ -482,29 +482,41 @@
 }
 
 // ---------------------------------------------------------------------------
-// THE AUTHORED TRIGGER LIST, in worldProgress DELTAS.
+// THE AUTHORED TRIGGER LIST, in ABSOLUTE sixteen-bit worldProgress rows.
 //
 // worldProgress is the scroller's own "coarse rows travelled since the stage
 // start", it only ever increases, and it advances once every eight frames --
 // so it is the natural clock for encounters tied to how far through the level
 // the player actually is, rather than to how long the machine has been on.
 //
-// DELTAS RATHER THAN ABSOLUTE THRESHOLDS, and that is what makes the sequence
-// repeat for free: when the cursor runs off the end it wraps to zero and
-// keeps adding, so the whole pattern recurs every (sum of deltas) coarse rows
-// without a second table, a base offset or a special case. The period here is
-// 24+5+30+5 = 64 coarse rows, about ten seconds, which is short enough to
-// qualify by eye without waiting around.
+// ABSOLUTE ROWS, AND THE LIST DOES NOT REPEAT.
 //
-// THE DELTAS ARE WAVE FOOTPRINTS, NOT INSTANCE LIFETIMES, and that distinction
-// is what gives the game its pacing. An INSTANCE is held only until its last
-// member is sent -- 1 + (count-1)*interval frames, about eight coarse rows for
-// every wave here -- but its ENEMIES stay alive for far longer. Spacing on
-// instance lifetime would therefore run every formation into the next one
+//     A trigger names one absolute sixteen-bit world row. Once consumed it
+//     never becomes due again unless another authored trigger explicitly
+//     exists at another row.
+//
+// This replaces a delta column that the director accumulated into a running
+// target and a cursor that WRAPPED, so the four authored moments recurred every
+// 126 rows for the whole stage -- thirteen times over Level 1, and fifty-two
+// times over the 420-row proof. That repetition was an artefact of the
+// encoding, not a decision anybody made: nothing could be placed at row 900
+// without also placing it at row 774 and row 1026.
+//
+// WHY THIS IS ALSO CHEAPER. A delta schedule has to MAINTAIN its target -- a
+// sixteen-bit add with a carry chain on every trigger, plus two bytes of state
+// holding a number that is a function of authored data. An absolute row is read
+// straight out of the table the cursor already indexes: the compare is the same
+// compare, and waveAdvanceCursor becomes an `inc`. See waveTick.
+//
+// THE ROWS ARE SPACED BY WAVE FOOTPRINT, NOT INSTANCE LIFETIME, and that
+// distinction is what gives the game its pacing. An INSTANCE is held only until
+// its last member is sent -- 1 + (count-1)*interval frames, about eight coarse
+// rows for every wave here -- but its ENEMIES stay alive for far longer.
+// Spacing on instance lifetime would run every formation into the next one
 // continuously, with never a moment of one pattern alone on screen.
 //
-// So each delta is the wave's whole footprint: the span it spends spawning plus
-// the lifetime of its last member to leave.
+// So the gap to the next row is the wave's whole footprint: the span it spends
+// spawning plus the lifetime of its last member to leave.
 //
 //     sweep   66 +  177 = 243 frames = 30 rows
 //     s-turn  52 +  200 = 252 frames = 32 rows
@@ -514,16 +526,24 @@
 // Each formation has cleared the aperture before the next arrives: pattern,
 // empty sky, pattern.
 //
-// ONE DELIBERATE OVERLAP: the four-row delta between the sweep and the S-turn,
-// which is shorter than the sweep's occupancy and therefore puts two INSTANCES
-// in flight at once. They are the right pair for it -- the sweep enters through
-// the LEFT BORDER at a fixed height and the S-turn comes down from ABOVE on the
-// other side of the screen, so the two formations are separated in entry point,
+// ONE DELIBERATE OVERLAP: rows 48 and 52 are four rows apart, which is shorter
+// than the sweep's occupancy and therefore puts two INSTANCES in flight at
+// once. They are the right pair for it -- the sweep enters through the LEFT
+// BORDER at a fixed height and the S-turn comes down from ABOVE on the other
+// side of the screen, so the two formations are separated in entry point,
 // direction and Y for the whole time they share the aperture. That is an
 // overlap the multiplexer is never asked to work for.
 //
-// The period is 48+4+38+36 = 126 coarse rows, about twenty seconds.
-.var trigDelta = List().add(48, 4, 38, 36)
+// THESE FOUR ROWS ARE THE ONES THE DELTA SCHEDULE ACTUALLY PRODUCED for its
+// first cycle, measured on the running machine rather than read off the
+// arithmetic: waveInit armed the first trigger at delta[0] = 48, and
+// waveAdvanceCursor then added the delta of the trigger it had just moved ON
+// TO. So 48, 48+4, 52+38, 90+36. Level 1 is spatially unchanged.
+//
+// After row 126 the stage is deliberately QUIET: Level 1 runs to row 395 and
+// the remaining 269 rows carry no authored encounter. That is the migration
+// being visible rather than a gap to fill in this task.
+.var trigRow   = List().add(48, 52, 90, 126)
 .var trigDef   = List().add(WAVE_DEF_SWEEP, WAVE_DEF_S, WAVE_DEF_LINGER, WAVE_DEF_LOOP)
 
 // WHICH ENEMY THE WAVE IS MADE OF, and it is an AUTHORED COLUMN rather than
@@ -618,14 +638,33 @@
 // See src/token.asm.
 .const WAVE_TRIGGERS = 4
 
-.if (trigDelta.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS
+.if (trigRow.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS
      || trigSpecies.size() != WAVE_TRIGGERS || trigFire.size() != WAVE_TRIGGERS
      || trigSide.size() != WAVE_TRIGGERS) {
     .error "the trigger list is not WAVE_TRIGGERS entries on every axis"
 }
+// THE CURSOR ONLY EVER WALKS FORWARD, so the rows must not go backwards. A
+// trigger authored before the one in front of it could never become due -- the
+// director would already have passed it by the time the cursor arrived -- and
+// it would be invisible in play rather than a build failure.
+//
+// NON-DECREASING, NOT STRICTLY ASCENDING: two triggers at the SAME row are
+// legal and meaningful. waveStartNext consumes one trigger per tick, so a pair
+// sharing a row arms on consecutive frames -- which is how a mixed-species or
+// mixed-formation appearance is authored without any per-member machinery. No
+// code is needed for it; it falls out of a forward-only cursor.
+.for (var t = 1; t < WAVE_TRIGGERS; t++) {
+    .if (trigRow.get(t) < trigRow.get(t - 1)) {
+        .error "the authored trigger rows are not in non-decreasing order"
+    }
+}
 .for (var t = 0; t < WAVE_TRIGGERS; t++) {
-    .if (trigDelta.get(t) < 1) {
-        .error "a trigger delta of zero would fire every frame for ever"
+    // The row is emitted as two bytes and compared against a sixteen-bit
+    // worldProgress, so this is the real limit of the representation rather
+    // than a policy. A row beyond the stage's own end is NOT an error: it
+    // simply never becomes due, which is a legitimate way to park an encounter.
+    .if (trigRow.get(t) < 0 || trigRow.get(t) > $ffff) {
+        .error "a trigger row does not fit the sixteen-bit world"
     }
     .if (trigDef.get(t) >= WAVE_DEFS) { .error "a trigger names a wave definition that does not exist" }
     // Membership, not a range: a species value is its animation ROW OFFSET
@@ -641,12 +680,16 @@
         .error "a trigger's fire mask names a member this wave never sends"
     }
 }
-// THE ALTERNATION ITSELF IS CHECKED, including across the wrap -- the list
-// repeats for ever, so the last entry's neighbour is the first. This is the
-// assertion that makes "every other wave is a Dropper" a property of the build
-// rather than of someone having counted carefully.
-.for (var t = 0; t < WAVE_TRIGGERS; t++) {
-    .if (trigSpecies.get(t) == trigSpecies.get(mod(t + 1, WAVE_TRIGGERS))) {
+// THE ALTERNATION ITSELF IS CHECKED. This is the assertion that makes "every
+// other wave is a Dropper" a property of the build rather than of someone
+// having counted carefully.
+//
+// IT NO LONGER WRAPS. The list used to repeat for ever, so the last entry's
+// neighbour really was the first and the check had to close the circle. With
+// absolute rows the list ends, trigger 3 has no successor, and comparing it
+// against trigger 0 would be asserting about an adjacency that never happens.
+.for (var t = 1; t < WAVE_TRIGGERS; t++) {
+    .if (trigSpecies.get(t) == trigSpecies.get(t - 1)) {
         .error "two consecutive authored waves use the same enemy species"
     }
 }
@@ -685,9 +728,16 @@ wvSpecies: .fill WAVE_SLOTS, 0      // which enemy this instance is made of,
                                     // last of them is out.
 
 // --- the director ------------------------------------------------------------
-wvNextTrig:  .byte 0                // cursor into the trigger list
-wvNextAtLo:  .byte 0                // worldProgress at which it fires
-wvNextAtHi:  .byte 0
+// ONE BYTE, AND IT IS THE WHOLE SCHEDULE STATE. The cursor indexes the authored
+// trigger list; the row that cursor fires at is read from the table, not kept
+// here. WAVE_TRIGGERS -- one past the last trigger -- is the EXHAUSTED state,
+// and it is reached by the ordinary `inc` rather than by a flag or a sentinel
+// row. Nothing wraps it, and nothing can: the only `inc` is in waveStartNext,
+// which the exhausted test above it has already refused to reach.
+//
+// The pair of bytes that used to live here -- wvNextAtLo/Hi, the running sum of
+// the deltas -- is gone with the deltas.
+wvNextTrig:  .byte 0                // cursor, 0..WAVE_TRIGGERS inclusive
 
 // --- diagnostics -------------------------------------------------------------
 // Saturating. These exist so a test can assert about the director's behaviour
@@ -724,7 +774,7 @@ waveStateEnd:
 * = $7c00 "waves"
 
 // ---------------------------------------------------------------------------
-// waveInit — no waves running, the first trigger one delta away.
+// waveInit — no waves running, and the cursor on the first authored trigger.
 // ---------------------------------------------------------------------------
 waveInit:
     lda #0
@@ -752,13 +802,10 @@ waveInit:
     // with a shot already in the air.
     lda #WAVE_FIRE_PERIOD
     sta wvFirePhase
-    lda #0
 
-    // The first trigger is the first delta from a standing start.
-    lda waveTrigDelta
-    sta wvNextAtLo
-    lda #0
-    sta wvNextAtHi
+    // THE CURSOR IS THE WHOLE ARMING, and it was zeroed with the rest of the
+    // state above. There is no target to seed: trigger 0 becomes due when
+    // worldProgress reaches the row trigger 0 names.
     rts
 
 // ---------------------------------------------------------------------------
@@ -781,13 +828,31 @@ waveTick:
     beq !playing+
     rts
 !playing:
-    // ---- has the world reached the next authored trigger? -----------------
+    // ---- is there an authored trigger left at all? ------------------------
+    // THE CURSOR IS THE TERMINATION. WAVE_TRIGGERS is one past the last entry,
+    // so this is both the bounds check on the indexed loads below and the
+    // "schedule exhausted" test, and it costs three instructions. A stage that
+    // runs for thousands of rows past its last authored moment takes this
+    // branch every frame and does nothing, which is exactly right.
+    ldy wvNextTrig
+    cpy #WAVE_TRIGGERS
+    bcs !noTrigger+
+
+    // ---- has the world reached the row that trigger names? ----------------
+    // A GENUINE SIXTEEN-BIT COMPARE: high bytes first, and the low bytes are
+    // only consulted when the high bytes are equal. worldProgress reaches 1,655
+    // on the 420-row proof stage, so the high byte is not decoration.
+    //
+    // The test is `>=`, not `==`, and that is load-bearing in two places. It is
+    // what lets a trigger held through a token encounter stay due instead of
+    // being missed by a row (see below), and it is what makes a row the stage
+    // never reaches simply never fire rather than fire late.
     lda worldProgressHi
-    cmp wvNextAtHi
+    cmp waveTrigRowHi,y
     bcc !noTrigger+
     bne !due+
     lda worldProgressLo
-    cmp wvNextAtLo
+    cmp waveTrigRowLo,y
     bcc !noTrigger+
 !due:
     // ---- ...and is the stage allowed to run right now? --------------------
@@ -797,23 +862,28 @@ waveTick:
     // agreed to. But the trigger list is AUTHORED PROGRESSION -- a stage the
     // player is supposed to see -- so it is held rather than lost.
     //
-    // The hold is one 16-bit copy: while the encounter runs, a trigger that has
-    // come due is walked forward to the world's own shoulder, so it stays
-    // exactly due and never accumulates a backlog. The cursor does not move,
-    // worldProgress is untouched, and the frame the encounter ends the held
-    // trigger fires -- one wave, on the next tick, not a burst of every wave the
-    // encounter outlasted.
+    // THE HOLD IS NOW NOTHING AT ALL, AND THAT IS THE POINT. The delta schedule
+    // had to walk its running target forward to worldProgress every held frame,
+    // because the target was runtime state that would otherwise fall behind and
+    // the trigger would be missed. An authored row cannot fall behind: it is a
+    // constant, worldProgress only increases, and the compare above is `>=`. A
+    // trigger that came due during an encounter is STILL due when the encounter
+    // ends, without one byte being written to remember it.
+    //
+    // The cursor does not move, worldProgress is untouched, and the frame the
+    // encounter ends the held trigger fires.
+    //
+    // ONE TRIGGER PER TICK, so an encounter long enough to outlast two authored
+    // rows releases them on consecutive frames rather than together. That is the
+    // existing `drop, don't queue late` policy doing its job -- if the second
+    // finds both instances busy it is dropped and counted in wvDropped, which is
+    // the honest outcome. It is not a backlog and it cannot compound: the cursor
+    // only ever moves forward.
     //
     // This is deliberately the whole seam. Nothing else in the director knows
     // encounters exist, and removing token.asm would leave one dead branch.
     lda tkActive
-    beq !fire+
-    lda worldProgressLo
-    sta wvNextAtLo
-    lda worldProgressHi
-    sta wvNextAtHi
-    jmp !noTrigger+
-!fire:
+    bne !noTrigger+
     jsr waveStartNext
 !noTrigger:
 
@@ -895,29 +965,23 @@ waveStartNext:
     // falls through
 
 // ---------------------------------------------------------------------------
-// waveAdvanceCursor — step to the next authored trigger and compute when it
-// fires, as a sixteen-bit absolute worldProgress.
+// waveAdvanceCursor — step to the next authored trigger. One instruction.
 //
-// The list WRAPS, which is the whole of "the sequence repeats": the deltas
-// keep being added to a monotonically increasing target, so the pattern
-// recurs for as long as the stage scrolls.
+// THE LIST NO LONGER WRAPS, and this is where that used to happen. The cursor
+// walked back to zero at WAVE_TRIGGERS and the next delta was added to a
+// running target, so the four authored moments recurred for as long as the
+// stage scrolled -- thirteen times over Level 1. Now the cursor simply counts
+// past the last trigger and waveTick refuses to index beyond it.
+//
+// THERE IS NOTHING TO COMPUTE. The row the next trigger fires at is authored
+// data; the director reads it where it lies.
+//
+// IT CANNOT RUN AWAY. The only path here is through waveStartNext, and waveTick
+// refuses to call that once the cursor has reached WAVE_TRIGGERS -- so the
+// cursor stops on exactly that value and no clamp is needed to hold it there.
 // ---------------------------------------------------------------------------
 waveAdvanceCursor:
     inc wvNextTrig
-    lda wvNextTrig
-    cmp #WAVE_TRIGGERS
-    bcc !armed+
-    lda #0
-    sta wvNextTrig
-!armed:
-    tay
-    lda wvNextAtLo
-    clc
-    adc waveTrigDelta,y
-    sta wvNextAtLo
-    bcc !done+
-    inc wvNextAtHi
-!done:
     rts
 
 // ---------------------------------------------------------------------------
@@ -1397,8 +1461,13 @@ waveDefTableEnd:
     .error "the wave definition table is not WAVEDEF_SIZE bytes per definition"
 }
 
-waveTrigDelta:
-.for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigDelta.get(t) }
+// PARALLEL COLUMNS, and the row is two of them. Split lo/hi rather than
+// interleaved so the director's compare is two `absolute,Y` loads against the
+// cursor it already holds in Y -- no record stride, and no multiply.
+waveTrigRowLo:
+.for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte <trigRow.get(t) }
+waveTrigRowHi:
+.for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte >trigRow.get(t) }
 waveTrigDef:
 .for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigDef.get(t) }
 waveTrigSpecies:
@@ -1408,8 +1477,8 @@ waveTrigFire:
 waveTrigSide:
 .for (var t = 0; t < WAVE_TRIGGERS; t++) { .byte trigSide.get(t) }
 waveTrigEnd:
-.if (waveTrigEnd - waveTrigDelta != 5 * WAVE_TRIGGERS) {
-    .error "the trigger table is not five bytes per trigger"
+.if (waveTrigEnd - waveTrigRowLo != 6 * WAVE_TRIGGERS) {
+    .error "the trigger table is not six bytes per trigger"
 }
 
 .if (* > $8000) { .error "the wave code has outgrown its $7c00 segment" }

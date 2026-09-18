@@ -92,6 +92,32 @@ def port_owner(port):
     return pids[0] if pids else None
 
 
+# HOW FAR INTO THE STAGE boot="exact" is allowed to arrive. The first authored
+# encounter is at coarse row 48 and one coarse row is eight displayed frames, so
+# a handful of rows of slack would already be dozens of frames of gameplay the
+# caller did not ask for. Four is generous for a boot that steps single frames
+# and still an order of magnitude clear of row 48.
+BOOT_EXACT_MAX_ROW = 4
+
+
+def pc_of(reply):
+    """The PC out of the monitor's own "(C:$xxxx)" prompt, or None.
+
+    TWO TRAPS, BOTH PAID FOR IN THIS SUITE:
+
+    1. `mon.cmd("x")` RETURNS ON AN IDLE SOCKET AS WELL AS ON A STOP, so "the
+       call returned" is not "the breakpoint fired". Anything that needs to know
+       WHERE the machine stopped has to ask, rather than assume.
+    2. The reply can carry a STALE prompt left in the socket by an earlier
+       command, and re.search happily matches that one. Taking the LAST match is
+       what makes the address the one this command stopped at. With re.search a
+       trigger probe silently missed the first two firings of a four-trigger
+       schedule and reported rows [90, 126] instead of [48, 52, 90, 126].
+    """
+    m = re.findall(r"\(C:\$([0-9a-fA-F]{4})\)", reply)
+    return int(m[-1], 16) if m else None
+
+
 # Every PID this session has ever launched. Ownership is by PID, never by
 # pattern-matching `pgrep` output: the repository path appears in the command
 # line of any manual VICE session the user has open on this project too, and a
@@ -124,7 +150,7 @@ class Vice:
     left loaded in memory for the session's lifetime and never touched on
     disk.
     """
-    def __init__(self, port, prg, warp=True, start_game=True):
+    def __init__(self, port, prg, warp=True, start_game=True, boot="fast"):
         """start_game: drive the restored lifecycle from ATTRACT into GAME.
 
         THE MACHINE NO LONGER BOOTS INTO GAMEPLAY. src/gamestate.asm restores the
@@ -134,6 +160,23 @@ class Vice:
         that owns bringing a machine up, keeps all of them testing exactly what
         they tested before. A test that wants the lifecycle itself passes
         start_game=False and drives it by hand.
+
+        boot: WHERE IN THE LEVEL THE TEST WAKES UP, and since absolute wave
+        triggers landed this is a real choice rather than an implementation
+        detail.
+
+            "fast"   the historical boot. Cheap, and it arrives some HUNDREDS of
+                     coarse rows into the stage -- see _boot_to_game. Correct for
+                     any test indifferent to world position.
+            "exact"  arrives at worldProgress 0, frame by frame, so the authored
+                     encounters at rows 48, 52, 90 and 126 are all still ahead.
+                     Costs a few seconds more. Required by any test that must
+                     observe the encounter window.
+
+        Ordinary waves used to repeat every 126 rows for ever, so "hundreds of
+        rows in" was indistinguishable from "at the start" and the overshoot was
+        invisible. Level 1 now runs its four encounters ONCE and the director is
+        then exhausted, so a fast boot lands in permanent quiet.
         """
         # THE ARGUMENT IS KEPT, THE ARTEFACT IS NOT.
         #
@@ -181,16 +224,35 @@ class Vice:
             else:
                 raise RuntimeError("VICE monitor never became responsive")
             if start_game:
-                self._boot_to_game()
+                if boot == "exact":
+                    self._boot_to_game_exact()
+                elif boot == "fast":
+                    self._boot_to_game()
+                else:
+                    raise ValueError(f"unknown boot mode {boot!r}")
         except Exception:
             self.close()
             raise
+
     def _boot_to_game(self):
-        """ATTRACT -> GAME, through the real input path the player uses.
+        """ATTRACT -> GAME, through the real input path the player uses. FAST.
 
         Fire is PRESSED and then RELEASED because the restored attract loop
         gates the start on the release -- the old game's own debounce, which
         exists so one press cannot also reach the game's first frame.
+
+        THIS ARRIVES HUNDREDS OF COARSE ROWS INTO THE STAGE, and that is
+        inherent rather than a bug to tune away. free_run takes SECONDS OF WALL
+        TIME and the machine is in warp, so each press and each release carries
+        a second of emulated play; the gsState check happens only after both.
+        The game therefore starts somewhere inside one of those seconds and the
+        remainder runs as ordinary gameplay. Measured returns are recorded in
+        reports/test-harness-frame-accurate-boot-repair.md.
+
+        That was harmless while ordinary waves repeated every 126 rows for ever.
+        It is not harmless now: a test that needs to see an authored encounter
+        must use boot="exact" instead. Shortening these intervals would not fix
+        it -- the overshoot would merely become smaller and still nondeterministic.
         """
         sym = symbols(SYM)
         mon = self.mon
@@ -235,6 +297,69 @@ class Vice:
         # own diagnostic switch, beside pinFine, and it makes the stage endless
         # exactly as it used to be. A test about the END of a level clears it.
         poke(mon, sym["stageHold"], 1)
+
+    def _boot_to_game_exact(self):
+        """ATTRACT -> GAME at worldProgress 0, one frame at a time.
+
+        Same input path, same debounce, same post-conditions as _boot_to_game --
+        the only difference is that emulated time is advanced in FRAMES rather
+        than in seconds of wall clock, so the world cannot run away underneath
+        the transition.
+
+        THE BREAKPOINT MUST BE HIT EVERY FRAME IN BOTH STATES, and that is the
+        whole difficulty. `x` on a breakpoint that is NOT hit does not stop the
+        machine: it free-runs until the socket goes idle, which in warp is
+        hundreds of coarse rows, and step_n then accepts the enormous frame jump
+        as "one step". So both per-frame seams are armed together:
+
+            gsAttractLoop   once per frame while the attract page is up
+                            (its first instruction is jsr gsWaitFrame)
+            gameFrame       once per frame once PLAYING has begun
+
+        Breaking only on mainLoop does NOT work and was measured failing: the
+        router reaches it on a STATE CHANGE, not per frame, so the stepper
+        free-ran and one boot arrived at PLAYING with worldProgress already 395
+        and the boss phase up -- the stage had begun, run out and ended inside
+        the "frame-accurate" loop.
+
+        THE POST-CONDITION IS CHECKED, NOT ASSUMED. Overshoot is exactly the
+        failure this routine exists to prevent, so it raises rather than
+        returning a machine that is quietly in the wrong place.
+        """
+        sym = symbols(SYM)
+        mon = self.mon
+        bp_attract = set_bp(mon, sym["gsAttractLoop"])
+        set_bp(mon, sym["gameFrame"])
+        poke(mon, sym["joyHold"], 1)
+        for _ in range(200):
+            if rd1(mon, sym["gsState"]) == 1:           # GS_PLAYING
+                break
+            poke(mon, sym["joyState"], 0xef)            # fire down
+            step_n(mon, sym["frameCounter"], 2, lambda: None)
+            poke(mon, sym["joyState"], 0xff)            # ...and up: gate opens
+            step_n(mon, sym["frameCounter"], 2, lambda: None)
+        else:
+            raise RuntimeError(
+                "the lifecycle never reached PLAYING: gsState = "
+                f"{rd1(mon, sym['gsState'])}")
+        poke(mon, sym["joyState"], 0xff)
+        poke(mon, sym["joyHold"], 0)                    # tests own the stick
+
+        # The same two post-conditions the fast boot establishes, for the same
+        # reasons -- a stock the test cannot exhaust, and a stage that does not
+        # end underneath it. A test that wants the level to END clears stageHold.
+        poke(mon, sym["hudLives"], 250)
+        poke(mon, sym["stageHold"], 1)
+
+        mon.cmd(f"delete {bp_attract}")
+        mon.cmd("delete")
+        where = read16(mon, sym["worldProgressLo"])
+        if where > BOOT_EXACT_MAX_ROW:
+            raise RuntimeError(
+                f"the exact boot overshot: worldProgress = {where}, limit "
+                f"{BOOT_EXACT_MAX_ROW}. The authored encounters are at rows "
+                f"48, 52, 90 and 126 and a test asking for boot='exact' cannot "
+                f"observe them from here.")
 
     def close(self):
         if self.mon: self.mon.close(); self.mon = None

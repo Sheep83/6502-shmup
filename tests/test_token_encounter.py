@@ -291,9 +291,13 @@ def main():
     print("=== token encounter v2: dropper death + protectors ===")
     v = None
     try:
-        v = Vice(6663, PRG, warp=True)
+        # boot="exact": this file needs live ordinary enemies, and since Wave
+        # Contract Stage 1 they exist only around the four authored encounters
+        # at coarse rows 48, 52, 90 and 126 -- Level 1 is deliberately quiet
+        # afterwards. The fast boot arrives at row ~107 (measured 107..395),
+        # which is at or past the end of the content.
+        v = Vice(6663, PRG, warp=True, boot="exact")
         mon = v.mon
-        free_run(mon, sym["frameCounter"], 2)
         mon.cmd("delete")
 
         check_layout()
