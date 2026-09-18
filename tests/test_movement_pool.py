@@ -22,7 +22,18 @@ sys.path.insert(0, str(ROOT / "tests"))
 from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, call, check, report)
 
 PORT = 6711
-POOL = 0xf530
+POOL     = 0xf530       # movement programs
+WAVEDEF  = 0xf630       # wave definitions, 10 bytes each
+TRIG     = 0xf734       # six parallel trigger columns
+TRIG_SLOTS = 180        # each column is this wide, whatever the level authors
+TRIG_COLS  = ("rowLo", "rowHi", "def", "species", "fire", "side")
+WAVEDEF_SIZE = 10
+WAVE_DEFS, WAVE_TRIGGERS = 4, 4
+TRIG_ROWS = [48, 52, 90, 126]                 # Stage 1: absolute, no wrap
+SPECIES_RING, SPECIES_DROPPER = 0, 8
+TRIG_SPECIES = [SPECIES_RING, SPECIES_DROPPER, SPECIES_RING, SPECIES_DROPPER]
+TRIG_FIRE = [0b0101, 0b0010, 0b0101, 0b0000]
+TRIG_SIDE = [0, 0, 0, 1]                      # LEFT, LEFT, LEFT, RIGHT
 WM_STRAIGHT, WM_ARC, WM_ARC_MIRROR, WM_EXIT, WM_HOLD = 0, 1, 2, 3, 4
 WM_HEAD_CONT, HEAD_LEN = 0xff, 64
 STAGE = 4
@@ -73,6 +84,49 @@ def main():
               not dup,
               "a duplicate of the 52 pool bytes is still in the engine binary"
               if dup else "absent from the engine binary, as intended")
+
+        # ---- the wave definitions live in the package too ----------------
+        wd_live = rd(mon, WAVEDEF, WAVE_DEFS * WAVEDEF_SIZE)
+        wd_want = list(pk[2 + WAVEDEF - base: 2 + WAVEDEF - base + WAVE_DEFS * WAVEDEF_SIZE])
+        check("the wave definitions in RAM at $f630 match the built level package",
+              wd_live == wd_want,
+              f"{sum(1 for a, b in zip(wd_live, wd_want) if a != b)} mismatches")
+        check("waveDefTable resolves into the level package, not the engine PRG",
+              sym.get("waveDefTable") == WAVEDEF, f"${sym.get('waveDefTable', 0):04x}")
+        check("the engine PRG carries no second copy of the wave definitions",
+              bytes(wd_want) not in prg, "a duplicate is still in the engine binary")
+
+        # ---- and so does the absolute trigger list ------------------------
+        cols = {n: rd(mon, TRIG + i * TRIG_SLOTS, WAVE_TRIGGERS)
+                for i, n in enumerate(TRIG_COLS)}
+        for i, n in enumerate(TRIG_COLS):
+            want = TRIG + i * TRIG_SLOTS
+            check(f"waveTrig{n[0].upper()}{n[1:]} resolves to its package column",
+                  sym.get({"rowLo": "waveTrigRowLo", "rowHi": "waveTrigRowHi",
+                           "def": "waveTrigDef", "species": "waveTrigSpecies",
+                           "fire": "waveTrigFire", "side": "waveTrigSide"}[n]) == want,
+                  f"${want:04x}")
+        rows = [lo | (hi << 8) for lo, hi in zip(cols["rowLo"], cols["rowHi"])]
+        check("the authored trigger rows are ABSOLUTE and 16-bit in the package",
+              rows == TRIG_ROWS, f"{rows}")
+        check("every trigger names a definition that exists",
+              all(d < WAVE_DEFS for d in cols["def"]), f"{list(cols['def'])}")
+        check("the authored species survived the move", list(cols["species"]) == TRIG_SPECIES,
+              f"{list(cols['species'])}")
+        check("the authored fire masks survived the move", list(cols["fire"]) == TRIG_FIRE,
+              f"{list(cols['fire'])}")
+        check("the authored Dropper sides survived the move", list(cols["side"]) == TRIG_SIDE,
+              f"{list(cols['side'])}")
+
+        # ---- the cross-reference the whole package rests on ----------------
+        # Field 9 of a definition is a BYTE OFFSET into the movement pool. If it
+        # did not land on a record boundary the interpreter would read a stage
+        # record straddling two others.
+        offs = [wd_live[d * WAVEDEF_SIZE + 9] for d in range(WAVE_DEFS)]
+        check("every definition's movement-program offset lands on a record boundary",
+              all(o % STAGE == 0 and o < 52 for o in offs), f"{offs}")
+        check("the definitions still name the programs they always did",
+              offs == PROG_AT, f"{offs} vs {PROG_AT}")
 
         recs = records(mon)
         check("the pool is a whole number of four-byte stage records",
@@ -161,7 +215,7 @@ def main():
               f"stepped to {after_arc}, wanted {(arec[3] + 1) % HEAD_LEN}")
     finally:
         v.close()
-    return report("movement pool + deterministic ARC entry")
+    return report("level-package encounter data + deterministic ARC entry")
 
 
 if __name__ == "__main__":

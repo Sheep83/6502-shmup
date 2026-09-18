@@ -98,6 +98,78 @@ levelMoveEnd:
 }
 
 // ---------------------------------------------------------------------------
+// THE WAVE DEFINITIONS, above the movement pool.
+//
+// Ten bytes each, in the order the director reads them. Field 9 is authored as
+// a program INDEX and emitted as that program's BYTE OFFSET into the movement
+// pool, so the 6502 never multiplies -- progAt comes from the same
+// src/wave_programs.asm the pool above was emitted from, so an offset can never
+// disagree with the records it points at.
+// ---------------------------------------------------------------------------
+#import "wave_encounters.asm"
+
+* = LEVELPKG_WAVEDEF "level wave definitions"
+levelDefsStart:
+.for (var d = 0; d < WAVE_DEFS; d++) {
+    .var def = waveDefs.get(d)
+    .for (var f = 0; f < WAVEDEF_SIZE; f++) {
+        .if (f == 9) { .byte progAt.get(def.get(f)) } else { .byte def.get(f) & $ff }
+    }
+}
+levelDefsEnd2:
+
+.if (levelDefsEnd2 - levelDefsStart != WAVE_DEFS * WAVEDEF_SIZE) {
+    .error "the emitted wave definitions are not WAVEDEF_SIZE bytes per definition"
+}
+.if (levelDefsEnd2 - levelDefsStart > LEVELPKG_WAVEDEF_MAX) {
+    .error "the emitted wave definitions have outgrown their package budget"
+}
+
+// ---------------------------------------------------------------------------
+// THE ABSOLUTE TRIGGER LIST, above the definitions.
+//
+// SIX PARALLEL COLUMNS, each LEVELPKG_TRIG_SLOTS bytes long whatever this level
+// authors, because the engine addresses them as fixed bases: a column that
+// shrank with the trigger count would move every column above it and the
+// engine's labels would point at the wrong data. The unused tail of each column
+// is left at zero.
+//
+// THE ROWS ARE ABSOLUTE AND SIXTEEN-BIT -- Stage 1's contract -- split low and
+// high so the due test is two compares against the cursor with no arithmetic.
+// ---------------------------------------------------------------------------
+* = LEVELPKG_TRIG "level wave triggers"
+levelTrigStart:
+.for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
+    .byte t < WAVE_TRIGGERS ? <trigRow.get(t) : 0
+}
+.for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
+    .byte t < WAVE_TRIGGERS ? >trigRow.get(t) : 0
+}
+.for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
+    .byte t < WAVE_TRIGGERS ? trigDef.get(t) : 0
+}
+.for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
+    .byte t < WAVE_TRIGGERS ? trigSpecies.get(t) : 0
+}
+.for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
+    .byte t < WAVE_TRIGGERS ? trigFire.get(t) : 0
+}
+.for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
+    .byte t < WAVE_TRIGGERS ? trigSide.get(t) : 0
+}
+levelTrigEnd:
+
+.if (levelTrigEnd - levelTrigStart != LEVELPKG_TRIG_COLS * LEVELPKG_TRIG_SLOTS) {
+    .error "the emitted trigger list is not LEVELPKG_TRIG_COLS columns of LEVELPKG_TRIG_SLOTS"
+}
+.if (levelTrigEnd > LEVELPKG_ENC + LEVELPKG_ENC_MAX) {
+    .error "the trigger list has run past the encounter reservation"
+}
+.if (WAVE_TRIGGERS > LEVELPKG_TRIG_SLOTS) {
+    .error "more authored triggers than the package reserves room for"
+}
+
+// ---------------------------------------------------------------------------
 // THE SIGNATURE, emitted LAST and highest, so that finding it proves the WHOLE
 // file arrived rather than merely its first sector.
 // ---------------------------------------------------------------------------

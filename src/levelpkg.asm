@@ -61,6 +61,37 @@
 .const LEVELPKG_MOVE     = LEVELPKG_ENC
 .const LEVELPKG_MOVE_MAX = 256
 
+// --- the wave definitions, above the movement pool --------------------------
+// Ten bytes each (WAVEDEF_SIZE): count, interval, startX lo/hi, startY, xStep,
+// yStep, colour, launch heading, movement-program offset. The director reads
+// them as `waveDefTable + n,y` with y = def * 10, so the whole table has to stay
+// inside one byte of index: 25 definitions is the arithmetic ceiling and 32
+// would already overflow it.
+//
+// THE BUDGET IS THE ADDRESSING CEILING, NOT A ROUND NUMBER. waveDefBase forms
+// the index as def * 10 in a single byte, so the last reachable definition is
+// 25 (250) and a twenty-seventh could be stored but never read. The table is
+// therefore exactly 26 records -- every byte of it addressable -- and the 60
+// bytes that a rounder 32-record table would have wasted go to the triggers,
+// which have a real use for them.
+.const LEVELPKG_WAVEDEF     = LEVELPKG_MOVE + LEVELPKG_MOVE_MAX     // $f630
+.const LEVELPKG_WAVEDEF_SLOTS = 26
+.const LEVELPKG_WAVEDEF_MAX = LEVELPKG_WAVEDEF_SLOTS * 10           // 260
+
+// --- the absolute trigger list, above the definitions -----------------------
+// SIX PARALLEL COLUMNS, not interleaved records: rowLo, rowHi, def, species,
+// fire, side. The director indexes every one of them with the SAME cursor
+// (`lda waveTrigDef,y` and so on), so parallel columns cost one `absolute,y`
+// per field and nothing else. An interleaved record would need the cursor
+// multiplied by six on every read -- strictly more work for the same data.
+//
+// Each column is one byte per trigger, so the whole list is six bytes a trigger
+// and the cursor is a byte: 255 triggers is the addressing ceiling.
+.const LEVELPKG_TRIG        = LEVELPKG_WAVEDEF + LEVELPKG_WAVEDEF_MAX   // $f734
+.const LEVELPKG_TRIG_COLS   = 6
+.const LEVELPKG_TRIG_MAX    = LEVELPKG_ENC_MAX - LEVELPKG_MOVE_MAX - LEVELPKG_WAVEDEF_MAX
+.const LEVELPKG_TRIG_SLOTS  = floor(LEVELPKG_TRIG_MAX / LEVELPKG_TRIG_COLS)   // 180
+
 // --- the signature ----------------------------------------------------------
 // FOUR BYTES AT THE VERY TOP OF THE REGION, so that "did the package actually
 // load?" is one comparison rather than an inference from whether the terrain
@@ -100,6 +131,27 @@
 }
 .if (LEVELPKG_MOVE_MAX > 256) {
     .error "wmStage is one byte: a movement pool over 256 bytes cannot be addressed"
+}
+.if (LEVELPKG_WAVEDEF != LEVELPKG_MOVE + LEVELPKG_MOVE_MAX) {
+    .error "the wave definitions must follow the movement pool with no gap"
+}
+.if (LEVELPKG_TRIG != LEVELPKG_WAVEDEF + LEVELPKG_WAVEDEF_MAX) {
+    .error "the trigger list must follow the wave definitions with no gap"
+}
+// THE THREE COMPONENTS MUST FILL THE RESERVATION AND NOT ONE BYTE MORE. The
+// signature sits immediately above it, so an overrun would be silently eaten by
+// the spare run and only show up as a corrupt signature at boot.
+.if (LEVELPKG_MOVE_MAX + LEVELPKG_WAVEDEF_MAX + LEVELPKG_TRIG_MAX != LEVELPKG_ENC_MAX) {
+    .error "the encounter components do not add up to the encounter reservation"
+}
+.if (LEVELPKG_TRIG + LEVELPKG_TRIG_MAX > LEVELPKG_SIG) {
+    .error "the trigger list runs into the package signature"
+}
+.if (LEVELPKG_TRIG_SLOTS > 255) {
+    .error "the trigger cursor is one byte: more than 255 triggers cannot be reached"
+}
+.if ((LEVELPKG_WAVEDEF_SLOTS - 1) * 10 > 255) {
+    .error "waveDefBase forms def * WAVEDEF_SIZE in one byte: too many definitions"
 }
 .if (LEVELPKG_SIG + 4 > LEVELPKG_TOP + 1) {
     .error "the signature runs past the top of the level package"

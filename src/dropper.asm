@@ -56,8 +56,9 @@
 // AUTHORED, NOT RANDOM, and carried on the trigger list beside the species it
 // belongs to -- see trigSide in src/waves.asm. The two sides are the same
 // routine with two constants; there is no mirrored copy of anything.
-.const DROP_SIDE_LEFT  = 0
-.const DROP_SIDE_RIGHT = 1
+// The two values live in src/encounter_format.asm: a level's trigger list emits
+// them, so the package build has to be able to name them too.
+#import "encounter_format.asm"
 
 // Where it comes in. Both are outside the visible window (24..343) by enough
 // that the VIC clips the sprite column by column as it arrives, so a Dropper

@@ -28,10 +28,11 @@
 // ===========================================================================
 // ENEMY SPECIES — the one thing that distinguishes the two enemies
 // ===========================================================================
-// The animation's step count has to be named before the species are, because a
-// species' value is derived from it. The cadence itself is documented further
-// down, beside ENEMY_ANIM_SHIFT.
-.const ENEMY_ANIM_STEPS  = 8        // steps in a full animation sequence
+// THE SPECIES VOCABULARY LIVES IN ITS OWN FILE, because a level package emits
+// these values as authored bytes and the two builds share no labels. See
+// src/encounter_format.asm for ENEMY_ANIM_STEPS and the SPECIES_* constants;
+// what a species DOES is still this file's business.
+#import "encounter_format.asm"
 
 // There are two enemy PRESENTATIONS and, so far, exactly one enemy BEHAVIOUR.
 // The species byte is what says which artwork an object wears, and it is a
@@ -56,9 +57,6 @@
 // species would need a shift or a branch on the hottest per-enemy path there
 // is. Everything else treats these as opaque identities -- compare against the
 // CONSTANT, never against a literal, and nothing has to know.
-.const SPECIES_RING      = 0 * ENEMY_ANIM_STEPS     // the Sonic Ring
-.const SPECIES_DROPPER   = 1 * ENEMY_ANIM_STEPS     // the Orbital Dropper
-.const SPECIES_COUNT     = 2
 
 // --- what a species can DO: the first behaviour to hang off the identity ----
 // Until now a species was purely cosmetic -- "a per-species stat block, because
