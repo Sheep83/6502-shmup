@@ -106,7 +106,7 @@
 }
 
 * = TERRAIN_GLYPHS "terrain glyphs"
-#import "level1/stage_charset.asm"      // declares terrainGlyphs/terrainGlyphsEnd
+#import "stage_charset.asm"      // declares terrainGlyphs/terrainGlyphsEnd
                                         // and self-checks its own byte count
 
 .if (terrainGlyphsEnd > TERRAIN_CHARSET + $800) {
@@ -117,23 +117,43 @@
 }
 
 // ===========================================================================
-// The authored map. CPU-ONLY DATA, so it lives OUTSIDE VIC bank 0.
+// The authored map. IT IS NOT IN THIS BINARY AT ALL.
 // ===========================================================================
-// The VIC never reads any of it -- only the character codes this file DERIVES
-// from it ever reach a screen page -- so putting it in bank 0 would spend the
-// scarcest memory in the machine on data that does not need to be there.
-* = $5800 "terrain map data"
-#import "level1/stage_map.asm"
-terrainMapEnd:
+// The map and the metatile definitions live in the LEVEL PACKAGE -- a second
+// file, loaded from disk into RAM under the banked-out KERNAL at boot. See
+// src/levelpkg.asm for the contract, src/level_package.asm for the bytes and
+// src/levelload.asm for the load.
+//
+// WHY IT MOVED. A 440-metatile-row stage is 4,400 bytes of rows, and the whole
+// machine holds exactly one free run that large: $e000-$fff9, 8,186 bytes of
+// RAM underneath the KERNAL ROM. The next largest is 1,478. The old $5800
+// segment could hold 150 metatile rows at this level's definition count and no
+// rearrangement below $d000 gets near 4,400 without moving three working
+// modules. reports/definitive-440-row-memory-audit.md is the evidence.
+//
+// NOTHING ELSE IN THIS FILE CHANGED, and that is the point. The row lookup
+// already builds a full sixteen-bit pointer -- trSrc = stageMetatileRows +
+// row*10, dereferenced `lda (trSrc),y` -- so the map has always been
+// position-independent and relocating it costs not one cycle. The defs are read
+// once by trInit and transposed into trTiles; after that they are cold.
+//
+// THESE ARE LABELS, NOT DATA. The engine declares where the package puts things
+// and reads them; the package emits there. The two builds share no symbols, only
+// the addresses in src/levelpkg.asm, which is why the size guards that used to
+// live here now live beside the bytes in src/level_package.asm -- this build
+// cannot measure data it does not contain.
+.label metatileDefs      = LEVELPKG_DEFS
+.label stageMetatileRows = LEVELPKG_MAP
 
-.if (METATILE_DEFS_END - metatileDefs != STAGE_METATILE_COUNT * 16) {
-    .error "metatileDefs size does not match STAGE_METATILE_COUNT * 16"
+// What this build CAN still check is that the level it was compiled against
+// fits the region the package was compiled against. Both read the same
+// stage_config.asm, so a level too tall for its budget fails here as well as
+// there, and it fails whichever of the two is assembled first.
+.if (STAGE_METATILE_ROWS * METATILES_PER_ROW > LEVELPKG_MAP_MAX) {
+    .error "the stage map has outgrown the level package's map budget"
 }
-.if (STAGE_METATILE_ROWS_END - stageMetatileRows != STAGE_METATILE_ROWS * METATILES_PER_ROW) {
-    .error "stageMetatileRows size does not match STAGE_METATILE_ROWS * METATILES_PER_ROW"
-}
-.if (terrainMapEnd > $6000) {
-    .error "the terrain map data has outgrown its $5800 segment"
+.if (STAGE_METATILE_COUNT * 16 > LEVELPKG_DEFS_MAX) {
+    .error "the metatile definitions have outgrown the level package's budget"
 }
 
 // ===========================================================================

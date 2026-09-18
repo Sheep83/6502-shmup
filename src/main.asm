@@ -72,8 +72,14 @@
 // before terrain.asm, so the value has to exist up here or the raster splits
 // cannot name it. Restating the colour in a second place would be the bug.
 // ---------------------------------------------------------------------------
-#import "level1/stage_config.asm"
-#import "level1/stage_enemies.asm"      // the level's claim on the enemy
+// THE LEVEL PACKAGE CONTRACT, imported before everything that reads it.
+// Constants only: where the separately loaded level file puts the stage map,
+// the metatile definitions and its signature. src/level_package.asm imports the
+// same file and emits at those addresses, so the two builds cannot disagree.
+#import "levelpkg.asm"
+
+#import "stage_config.asm"
+#import "stage_enemies.asm"      // the level's claim on the enemy
                                         // sprite window; constants only, and
                                         // needed before enemy.asm places art
 
@@ -436,6 +442,12 @@ BasicUpstart2(entry)
                                         // names it back except two call sites
                                         // and one role compare
 
+// THE LEVEL LOADER, last of all. It names only the KERNAL and the package
+// contract, and exactly one thing in this file calls it: the first instruction
+// of entry. Kept out of main's own segment so that the boot-only code and the
+// per-frame code cannot quietly grow into each other.
+#import "levelload.asm"
+
 // OUTSIDE VIC BANK 0, with the player, the scroller, the weapon, the object
 // pool, the enemy and collision. Every byte in this file is main-thread code or
 // main-thread data -- entry, mainLoop, gameFrame, gameInit and the diagnostic
@@ -443,7 +455,41 @@ BasicUpstart2(entry)
 * = $5000 "main"
 
 entry:
+    // ---- THE LEVEL COMES OFF DISK, AND IT COMES FIRST ---------------------
+    // Before the sei below, before $d011, before any subsystem. This is the
+    // only window in which the KERNAL can be asked to load anything: $01 is
+    // still $37 so the ROM at $ffd5 is a routine rather than level data, and
+    // interrupts are still the ones BASIC left running. installRenderer
+    // switches to $35 and takes the vector hundreds of instructions later.
+    //
+    // terrainInit and scrollInit -- the two routines that READ the package --
+    // both run below, so nothing can observe the gap. A failed load never
+    // returns; see src/levelload.asm.
+    jsr levelLoad
+
     sei
+
+    // ---- AND THE KERNAL GOES NOW, NOT AT installRenderer -------------------
+    // THE LEVEL PACKAGE IS UNREADABLE UNTIL IT DOES, and that is the whole
+    // reason this store is here rather than three hundred instructions later.
+    //
+    // A 6510 store at $e000-$ffff always reaches RAM, but a LOAD from those
+    // addresses returns the ROM while HIRAM is set. The package is at
+    // $e000-$fff9. So with $01 = $37 the bytes are unquestionably in memory and
+    // every read of them returns a byte of KERNAL instead -- terrainInit would
+    // transpose ROM into the metatile tables and scrollInit would print ROM
+    // across both screen pages, which is exactly what the first attempt at this
+    // did. It looked like a corrupt map; it was a banking mistake.
+    //
+    // Both of those routines run below, so the switch has to be above them.
+    // Nothing between here and installRenderer needs the KERNAL: src/levelload.asm
+    // is the only caller of a ROM routine in the whole project, and it has
+    // already returned. Interrupts stay off until installRenderer has put its
+    // own vector at $fffe, so nothing can vector through the RAM that replaced
+    // the ROM's.
+    lda #$35
+    sta $01
+
     lda #$0b
     sta $d011                           // screen off while we set up
     lda #$00
@@ -1193,4 +1239,4 @@ gameSpanOver:  .byte 0                  // frames whose span exceeded 255 lines:
 gameOverrun:   .byte 0                  // displayed frames the main thread did
                                         // not prepare a frame for. MUST read 0.
 
-.if (* > $5400) { .error "main has run into the token encounter code at $5400" }
+.if (* > $5300) { .error "main has run into the level loader at $5300" }

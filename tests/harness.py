@@ -20,6 +20,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PRG  = ROOT / "build/shmup.prg"
+# THE MACHINE BOOTS FROM THE DISK IMAGE, NOT FROM THE PRG.
+#
+# The engine loads its level package ("LEVEL1", to $e000) from disk during the
+# first instruction of entry, so a bare PRG is no longer a runnable artefact:
+# autostarting one leaves no drive for the KERNAL to load from and the boot
+# halts on a red border by design. Every launch therefore attaches the d64 that
+# `make build` now always produces.
+D64  = ROOT / "build/shmup.d64"
 SYM  = ROOT / "build/main.vs"
 X64  = "/opt/homebrew/bin/x64sc"
 
@@ -127,6 +135,17 @@ class Vice:
         they tested before. A test that wants the lifecycle itself passes
         start_game=False and drives it by hand.
         """
+        # THE ARGUMENT IS KEPT, THE ARTEFACT IS NOT.
+        #
+        # Every test in this suite passes PRG, and every one of them means "boot
+        # the game". Since the engine gained its separately loaded level package
+        # that is no longer the PRG -- a bare PRG has no drive to load "LEVEL1"
+        # from and halts on a red border by design -- so the one place that owns
+        # bringing a machine up substitutes the disk image beside it. Doing it
+        # here rather than in twenty call sites means there is exactly one line
+        # in the suite that knows the boot artefact changed.
+        if str(prg).endswith(".prg"):
+            prg = D64
         self.port, self.proc, self.mon = port, None, None
         try:
             # -console: an automated suite must never open a window (it
@@ -134,7 +153,7 @@ class Vice:
             args = [X64, "-console", "+saveres", "-pal", "+sound",
                     "-remotemonitor",
                     "-remotemonitoraddress", f"ip4://127.0.0.1:{port}",
-                    "-autostartprgmode", "1", "-autostart", str(prg)]
+                    "-autostart", str(prg)]
             if warp: args.insert(1, "-warp")
             squatter = port_owner(port)
             if squatter is not None:

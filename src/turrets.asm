@@ -32,7 +32,7 @@
 //   world row R+1 , col C     BL = 228      col C+1   BR = 229
 // ===========================================================================
 
-#import "level1/stage_turrets.asm"      // TURRET_TOTAL, turretCols, turretRows.
+#import "stage_turrets.asm"      // TURRET_TOTAL, turretCols, turretRows.
                                         // Constants and lists only: it emits no
                                         // bytes and moves no program counter.
 
@@ -192,11 +192,23 @@ turretGlyphsEnd:
         }
     }
 }
-.if (TERRAIN_STAGE_ROWS > 511) {
-    .error "turretOverlayRow derives metatileRow with two shifts of a <=9-bit stage row"
+// ELEVEN BITS OF STAGE ROW AND NINE OF METATILE ROW, since the level package
+// made 440-metatile-row stages possible. Both numbers used to be smaller and
+// neither limit was visible at 105 rows:
+//
+//   * turretOverlayRow derived metatileRow with two shifts that dropped
+//     everything above bit 8 of the stage row -- correct to 511 rows, silently
+//     wrong above it;
+//   * turretAtMetaRow was one page indexed by one byte -- correct to 255
+//     metatile rows and a build error above it.
+//
+// Both now carry the full width. The table is two pages and the derivation is a
+// real sixteen-bit shift; see turretMetaRow below.
+.if (TERRAIN_STAGE_ROWS > 2047) {
+    .error "a stage row no longer fits the eleven bits the turret derivation carries"
 }
-.if (STAGE_METATILE_ROWS > 255) {
-    .error "turretAtMetaRow is indexed by one byte: the stage has too many metatile rows"
+.if (STAGE_METATILE_ROWS > 512) {
+    .error "turretAtMetaRow is two pages: the stage has too many metatile rows"
 }
 .if (TURRET_TOTAL > 127) {
     .error "a turret index must stay positive: turretOverlayRow tests TURRET_NONE with bmi"
@@ -217,19 +229,36 @@ turretGlyphsEnd:
 // table, a build with no errors, and every turret invisible. .fill truncates to
 // a byte on the way out, so nothing complains. Every division of an authored
 // row in this file is floored explicitly, including inside the guards.
+// THE LIST IS THE WHOLE TABLE, not just the stage. Rows past the end of the
+// level keep TURRET_NONE so that the two-page lookup can select its base from
+// bit 8 alone, without also having to know how tall this particular level is.
 .var turretAtRow = List()
-.for (var m = 0; m < STAGE_METATILE_ROWS; m++) {
+.for (var m = 0; m < 2 * 256; m++) {
     .eval turretAtRow.add(TURRET_NONE)
 }
 .for (var t = 0; t < TURRET_TOTAL; t++) {
     .eval turretAtRow.set(floor(turretRows.get(t) / METATILE_H), t)
 }
 
-* = $6d00 "turret tables"
+// MOVED FROM $6d00 TO THE RUN THE TERRAIN MAP VACATED.
+//
+// turretAtMetaRow became two pages when the level package made 440-row stages
+// possible, and $6d00 had 256 bytes before the turret state at $6e00. $5800 is
+// where the stage map used to live; it left for the level package at $e000 and
+// took 1,050 bytes of this level -- 4,400 for a full-length one -- with it,
+// leaving $5800-$63ff free. This is the first tenant of that space and it is
+// still CPU-only data outside VIC bank 0, exactly as it was.
+* = $5800 "turret tables"
 
 // THE LOOKUP. One byte per metatile row of the stage: a turret index, or
 // TURRET_NONE. This is the only thing the row renderer consults.
-turretAtMetaRow: .fill STAGE_METATILE_ROWS, turretAtRow.get(i)
+// TWO PAGES, ALWAYS, whatever the stage height. A 440-row stage needs 440
+// entries and a byte index reaches 256, so the lookup selects one of two bases
+// from bit 8 of the metatile row. Filling the unused tail with TURRET_NONE
+// rather than sizing the table to the stage keeps that selection a compare
+// against a constant instead of against the level's height.
+.const TURRET_META_PAGES = 2
+turretAtMetaRow: .fill TURRET_META_PAGES * 256, turretAtRow.get(i)
 
 // metatileRow, derived from the authored world row. Not read by the renderer
 // -- the table above already answers its question -- but it is what the table
@@ -258,8 +287,8 @@ turretPulseTable: .byte 1, 2, 7, 2
 }
 turretTablesEnd:
 
-.if (turretTablesEnd > $6e00) {
-    .error "the turret tables have grown into the turret state at $6e00"
+.if (turretTablesEnd > $6400) {
+    .error "the turret tables have grown past the run the terrain map vacated"
 }
 
 // ===========================================================================
@@ -390,8 +419,14 @@ trtColour:     .byte 0                  // the colour being painted
 trtPair:       .byte 0                  // 1 = paint trtRow and trtRow + 1
 trtPageHi:     .byte 0                  // high byte of the page being repaired
 trtRepairLim:  .byte 0                  // repair matrix rows BELOW this one
-trtScanRow:    .byte 0                  // metatile row the world scan is on
+trtScanLo:     .byte 0                  // metatile row the world scan is on,
+trtScanHi:     .byte 0                  // SIXTEEN BITS: a 440-row stage has 440
+                                        // metatile rows and the cursor wraps
+                                        // against that, not against 256
 trtScanLeft:   .byte 0                  // metatile rows left to scan
+trtMetaHi:     .byte 0                  // high half of a derived metatile row,
+                                        // written by turretOverlayRow on the
+                                        // row-generation path
 turretStateEnd:
 
 .if (turretStateEnd > $6f00) {
@@ -726,47 +761,69 @@ turretDeriveShadow:
     bpl !clear-
 
     // ---- which metatile rows can the page reach? --------------------------
-    // m0 = thatRow / METATILE_H, and the scan starts one row below it. The
-    // stage row is at most nine bits (guarded above), so two shifts land the
-    // whole quotient in A, and m0 is at most 104 -- comfortably positive, which
-    // is what makes `bpl` a correct test for the one row that underflows.
+    // m0 = thatRow / METATILE_H, and the scan starts one row below it.
+    //
+    // SIXTEEN BITS THROUGHOUT, because a 440-row stage has 1,760 stage rows and
+    // 440 metatile rows and neither fits a byte. This runs ONCE PER COARSE STEP
+    // -- one frame in eight, on the idle frame the scroller leaves for it -- so
+    // the wider arithmetic costs nothing that can be measured, and the eight
+    // iterations below are the same eight they always were.
     lda trtNextHi
     lsr
+    sta trtScanHi
     lda trtNextLo
     ror
-    lsr
+    lsr trtScanHi
+    ror                                 // A:trtScanHi = thatRow >> 2 = m0
     sec
     sbc #1
-    bpl !haveScan+
-    clc
-    adc #STAGE_METATILE_ROWS            // row 0 scans from the stage's last
+    sta trtScanLo
+    lda trtScanHi
+    sbc #0
+    sta trtScanHi
+    bpl !haveScan+                      // m0 was 0: the scan starts at the
+    lda #<(STAGE_METATILE_ROWS - 1)     // stage's LAST metatile row and wraps
+    sta trtScanLo                       // forward from there
+    lda #>(STAGE_METATILE_ROWS - 1)
+    sta trtScanHi
 !haveScan:
 
-    // THE SCAN KEEPS ITS CURSOR IN X AND ITS COUNTER IN Y, spilling them only
-    // on the rare iteration that actually finds a turret: 18 cycles for an
-    // empty row against 39 if both were reloaded from memory each time.
-    tax                                 // X = the first metatile row to look at
     ldy #TURRET_SCAN_ROWS
+    sty trtScanLeft
 !scanRow:
+    ldx trtScanLo
+    lda trtScanHi
+    bne !high+
     lda turretAtMetaRow,x               // the page generator's table, doing its
-    bpl !found+                         // second job for free
+    jmp !have+                          // second job for free
+!high:
+    lda turretAtMetaRow + 256,x
+!have:
+    bpl !found+
 !scanNext:
-    inx
-    cpx #STAGE_METATILE_ROWS
+    inc trtScanLo                       // ++, sixteen bits
+    bne !noCarry+
+    inc trtScanHi
+!noCarry:
+    lda trtScanHi                       // wrapped past the end of the stage?
+    cmp #>STAGE_METATILE_ROWS
     bcc !noWrap+
-    ldx #0                              // the stage wraps and so does the scan
+    bne !wrap+
+    lda trtScanLo
+    cmp #<STAGE_METATILE_ROWS
+    bcc !noWrap+
+!wrap:
+    lda #0                              // the stage wraps and so does the scan
+    sta trtScanLo
+    sta trtScanHi
 !noWrap:
-    dey
+    dec trtScanLeft
     bne !scanRow-
     rts
 
 !found:
-    stx trtScanRow                      // spilled only here, and this happens
-    sty trtScanLeft                     // at most twice in this level
-    tax
+    tax                                 // A held the turret index
     jsr turretDeriveOne
-    ldx trtScanRow
-    ldy trtScanLeft
     jmp !scanNext-
 
 // ---------------------------------------------------------------------------
@@ -951,18 +1008,30 @@ turretOverlayRow:
     bcs turretOverlayNone               // sub-row 0 or 3: nothing here, and
     sta trtHalf                         // this is where half the rows leave
 
-    // ---- metatileRow = stageRow / METATILE_H, and it fits a byte ----------
+    // ---- metatileRow = stageRow / METATILE_H, in NINE bits ---------------
+    // A REAL SIXTEEN-BIT SHIFT, not two shifts through the accumulator. The old
+    // form loaded the high byte, shifted it once for the carry and then threw it
+    // away, which is exact only while the stage row fits nine bits. A 440-row
+    // stage is 1,760 rows and needs eleven, so the high half is now kept.
     lda rrStageHi
-    lsr                                 // C = bit 8 of the stage row
+    lsr
+    sta trtMetaHi
     lda rrStageLo
     ror                                 // A = stageRow >> 1
-    lsr                                 // A = stageRow >> 2 = metatileRow
+    lsr trtMetaHi
+    ror                                 // A:trtMetaHi = stageRow >> 2
     tax
 
-    // ---- one lookup ------------------------------------------------------
+    // ---- one lookup, from whichever page bit 8 names ---------------------
     // TURRET_NONE is $ff and a turret index is at most 7, so the "is there
-    // one" test is the sign bit of the byte just read.
+    // one" test is still the sign bit of the byte just read.
+    lda trtMetaHi
+    bne !high+
     lda turretAtMetaRow,x
+    jmp !have+
+!high:
+    lda turretAtMetaRow + 256,x
+!have:
     bmi turretOverlayNone
     tax                                 // X = the turret, for every table below
 

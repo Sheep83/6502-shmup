@@ -11,6 +11,31 @@ ROOT  := $(CURDIR)
 PRG   := $(ROOT)/build/shmup.prg
 D64   := $(ROOT)/build/shmup.d64
 
+# THE LEVEL PACKAGE, a second loadable artefact.
+#
+# $e000-$fff9 is RAM under the banked-out KERNAL and a single PRG cannot reach
+# it: a contiguous file spanning $d000-$dfff writes into the I/O registers on
+# the way past. So the level is its own file, loaded by the KERNAL at boot --
+# which is also the shape a multi-level game and the level editor's export
+# workflow both want. See reports/definitive-440-row-memory-audit.md.
+LEVELPRG := $(ROOT)/build/level1.prg
+
+# WHICH LEVEL DIRECTORY THE BUILD COMPILES AGAINST.
+#
+# The engine imports its level files by bare name and KickAssembler resolves
+# them through -libdir, so pointing this elsewhere swaps the entire authored
+# level without editing a line of source. Production is src/level1; the 420-row
+# capacity proof generates its own directory under build/ and overrides this.
+LEVELDIR ?= $(ROOT)/src/level1
+
+# The level editor emits metatileDefs FIRST and stageMetatileRows second, while
+# the audited package contract puts the MAP at the base of the region. The two
+# halves are therefore separated mechanically at build time, byte for byte,
+# rather than by hand -- so a regenerated map still drops straight in.
+MAPSRC   := $(LEVELDIR)/stage_map.asm
+MAPROWS  := $(ROOT)/build/stage_map_rows.asm
+MAPDEFS  := $(ROOT)/build/stage_map_defs.asm
+
 # The acceptance launch options, defined ONCE.
 #
 # They live here and nowhere else because drift between two copies of this
@@ -110,26 +135,43 @@ KEYSET    := -keyset
 VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 
 
-.PHONY: all build d64 test
+.PHONY: all build d64 proof420 test
 .PHONY: test-boot test-production test-turret-regression
 .PHONY: test-encounter-director test-player-ship test-flight-paths test-ingress-egress test-clip-scratch
 .PHONY: test-sfx test-enemy-fire test-pickup test-lifecycle test-player-death test-boss
-.PHONY: run run-d64 clean
+.PHONY: run run-proof420 run-d64 clean
 
 all: build
 
 # Fixed output location. No per-run directories, ever.
+#
+# THE DISK IMAGE IS NOW PART OF THE BUILD, not an optional extra. The engine
+# loads its level from disk at boot, so a bare PRG is no longer a runnable
+# artefact and every test launches the d64.
 build:
 	@mkdir -p build
-	java -jar "$(KA)" src/main.asm -odir "$(ROOT)/build" -o "$(PRG)" -vicesymbols
-
-# A bootable disk image of the same binary. Nothing in the test path needs it;
-# it exists so the program can be launched the way real hardware would load it.
-d64: build
+	@awk '/^metatileDefs:/,/^METATILE_DEFS_END:/' "$(MAPSRC)" > "$(MAPDEFS)"
+	@awk '/^stageMetatileRows:/,/^STAGE_METATILE_ROWS_END:/' "$(MAPSRC)" > "$(MAPROWS)"
+	java -jar "$(KA)" src/main.asm -libdir "$(LEVELDIR)" \
+	      -odir "$(ROOT)/build" -o "$(PRG)" -vicesymbols
+	java -jar "$(KA)" src/level_package.asm -libdir "$(ROOT)/build" \
+	      -libdir "$(LEVELDIR)" -odir "$(ROOT)/build" -o "$(LEVELPRG)"
 	@rm -f "$(D64)"
 	@$(C1541) -format "6502engine,01" d64 "$(D64)" >/dev/null
 	@$(C1541) "$(D64)" -write "$(PRG)" engine >/dev/null
+	@$(C1541) "$(D64)" -write "$(LEVELPRG)" level1 >/dev/null
+
+# The disk image is built by `build` above; this target remains so that
+# `make d64` still means something to anyone who types it.
+d64: build
 	@echo "wrote $(D64)"
+
+# THE 420-ROW CAPACITY PROOF. Generates the four-copy stage into build/ and
+# builds against it, leaving src/level1 -- the authored production level --
+# untouched. `make build` afterwards returns the default content.
+proof420:
+	@python3 tools/gen_proof420.py "$(ROOT)/build/proof420"
+	@$(MAKE) --no-print-directory build LEVELDIR="$(ROOT)/build/proof420"
 
 
 
@@ -344,8 +386,20 @@ test-clip-scratch: build
 
 
 
+# THE DISK, NOT THE PRG. The engine loads its level package from disk during
+# the first instruction of entry; autostarting a bare PRG leaves no drive to
+# load "LEVEL1" from and the boot halts on a red border by design.
 run: build
-	$(X64) $(VICE_OPTS) -autostartprgmode 1 -autostart "$(PRG)"
+	$(X64) $(VICE_OPTS) -autostart "$(D64)"
+
+# THE 420-ROW CAPACITY PROOF, regenerated, built and launched in one command.
+#
+# `proof420` has already put the long stage into the disk image, so this only
+# has to start the machine -- the same line `run` uses, and deliberately not a
+# second copy of the option list. `make run` still gives the authored 105-row
+# production level; nothing here changes what the default build is.
+run-proof420: proof420
+	$(X64) $(VICE_OPTS) -autostart "$(D64)"
 
 run-d64: d64
 	$(X64) $(VICE_OPTS) -autostart "$(D64)"
