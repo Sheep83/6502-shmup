@@ -509,10 +509,9 @@ class EditorController:
             return True
         return False
 
-    # ---- encounters: read only in Phase 5A -------------------------------
+    # ---- encounters: counts -----------------------------------------------
     def encounter_summary(self):
-        """Counts only. Authoring is Phase 5B; this is here so the GUI can say
-        what it is carrying rather than appear to have lost it."""
+        """The counts the encounter workspace's status strip reports."""
         p = self.project
         return {"movementPrograms": len(p.movement_programs),
                 "waveDefinitions": len(p.wave_definitions),
@@ -527,3 +526,404 @@ class EditorController:
                 f"{s['waveDefinitions']} wave defs · "
                 f"{s['triggers']} triggers · "
                 f"no-spawn {s['noSpawnRow']}")
+
+    # =======================================================================
+    # ENCOUNTER AUTHORING (Phase 5B)
+    # =======================================================================
+    # Every operation below is a MODEL operation with no widget in it, so the
+    # authoring guarantees -- ordering, reference safety, capacity -- are
+    # provable without a display. `encounters_ui` drives these and draws them.
+    #
+    # NONE OF THEM VALIDATES. validation_v6 is the one rule set (the brief's
+    # "do not invent a second"), so an operation that would produce an invalid
+    # project still performs it and the workspace shows the validator's own
+    # error. The exceptions are the STRUCTURAL refusals -- a duplicate id, a
+    # delete that would strand a reference -- which are not opinions about
+    # content but operations that cannot be expressed at all.
+
+    def capacity(self):
+        """Live capacity, for the status strip. Unused capacity is not a fault."""
+        p = self.project
+        return {
+            "triggers": (len(p.triggers), C.MAX_TRIGGERS),
+            "waveDefinitions": (len(p.wave_definitions), C.MAX_WAVE_DEFINITIONS),
+            "movementRecords": (p.movement_records, C.MAX_MOVEMENT_RECORDS),
+            "movementBytes": (p.movement_bytes, C.LEVELPKG_MOVE_MAX),
+        }
+
+    # ---- the stage's quiet zone -------------------------------------------
+    def set_no_spawn_row(self, value):
+        """The boundary past which no encounter may START.
+
+        Not clamped and not second-guessed: a value that strands a trigger is a
+        validation error the author must see, exactly as typing the same number
+        into the JSON would be.
+        """
+        self.project.stage.no_spawn_row = int(value)
+
+    def quiet_zone(self):
+        """What the region after noSpawnRow costs, in the engine's own terms."""
+        st = self.project.stage
+        rows = max(0, st.playable_progress - st.no_spawn_row)
+        return {"noSpawnRow": st.no_spawn_row,
+                "playableProgress": st.playable_progress,
+                "rows": rows,
+                # 1 px/frame, 8 px to a coarse row, 50 Hz PAL.
+                "seconds": round(rows * 8 / 50.0, 1)}
+
+    # ---- triggers ----------------------------------------------------------
+    def sort_triggers(self):
+        """Non-decreasing by worldProgress, STABLY.
+
+        The director's cursor only walks forward, so a trigger authored behind
+        the one in front of it could never become due. Equal rows ARE legal --
+        the validator only rejects a DECREASE -- and two triggers on one row is
+        how a mixed-species moment is authored, so the sort must be stable or
+        re-saving would shuffle them.
+        """
+        self.project.triggers.sort(key=lambda t: t.world_progress)
+
+    def trigger_index_of(self, trigger):
+        for i, t in enumerate(self.project.triggers):
+            if t is trigger:
+                return i
+        return None
+
+    def suggested_species(self, at_index=None):
+        """A default that does not immediately break the alternation rule.
+
+        The engine asserts that consecutive authored waves use different
+        species. This is a DEFAULT for a new trigger, not a correction of an
+        existing one -- nothing here rewrites what an author chose.
+        """
+        ts = self.project.triggers
+        if not ts:
+            return "RING"
+        prev = ts[at_index - 1] if at_index else ts[-1]
+        return "DROPPER" if prev.species == "RING" else "RING"
+
+    def add_trigger(self, world_progress=None, wave_definition=None,
+                    species=None, fire_mask=None, dropper_side="LEFT"):
+        """Author one moment. Returns its index after sorting."""
+        if len(self.project.triggers) >= C.MAX_TRIGGERS:
+            raise ControllerError(
+                f"this level already has the maximum of {C.MAX_TRIGGERS} triggers")
+        if wave_definition is None:
+            if not self.project.wave_definitions:
+                raise ControllerError(
+                    "a trigger names a wave definition, and this project has "
+                    "none yet -- create one first")
+            wave_definition = self.project.wave_definitions[0].id
+        if world_progress is None:
+            world_progress = (self.project.triggers[-1].world_progress + 1
+                              if self.project.triggers else 0)
+        t = project_v6.Trigger(
+            world_progress=int(world_progress),
+            wave_definition=str(wave_definition),
+            species=species or self.suggested_species(),
+            fire_mask=list(fire_mask or []),
+            dropper_side=dropper_side)
+        self.project.triggers.append(t)
+        self.sort_triggers()
+        return self.trigger_index_of(t)
+
+    def update_trigger(self, index, **fields):
+        """Change named fields of one trigger. Returns its index after sorting.
+
+        `species` and `dropperSide` are stored symbolically; `fireMask` is a
+        list of member indices. Nothing is coerced -- an out-of-range value
+        reaches the validator, which is what tells the author what is wrong.
+        """
+        t = self.project.triggers[index]
+        if "world_progress" in fields:
+            t.world_progress = int(fields["world_progress"])
+        if "wave_definition" in fields:
+            t.wave_definition = str(fields["wave_definition"])
+        if "species" in fields:
+            t.species = str(fields["species"])
+            # A RING carries a side and ignores it; LEFT is the canonical
+            # neutral the validator expects, so switching species away from
+            # DROPPER returns the byte to it rather than leaving a stale RIGHT
+            # that would warn for ever.
+            if t.species != "DROPPER":
+                t.dropper_side = "LEFT"
+        if "dropper_side" in fields:
+            t.dropper_side = str(fields["dropper_side"])
+        if "fire_mask" in fields:
+            t.fire_mask = sorted({int(m) for m in fields["fire_mask"]})
+        self.sort_triggers()
+        return self.trigger_index_of(t)
+
+    def delete_trigger(self, index):
+        if 0 <= index < len(self.project.triggers):
+            del self.project.triggers[index]
+            return True
+        return False
+
+    def duplicate_trigger(self, index):
+        """Copy a trigger one row later, so the copy is visible and legal."""
+        src = self.project.triggers[index]
+        return self.add_trigger(
+            world_progress=src.world_progress + 1,
+            wave_definition=src.wave_definition,
+            species=src.species,
+            fire_mask=list(src.fire_mask),
+            dropper_side=src.dropper_side)
+
+    def trigger_members(self, index):
+        """How many members the trigger's wave actually sends, or 0 if dangling."""
+        t = self.project.triggers[index]
+        for d in self.project.wave_definitions:
+            if d.id == t.wave_definition:
+                return d.count
+        return 0
+
+    def impossible_fire_members(self, index):
+        """Fire-mask members the referenced wave does not send.
+
+        Reported rather than removed: silently trimming is data loss, so the
+        workspace shows this and offers an explicit cleanup the author confirms.
+        """
+        n = self.trigger_members(index)
+        return [m for m in self.project.triggers[index].fire_mask if m >= n]
+
+    def trim_fire_mask(self, index):
+        """The explicit, confirmed cleanup for the above."""
+        n = self.trigger_members(index)
+        t = self.project.triggers[index]
+        dropped = [m for m in t.fire_mask if m >= n]
+        t.fire_mask = [m for m in t.fire_mask if m < n]
+        return dropped
+
+    # ---- wave definitions ---------------------------------------------------
+    def wave_definition_index(self, ident):
+        for i, d in enumerate(self.project.wave_definitions):
+            if d.id == ident:
+                return i
+        return None
+
+    def triggers_using_definition(self, ident):
+        return [i for i, t in enumerate(self.project.triggers)
+                if t.wave_definition == ident]
+
+    def unique_id(self, base, existing):
+        ident, n = base, 2
+        taken = set(existing)
+        while ident in taken:
+            ident, n = f"{base}{n}", n + 1
+        return ident
+
+    def add_wave_definition(self, ident=None, **fields):
+        if len(self.project.wave_definitions) >= C.MAX_WAVE_DEFINITIONS:
+            raise ControllerError(
+                f"this level already has the maximum of "
+                f"{C.MAX_WAVE_DEFINITIONS} wave definitions")
+        existing = [d.id for d in self.project.wave_definitions]
+        ident = ident or self.unique_id("wave", existing)
+        if ident in existing:
+            raise ControllerError(f"a wave definition called {ident!r} already exists")
+        prog = (fields.pop("movement_program", None)
+                or (self.project.movement_programs[0].id
+                    if self.project.movement_programs else ""))
+        d = project_v6.WaveDefinition(id=ident, movement_program=prog, **fields)
+        self.project.wave_definitions.append(d)
+        return len(self.project.wave_definitions) - 1
+
+    def update_wave_definition(self, index, **fields):
+        d = self.project.wave_definitions[index]
+        for key, value in fields.items():
+            if key == "id":
+                raise ControllerError("use rename_wave_definition to change an id")
+            if not hasattr(d, key):
+                raise ControllerError(f"a wave definition has no field {key!r}")
+            setattr(d, key, str(value) if key == "movement_program" else int(value))
+        return index
+
+    def rename_wave_definition(self, index, new_id):
+        """Rename, updating every trigger that names it -- atomically."""
+        d = self.project.wave_definitions[index]
+        new_id = str(new_id)
+        if new_id == d.id:
+            return 0
+        if not new_id:
+            raise ControllerError("a wave definition needs an id")
+        if any(o.id == new_id for o in self.project.wave_definitions):
+            raise ControllerError(f"a wave definition called {new_id!r} already exists")
+        old, moved = d.id, 0
+        for t in self.project.triggers:
+            if t.wave_definition == old:
+                t.wave_definition = new_id
+                moved += 1
+        d.id = new_id
+        return moved
+
+    def delete_wave_definition(self, index):
+        """Refused while a trigger still names it."""
+        d = self.project.wave_definitions[index]
+        users = self.triggers_using_definition(d.id)
+        if users:
+            raise ControllerError(
+                f"wave definition {d.id!r} is used by {len(users)} trigger(s) "
+                f"(at worldProgress "
+                f"{', '.join(str(self.project.triggers[i].world_progress) for i in users[:6])}"
+                f"{'…' if len(users) > 6 else ''}). "
+                "Point them at another definition or delete them first.")
+        del self.project.wave_definitions[index]
+        return True
+
+    def duplicate_wave_definition(self, index):
+        src = self.project.wave_definitions[index]
+        ident = self.unique_id(f"{src.id}_copy",
+                               [d.id for d in self.project.wave_definitions])
+        # Built field by field rather than from to_dict(), which uses the JSON
+        # names (startX, movementProgram) and not the dataclass's.
+        clone = project_v6.WaveDefinition(
+            id=ident, count=src.count, interval=src.interval,
+            start_x=src.start_x, start_y=src.start_y, x_step=src.x_step,
+            y_step=src.y_step, colour=src.colour, heading=src.heading,
+            movement_program=src.movement_program)
+        self.project.wave_definitions.append(clone)
+        return len(self.project.wave_definitions) - 1
+
+    # ---- movement programs --------------------------------------------------
+    def movement_program_index(self, ident):
+        for i, p in enumerate(self.project.movement_programs):
+            if p.id == ident:
+                return i
+        return None
+
+    def definitions_using_program(self, ident):
+        return [i for i, d in enumerate(self.project.wave_definitions)
+                if d.movement_program == ident]
+
+    def add_movement_program(self, ident=None):
+        """A new program starts as a bare EXIT: the one shape that is legal."""
+        existing = [p.id for p in self.project.movement_programs]
+        ident = ident or self.unique_id("prog", existing)
+        if ident in existing:
+            raise ControllerError(f"a movement program called {ident!r} already exists")
+        prog = project_v6.MovementProgram(
+            id=ident, stages=[project_v6.MovementStage(kind="EXIT")])
+        self.project.movement_programs.append(prog)
+        return len(self.project.movement_programs) - 1
+
+    def rename_movement_program(self, index, new_id):
+        """Rename, updating every wave definition that names it -- atomically."""
+        prog = self.project.movement_programs[index]
+        new_id = str(new_id)
+        if new_id == prog.id:
+            return 0
+        if not new_id:
+            raise ControllerError("a movement program needs an id")
+        if any(o.id == new_id for o in self.project.movement_programs):
+            raise ControllerError(f"a movement program called {new_id!r} already exists")
+        old, moved = prog.id, 0
+        for d in self.project.wave_definitions:
+            if d.movement_program == old:
+                d.movement_program = new_id
+                moved += 1
+        prog.id = new_id
+        return moved
+
+    def delete_movement_program(self, index):
+        """Refused while a wave definition still names it."""
+        prog = self.project.movement_programs[index]
+        users = self.definitions_using_program(prog.id)
+        if users:
+            names = ", ".join(self.project.wave_definitions[i].id for i in users[:6])
+            raise ControllerError(
+                f"movement program {prog.id!r} is used by {len(users)} wave "
+                f"definition(s) ({names}{'…' if len(users) > 6 else ''}). "
+                "Point them at another program first.")
+        del self.project.movement_programs[index]
+        return True
+
+    def duplicate_movement_program(self, index):
+        src = self.project.movement_programs[index]
+        ident = self.unique_id(f"{src.id}_copy",
+                               [p.id for p in self.project.movement_programs])
+        clone = project_v6.MovementProgram(
+            id=ident,
+            stages=[project_v6.MovementStage(**vars(st)) for st in src.stages])
+        self.project.movement_programs.append(clone)
+        return len(self.project.movement_programs) - 1
+
+    # ---- movement stages ----------------------------------------------------
+    @staticmethod
+    def new_stage(kind):
+        """A stage of `kind` with the fields that kind actually uses.
+
+        PREDICTABLE INITIALISATION, and only the relevant fields: an ARC gets a
+        real entry heading rather than None (which is the stale-wmPhase bug the
+        model refuses to default), and a STRAIGHT gets a frame count that
+        advances. Nothing carries a payload its opcode does not read.
+        """
+        if kind in C.TIMED_KINDS:
+            return project_v6.MovementStage(kind=kind, frames=30, vx=0, vy=4)
+        if kind in C.ARC_KINDS:
+            return project_v6.MovementStage(kind=kind, steps=8,
+                                            frames_per_step=C.WM_STAGE_SIZE,
+                                            entry_heading=0)
+        return project_v6.MovementStage(kind="EXIT")
+
+    def add_stage(self, prog_index, kind="STRAIGHT", at=None):
+        """Insert a stage. EXIT stays last, because it is terminal."""
+        prog = self.project.movement_programs[prog_index]
+        stage = self.new_stage(kind)
+        if at is None:
+            # Before the trailing EXIT when there is one, so the ordinary case
+            # of "add another leg" does not produce an unreachable stage.
+            at = len(prog.stages) - 1 if (prog.stages
+                                          and prog.stages[-1].kind == "EXIT"
+                                          and kind != "EXIT") else len(prog.stages)
+        at = max(0, min(len(prog.stages), int(at)))
+        prog.stages.insert(at, stage)
+        return at
+
+    def set_stage_kind(self, prog_index, stage_index, kind):
+        """Change a stage's opcode, re-initialising it for the new one.
+
+        THE OLD PAYLOAD IS NOT KEPT. An ARC's steps mean nothing to a STRAIGHT,
+        and a hidden stale field that reappeared when the kind was switched back
+        would be a change the author never made. Switching kind is an explicit
+        act and it produces an explicit, predictable stage.
+        """
+        prog = self.project.movement_programs[prog_index]
+        if prog.stages[stage_index].kind == kind:
+            return False
+        prog.stages[stage_index] = self.new_stage(kind)
+        return True
+
+    def update_stage(self, prog_index, stage_index, **fields):
+        st = self.project.movement_programs[prog_index].stages[stage_index]
+        for key, value in fields.items():
+            if not hasattr(st, key):
+                raise ControllerError(f"a movement stage has no field {key!r}")
+            if key == "entry_heading":
+                # "CONT" is a real authored choice, not the magic byte $ff the
+                # exporter emits for it.
+                st.entry_heading = value if value == "CONT" else int(value)
+            elif key == "kind":
+                raise ControllerError("use set_stage_kind to change a stage's kind")
+            else:
+                setattr(st, key, int(value))
+        return stage_index
+
+    def delete_stage(self, prog_index, stage_index):
+        prog = self.project.movement_programs[prog_index]
+        if len(prog.stages) <= 1:
+            raise ControllerError(
+                "a movement program needs at least one stage; delete the "
+                "program instead")
+        del prog.stages[stage_index]
+        return True
+
+    def move_stage(self, prog_index, stage_index, delta):
+        """Reorder one stage. Returns its new index."""
+        prog = self.project.movement_programs[prog_index]
+        new = stage_index + int(delta)
+        if not (0 <= new < len(prog.stages)) or new == stage_index:
+            return stage_index
+        st = prog.stages.pop(stage_index)
+        prog.stages.insert(new, st)
+        return new

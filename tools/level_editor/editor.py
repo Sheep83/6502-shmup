@@ -41,6 +41,7 @@ from engine_data import (
 import contract_v2 as C
 import project_v6
 from controller_v6 import ControllerError, EditorController, GENERATED_NAMES
+from encounters_ui import EncounterWorkspace
 from native_metatile import GlyphBudgetExceeded, blank_pixels
 from recover_generated_terrain import recover_generated_set
 from terrain_repository import TerrainRepository, default_repo_path
@@ -126,6 +127,9 @@ class LevelEditor(tk.Tk):
         # pick another tile without reopening/re-reading the file. Editor/runtime
         # state only - never persisted into level/project files.
         self._import_dialog = None
+        # The encounter workspace is a second window over the SAME controller,
+        # opened on demand and kept in step with the document (see _adopt_project).
+        self._encounters = None
         self.project_path = self.controller.path
         self.viewport_top = default_viewport_top(self.project)
 
@@ -218,6 +222,9 @@ class LevelEditor(tk.Tk):
         file_menu.add_separator()
         file_menu.add_command(label="Export level package…", command=self._export_kickassembler)
         file_menu.add_separator()
+        file_menu.add_command(label="Encounters…", accelerator="Ctrl+E",
+                              command=self._open_encounters)
+        file_menu.add_separator()
         file_menu.add_command(label="Quit", accelerator="Ctrl+Q", command=self._on_close)
         menu_bar.add_cascade(label="File", menu=file_menu)
 
@@ -229,6 +236,7 @@ class LevelEditor(tk.Tk):
 
         for seq, fn in (("<Control-n>", self._new_level), ("<Control-o>", self._open_level),
                         ("<Control-s>", self._save_project), ("<Control-Shift-S>", self._save_project_as),
+                        ("<Control-e>", self._open_encounters),
                         ("<Control-z>", self._undo), ("<Control-Shift-Z>", self._redo),
                         ("<Control-q>", self._on_close)):
             self.bind_all(seq, lambda e, f=fn: f())
@@ -249,6 +257,8 @@ class LevelEditor(tk.Tk):
         self.delete_turret_button = ttk.Button(toolbar, text="Delete turret",
                                                command=self._delete_selected_turret, state="disabled")
         self.delete_turret_button.pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Encounters…",
+                   command=self._open_encounters).pack(side="left", padx=(8, 0))
 
         stage_controls = ttk.Frame(self, padding=(8, 0, 8, 4))
         stage_controls.pack(fill="x")
@@ -1265,8 +1275,8 @@ class LevelEditor(tk.Tk):
             return "break" if event else None
         # The C64 palette is 0..15 and a character colour is 0..7, because the
         # engine ORs it with the multicolour bit (TERRAIN_COLOUR_RAM = 8 | col).
-        ranges = {"background": C.MAX_C64_COLOUR, "multicolour1": C.MAX_C64_COLOUR,
-                  "multicolour2": C.MAX_C64_COLOUR, "character": C.MAX_CHARACTER_COLOUR}
+        ranges = {"background": C.MAX_COLOUR, "multicolour1": C.MAX_COLOUR,
+                  "multicolour2": C.MAX_COLOUR, "character": C.MAX_CHARACTER_COLOUR}
         if any(not 0 <= new_palette[k] <= m for k, m in ranges.items()):
             self._sync_level_settings_controls()
             return "break" if event else None
@@ -1281,6 +1291,8 @@ class LevelEditor(tk.Tk):
         self._draw_level()
         self._update_stage_info()
         self._update_document_ui()
+        if self._encounters is not None and self._encounters.winfo_exists():
+            self._encounters.refresh()
         return "break" if event else None
 
     def _sync_level_settings_controls(self):
@@ -1342,6 +1354,27 @@ class LevelEditor(tk.Tk):
         self.edit_menu.entryconfigure("Redo", state="normal" if self.redo_stack else "disabled")
         self._update_turret_ui()
         self._update_status()
+
+    # ---- the encounter workspace ----------------------------------------
+    def _open_encounters(self):
+        """Open (or raise) the encounter authoring window."""
+        if self._encounters is not None and self._encounters.winfo_exists():
+            self._encounters.deiconify()
+            self._encounters.lift()
+            self._encounters.focus_set()
+            return "break"
+        self._encounters = EncounterWorkspace(self)
+        return "break"
+
+    def _after_encounter_edit(self):
+        """The workspace changed the project: the main window must catch up.
+
+        Encounter edits are ordinary project edits -- the same undo stack, the
+        same dirty marker, the same deterministic save -- so the only thing that
+        differs is which widgets need redrawing.
+        """
+        self._update_stage_info()
+        self._update_document_ui()
 
     def _refresh_all(self):
         self.metatile_image_cache.clear()
@@ -1406,6 +1439,8 @@ class LevelEditor(tk.Tk):
         """
         self.controller = controller
         self.project = controller.view
+        if self._encounters is not None and self._encounters.winfo_exists():
+            self._encounters.adopt(controller)      # follow onto the new document
         self.project_path = Path(path) if path else None
         self.metatile_image_cache.clear()
         self.undo_stack.clear()
@@ -1557,6 +1592,8 @@ class LevelEditor(tk.Tk):
 
     def _on_close(self):
         if self._confirm_discard():
+            if self._encounters is not None and self._encounters.winfo_exists():
+                self._encounters.destroy()
             self._close_import_session()
             self.destroy()
         return "break"
