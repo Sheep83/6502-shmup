@@ -73,6 +73,26 @@ levelDefsEnd:
 // ---------------------------------------------------------------------------
 #import "wave_programs.asm"
 
+// ---------------------------------------------------------------------------
+// THE STAGE HEADER: the boss approach, as runtime data.
+//
+// Two bytes, little-endian, in the same coarse-row domain as a trigger row.
+// src/waves.asm compares worldProgress against these bytes, so a level changes
+// its approach by shipping a different package -- no engine rebuild, and a test
+// can move it to prove a boundary.
+// ---------------------------------------------------------------------------
+* = LEVELPKG_STAGE "level stage header"
+levelStageStart:
+    .byte <STAGE_NO_SPAWN_ROW, >STAGE_NO_SPAWN_ROW
+levelStageEnd:
+
+.if (levelStageEnd - levelStageStart != LEVELPKG_STAGE_MAX) {
+    .error "the stage header is not LEVELPKG_STAGE_MAX bytes"
+}
+.if (STAGE_NO_SPAWN_ROW < 1 || STAGE_NO_SPAWN_ROW > $ffff) {
+    .error "STAGE_NO_SPAWN_ROW must be a legal sixteen-bit world row"
+}
+
 * = LEVELPKG_MOVE "level movement pool"
 levelMoveStart:
 .for (var p = 0; p < progs.size(); p++) {

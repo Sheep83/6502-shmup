@@ -470,6 +470,15 @@ def main():
         due = here + 2
         poke(mon, sym["waveTrigRowLo"], due & 0xff)
         poke(mon, sym["waveTrigRowHi"], (due >> 8) & 0xff)
+        # THE BOSS APPROACH HAS TO BE OPENED TOO. This liveness check rewinds the
+        # trigger cursor, but by now worldProgress is past 2,200 -- far beyond
+        # the level's authored STAGE_NO_SPAWN_ROW of 340 -- so the director
+        # would correctly refuse to start anything and the check would be
+        # measuring the quiet zone rather than the director. The approach is
+        # package data at $f530; pushing it to $ffff restores the pre-quiet-zone
+        # meaning of this assertion. See tests/test_no_spawn_row.py.
+        poke(mon, 0xf530, 0xff)
+        poke(mon, 0xf531, 0xff)
         poke(mon, sym["wvNextTrig"], 0)
         for s in range(WAVE_SLOTS):
             poke(mon, sym["wvActive"] + s, 0)

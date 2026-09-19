@@ -309,10 +309,25 @@
 .for (var t = 0; t < WAVE_TRIGGERS; t++) {
     // The row is emitted as two bytes and compared against a sixteen-bit
     // worldProgress, so this is the real limit of the representation rather
-    // than a policy. A row beyond the stage's own end is NOT an error: it
-    // simply never becomes due, which is a legitimate way to park an encounter.
+    // than a policy.
     .if (trigRow.get(t) < 0 || trigRow.get(t) > $ffff) {
         .error "a trigger row does not fit the sixteen-bit world"
+    }
+    // AN AUTHORED ROW AT OR BEYOND THE BOSS APPROACH IS A CONTRADICTION.
+    //
+    // This note used to say that a row past the stage's own end was legitimate
+    // -- a way to park an encounter. STAGE_NO_SPAWN_ROW replaces that: the
+    // level now states where authoring stops, so a trigger on the far side of
+    // it is not parked, it is dead data occupying one of the package's trigger
+    // slots and describing an encounter the player can never meet.
+    //
+    // The RUNTIME still suppresses it robustly whatever the data says -- see
+    // the gate in waveTick, which has to survive malformed external data -- but
+    // a level that ASKS for one has contradicted itself, and saying so here is
+    // cheaper than wondering later why an authored encounter never appeared.
+    // This is the rule the eventual exporter should enforce as well.
+    .if (trigRow.get(t) >= STAGE_NO_SPAWN_ROW) {
+        .error "an authored trigger row is at or beyond STAGE_NO_SPAWN_ROW and could never start"
     }
     .if (trigDef.get(t) >= WAVE_DEFS) { .error "a trigger names a wave definition that does not exist" }
     // Membership, not a range: a species value is its animation ROW OFFSET
@@ -328,6 +343,22 @@
         .error "a trigger's fire mask names a member this wave never sends"
     }
 }
+// ===========================================================================
+// THE BOSS APPROACH
+// ===========================================================================
+// STAGE_NO_SPAWN_ROW is authored in the level's own stage_config.asm, beside
+// the stage height that STAGE_FINAL_VIEW_PROGRESS is derived from, so the two
+// cannot drift apart. These are the proofs that the value means something.
+.if (STAGE_NO_SPAWN_ROW < 0 || STAGE_NO_SPAWN_ROW > $ffff) {
+    .error "STAGE_NO_SPAWN_ROW must fit the sixteen bits worldProgress carries"
+}
+.if (STAGE_NO_SPAWN_ROW > STAGE_FINAL_VIEW_PROGRESS) {
+    .error "STAGE_NO_SPAWN_ROW is beyond the last row the stage reaches: the quiet zone could never begin"
+}
+.if (STAGE_NO_SPAWN_ROW < 1) {
+    .error "STAGE_NO_SPAWN_ROW at row zero would suppress the entire stage"
+}
+
 // THE ALTERNATION ITSELF IS CHECKED. This is the assertion that makes "every
 // other wave is a Dropper" a property of the build rather than of someone
 // having counted carefully.
@@ -485,6 +516,38 @@ waveTick:
     ldy wvNextTrig
     cpy #WAVE_TRIGGERS
     bcs !noTrigger+
+
+    // ---- THE BOSS APPROACH: has authoring stopped? ------------------------
+    // Once worldProgress reaches STAGE_NO_SPAWN_ROW no ordinary authored
+    // encounter may BEGIN, which is what makes the run-in to the boss a
+    // deterministic clearance instead of whatever happened to be left alive.
+    //
+    // THE CURSOR IS EXHAUSTED, NOT MERELY SKIPPED, and that is the whole design.
+    // Writing WAVE_TRIGGERS into it makes the suppression terminal: the bounds
+    // test above takes over from the next frame on, so nothing is reconsidered,
+    // nothing can be released later by the token hold below, and there is no
+    // backlog for the boss transition to trip over. It also means this sixteen-
+    // bit compare is paid only while triggers remain -- one frame after the
+    // threshold the stage is back to three instructions a frame.
+    //
+    // IT SUPPRESSES A HELD TRIGGER TOO, deliberately, because it sits ABOVE the
+    // tkActive hold. A trigger that came due before the threshold but was still
+    // waiting on a token encounter when the world crossed it has not started,
+    // and the authoring contract is that nothing which has not started may
+    // begin at or beyond the row. Already-running waves are untouched: this
+    // gate is only ever reached on the way to STARTING one.
+    lda worldProgressHi
+    cmp waveNoSpawnHi
+    bcc !mayStart+
+    bne !quiet+
+    lda worldProgressLo
+    cmp waveNoSpawnLo
+    bcc !mayStart+
+!quiet:
+    lda #WAVE_TRIGGERS                  // terminal: the schedule is over
+    sta wvNextTrig
+    jmp !noTrigger+
+!mayStart:
 
     // ---- has the world reached the row that trigger names? ----------------
     // A GENUINE SIXTEEN-BIT COMPARE: high bytes first, and the low bytes are
@@ -1122,6 +1185,12 @@ wvScratch:  .byte 0                     // waveDefBase's partial product
 // PARALLEL, NOT INTERLEAVED, DELIBERATELY. One cursor serves all six columns at
 // four cycles a field; an interleaved six-byte record would need that cursor
 // multiplied by six on every read for no gain in what can be stored.
+// THE BOSS APPROACH, read from the package rather than compiled in. Two bytes
+// of the stage header; see src/levelpkg.asm for why it is data and not a
+// constant.
+.label waveNoSpawnLo   = LEVELPKG_NOSPAWN + 0
+.label waveNoSpawnHi   = LEVELPKG_NOSPAWN + 1
+
 .label waveTrigRowLo   = LEVELPKG_TRIG + 0 * LEVELPKG_TRIG_SLOTS
 .label waveTrigRowHi   = LEVELPKG_TRIG + 1 * LEVELPKG_TRIG_SLOTS
 .label waveTrigDef     = LEVELPKG_TRIG + 2 * LEVELPKG_TRIG_SLOTS

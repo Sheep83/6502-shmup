@@ -22,9 +22,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, call, check, report)
 
 PORT = 6711
-POOL     = 0xf530       # movement programs
-WAVEDEF  = 0xf630       # wave definitions, 10 bytes each
-TRIG     = 0xf734       # six parallel trigger columns
+POOL     = 0xf532       # movement programs
+WAVEDEF  = 0xf632       # wave definitions, 10 bytes each
+TRIG     = 0xf736       # six parallel trigger columns
 TRIG_SLOTS = 180        # each column is this wide, whatever the level authors
 TRIG_COLS  = ("rowLo", "rowHi", "def", "species", "fire", "side")
 WAVEDEF_SIZE = 10

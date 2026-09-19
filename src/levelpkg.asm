@@ -58,7 +58,28 @@
 // offset 255 could not be addressed at all -- and the engine reads the pool with
 // `lda LEVELPKG_MOVE + n,y`, whose Y is that same byte. Raising it means
 // widening per-object state, which is a later decision and not this one.
-.const LEVELPKG_MOVE     = LEVELPKG_ENC
+// --- the stage header, at the very base of the encounter reservation --------
+// TWO BYTES: STAGE_NO_SPAWN_ROW, the world row at which ordinary authored
+// encounters stop. It is RUNTIME PACKAGE DATA rather than a constant compiled
+// into the engine, and that was a correction rather than a preference.
+//
+// It began life as a `.const` in the level's stage_config.asm, which made the
+// director compare against an IMMEDIATE. That works, costs two cycles less, and
+// is untestable: tests/test_wave_triggers.py proves the Stage 1 sixteen-bit
+// contract by writing synthetic trigger rows at 255, 256, 511, 512, 1023, 1024,
+// 1535 and 1536 into the loaded package, and every one of those is beyond any
+// threshold Level 1 could legally carry -- its stage ends at row 395. A
+// compiled-in value therefore silently invalidated an accepted proof with no
+// value that could have rescued it.
+//
+// As package data the threshold is per-level authored content like every other
+// number here, the editor will emit it beside the trigger rows it constrains,
+// and a test can move it.
+.const LEVELPKG_STAGE     = LEVELPKG_ENC                            // $f530
+.const LEVELPKG_STAGE_MAX = 2
+.const LEVELPKG_NOSPAWN   = LEVELPKG_STAGE + 0                      // lo, hi
+
+.const LEVELPKG_MOVE     = LEVELPKG_STAGE + LEVELPKG_STAGE_MAX      // $f532
 .const LEVELPKG_MOVE_MAX = 256
 
 // --- the wave definitions, above the movement pool --------------------------
@@ -87,9 +108,9 @@
 //
 // Each column is one byte per trigger, so the whole list is six bytes a trigger
 // and the cursor is a byte: 255 triggers is the addressing ceiling.
-.const LEVELPKG_TRIG        = LEVELPKG_WAVEDEF + LEVELPKG_WAVEDEF_MAX   // $f734
+.const LEVELPKG_TRIG        = LEVELPKG_WAVEDEF + LEVELPKG_WAVEDEF_MAX   // $f736
 .const LEVELPKG_TRIG_COLS   = 6
-.const LEVELPKG_TRIG_MAX    = LEVELPKG_ENC_MAX - LEVELPKG_MOVE_MAX - LEVELPKG_WAVEDEF_MAX
+.const LEVELPKG_TRIG_MAX    = LEVELPKG_ENC_MAX - LEVELPKG_STAGE_MAX - LEVELPKG_MOVE_MAX - LEVELPKG_WAVEDEF_MAX
 .const LEVELPKG_TRIG_SLOTS  = floor(LEVELPKG_TRIG_MAX / LEVELPKG_TRIG_COLS)   // 180
 
 // --- the signature ----------------------------------------------------------
@@ -123,8 +144,11 @@
 .if (LEVELPKG_ENC + LEVELPKG_ENC_MAX > LEVELPKG_SIG) {
     .error "the encounter reservation overlaps the signature"
 }
-.if (LEVELPKG_MOVE != LEVELPKG_ENC) {
-    .error "the movement pool must start at the base of the encounter reservation"
+.if (LEVELPKG_STAGE != LEVELPKG_ENC) {
+    .error "the stage header must start at the base of the encounter reservation"
+}
+.if (LEVELPKG_MOVE != LEVELPKG_STAGE + LEVELPKG_STAGE_MAX) {
+    .error "the movement pool must follow the stage header with no gap"
 }
 .if (LEVELPKG_MOVE_MAX > LEVELPKG_ENC_MAX) {
     .error "the movement pool budget exceeds the whole encounter reservation"
@@ -141,7 +165,7 @@
 // THE THREE COMPONENTS MUST FILL THE RESERVATION AND NOT ONE BYTE MORE. The
 // signature sits immediately above it, so an overrun would be silently eaten by
 // the spare run and only show up as a corrupt signature at boot.
-.if (LEVELPKG_MOVE_MAX + LEVELPKG_WAVEDEF_MAX + LEVELPKG_TRIG_MAX != LEVELPKG_ENC_MAX) {
+.if (LEVELPKG_STAGE_MAX + LEVELPKG_MOVE_MAX + LEVELPKG_WAVEDEF_MAX + LEVELPKG_TRIG_MAX != LEVELPKG_ENC_MAX) {
     .error "the encounter components do not add up to the encounter reservation"
 }
 .if (LEVELPKG_TRIG + LEVELPKG_TRIG_MAX > LEVELPKG_SIG) {

@@ -51,6 +51,7 @@ sym = symbols(SYM)
 PORT = 6693
 
 WAVE_TRIGGERS = 4
+LEVELPKG_NOSPAWN = 0xf530     # the stage header in the loaded package
 GS_PLAYING = 1
 LP_LEVEL = 0
 
@@ -280,10 +281,29 @@ def approach(mon, target, margin=40):
         mon.cmd("r")                     # resynchronise and try again
 
 
+def open_the_approach(mon):
+    """Push STAGE_NO_SPAWN_ROW out of the way for a synthetic schedule.
+
+    The boss approach is per-level PACKAGE DATA now (src/levelpkg.asm), and
+    Level 1 authors it at row 340 -- sensible for a stage that ends at 395 and
+    fatal for this file, which proves the sixteen-bit trigger contract with
+    synthetic rows at 255, 256, 511, 512, 1023, 1024, 1535 and 1536. Every one
+    of those is past the authored approach, so the director would suppress them
+    and this file would be measuring the quiet zone instead of the schedule.
+    #
+    Raising it to $ffff removes the approach entirely for the duration, which is
+    exactly the isolation these cases want: they are about trigger rows, and the
+    approach has its own file (tests/test_no_spawn_row.py).
+    """
+    poke_checked(mon, LEVELPKG_NOSPAWN + 0, 0xff)
+    poke_checked(mon, LEVELPKG_NOSPAWN + 1, 0xff)
+
+
 def arm_schedule(mon, rows):
     """Poke a DISPOSABLE schedule into the row columns and rewind the cursor."""
     for i, r in enumerate(rows):
         poke16(mon, sym["waveTrigRowLo"] + i, sym["waveTrigRowHi"] + i, r)
+    open_the_approach(mon)
     poke_checked(mon, sym["wvNextTrig"], 0)
     poke_checked(mon, sym["wvStarted"], 0)
 

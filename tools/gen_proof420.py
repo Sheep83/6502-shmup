@@ -36,6 +36,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "level1"
 COPIES = 4
+QUIET_ROWS = 55        # the boss approach, preserved from the authored level
 
 
 def read_block(text, start, end):
@@ -52,10 +53,18 @@ def main():
     rows = rows0 * COPIES
     stage_rows0 = rows0 * 4                       # logical rows per copy
 
-    # ---- stage_config: the height, and nothing else ----------------------
+    # ---- stage_config: the height, and the boss approach that follows it --
+    # STAGE_NO_SPAWN_ROW HAS TO SCALE WITH THE STAGE. It is a world-progress row
+    # and the proof stage is four times as long, so the authored 105-row value
+    # would put the quiet zone three and a half minutes before the boss. The
+    # clearance itself is what is meaningful, so that is what is preserved:
+    # the same 55 rows of approach measured back from this stage's own end.
+    stage_end = rows * 4 - 25
+    no_spawn = stage_end - QUIET_ROWS
+    cfg2 = re.sub(r"(STAGE_METATILE_ROWS\s*=\s*)\d+", r"\g<1>%d" % rows, cfg, count=1)
+    cfg2 = re.sub(r"(STAGE_NO_SPAWN_ROW\s*=\s*)\d+", r"\g<1>%d" % no_spawn, cfg2, count=1)
     (out / "stage_config.asm").write_text(
-        re.sub(r"(STAGE_METATILE_ROWS\s*=\s*)\d+", r"\g<1>%d" % rows, cfg, count=1)
-        .replace("// Level: level1", "// Level: level1 x%d CAPACITY PROOF" % COPIES))
+        cfg2.replace("// Level: level1", "// Level: level1 x%d CAPACITY PROOF" % COPIES))
 
     # ---- stage_map: defs once, rows four times ---------------------------
     m = (SRC / "stage_map.asm").read_text()
@@ -96,7 +105,8 @@ def main():
         shutil.copyfile(SRC / f, out / f)
 
     print(f"{out}: {rows} metatile rows ({rows*10} map bytes), "
-          f"{rows*4} logical rows, turret rows {[r for r,_ in pairs]}")
+          f"{rows*4} logical rows, stage end {stage_end}, "
+          f"no-spawn row {no_spawn}, turret rows {[r for r,_ in pairs]}")
 
 
 main()
