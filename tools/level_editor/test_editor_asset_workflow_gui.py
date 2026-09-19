@@ -34,7 +34,7 @@ import project as pj                                                # noqa: E402
 from engine_data import VIEWPORT_ROWS                               # noqa: E402
 from native_metatile import blank_pixels                            # noqa: E402
 from terrain_repository import TerrainRepository                    # noqa: E402
-from wave_repository import WaveRepository                          # noqa: E402
+from controller_v6 import ControllerError                          # noqa: E402
 
 # The editor's user-facing actions pop modal simpledialog / messagebox windows,
 # which block a headless run forever. Stub them for the smoke test so the real
@@ -59,8 +59,6 @@ _tmp = tempfile.TemporaryDirectory()
 app = ed.LevelEditor(ed.find_repo_root())
 app.repo_path = Path(_tmp.name) / "terrain.json"
 app.repository = TerrainRepository(path=app.repo_path)
-app.wave_repo_path = Path(_tmp.name) / "waves.json"
-app.wave_repository = WaveRepository(path=app.wave_repo_path)
 
 try:
     # ---- viewport overlay: outline only -------------------------------------
@@ -147,33 +145,34 @@ try:
     assert res["generated"] == 31 and len(res["added"]) >= 1
     ok("repository dialog helpers: import-from-project + recover-generated set both add assets")
 
-    # ---- Wave library: save local -> global, add global -> level, duplicate
-    app.project.wave_definitions.append(
-        {"id": "wd_x", "name": "Bench sweep", "attackId": 0,
-         "composition": [{"enemyType": 0, "count": 5}], "spawnInterval": None})
-    app.selected_wave_def = len(app.project.wave_definitions) - 1
-    _ANSWER["str"] = "Bench sweep"
-    app._wave_def_save_to_library()
-    assert len(app.wave_repository) == 1
-    lib_id = app.wave_repository.ids()[0]
-    assert "worldRow" not in app.wave_repository.get(lib_id)
-    assert TerrainRepository is not None  # library persisted
-    assert WaveRepository.load(app.wave_repo_path).has(lib_id)
-
-    local_id = ed._next_id("wd", app.project.wave_definitions)
-    snap = app.wave_repository.snapshot(lib_id, local_id=local_id)
-    ndefs = len(app.project.wave_definitions)
-    app.project.wave_definitions.append(snap)
-    assert len(app.project.wave_definitions) == ndefs + 1
-    app.wave_repository.update_definition(lib_id, name="CHANGED")
-    assert app.project.wave_definitions[-1]["name"] == "Bench sweep", "library edit hit the level"
-
-    app.selected_wave_def = 0
-    d0 = len(app.project.wave_definitions)
-    app._duplicate_wave_def()
-    assert len(app.project.wave_definitions) == d0 + 1
-    assert app.project.wave_definitions[-1]["name"].endswith(" copy")
-    ok("wave library: save-to-library, add-from-library snapshot, duplicate def all wired")
+    # ---- the v5 attack-catalogue wave surface is GONE from the v6 GUI ------
+    # This section used to drive the old wave library: save a local
+    # attackId/composition definition to the global repository, snapshot it
+    # back, duplicate it. None of that can touch a v6 project -- an attackId
+    # indexes a curated catalogue the engine no longer has, and a v6 encounter
+    # is a movement program, a ten-byte wave definition and a six-column
+    # absolute trigger. Phase 5A REMOVES those controls rather than leaving
+    # them pointed at data they would corrupt, so what is asserted now is that
+    # they are gone and that reaching for them fails loudly.
+    for attr in ("wave_definitions", "wave_triggers"):
+        try:
+            getattr(app.project, attr)
+        except ControllerError:
+            pass
+        else:
+            raise AssertionError(f"v5 {attr} surface still readable on a v6 project")
+    for gone in ("_build_wave_panel", "_add_wave_def", "_duplicate_wave_def",
+                 "_wave_def_save_to_library", "_wave_library_dialog",
+                 "_apply_trigger_form", "_remove_trigger", "_draw_wave_triggers"):
+        assert not hasattr(app, gone), f"stale v5 wave control still present: {gone}"
+    assert "wave" not in [v for _, v in (("Terrain", "terrain"), ("Turrets", "turret"))]
+    assert app.edit_mode.get() in ("terrain", "turret")
+    # ...and the encounters the project really carries are intact and visible.
+    s6 = app.controller.encounter_summary()
+    assert s6 == {"movementPrograms": 4, "waveDefinitions": 4, "triggers": 4,
+                  "movementRecords": 13, "movementBytes": 52, "noSpawnRow": 340}, s6
+    assert "4 programs" in app.encounter_text.get()
+    ok("v5 wave library removed; v6 encounters preserved and reported read-only")
 
     print(f"\nAll {len(PASS)} editor asset-workflow GUI smoke checks passed.")
 finally:

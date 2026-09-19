@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
-"""19656 standalone Tkinter level editor.
+"""19656 standalone Tkinter level editor -- the v6 GUI.
 
-A level is a PACKAGE: terrain map + palette/config + authored turrets + its own
-terrain tileset + enemy-wave timing, saved as levels/<name>/level.json. The
-editor also shows an editor-only overlay of the real C64 gameplay terrain
-aperture (40 chars x 23 logical rows, bottom-origin) so turret density and wave
-timing can be authored against true world coordinates.
+A level is a PACKAGE saved as levels/<name>/level.v6.json: terrain map,
+palette, charset, metatile definitions, authored turrets, AND the encounter
+data -- movement programs, wave definitions, absolute triggers and the no-spawn
+boundary. The editor also shows an editor-only overlay of the real C64 gameplay
+terrain aperture (40 chars x 23 logical rows, bottom-origin) so turret density
+can be authored against true world coordinates.
+
+THE DOCUMENT IS A ProjectV6, NOT A v5 LevelProject. `controller_v6` owns it and
+every operation that has to preserve something goes through there; this file
+owns widgets. See that module for why unexposed encounter data survives an edit
+the GUI does not know how to make.
+
+ENCOUNTERS ARE READ-ONLY HERE. The v5 attack-catalogue wave editor has been
+removed rather than disabled: its twelve-id catalogue does not exist in the
+engine any more, and pointing it at real movement programs, ten-byte wave
+definitions and six-column triggers could only corrupt them. The panel is
+replaced by a one-line summary so the author can see what the project carries.
+Authoring them is Phase 5B.
 """
 import json
 import sys
@@ -16,8 +29,6 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from engine_data import (
     C64_PALETTE_HEX,
     DEFAULT_PALETTE,
-    DEFAULT_SCROLL_FRAME_DIVIDER,
-    ENEMY_TYPE_COUNT,
     METATILE_CAPACITY,
     METATILE_H,
     METATILE_NAMES,
@@ -26,56 +37,47 @@ from engine_data import (
     TERRAIN_GLYPH_BASE,
     TERRAIN_GLYPH_NAMESPACE,
     VIEWPORT_ROWS,
-    load_engine_data,
 )
-from ka_export import export_level
+import contract_v2 as C
+import project_v6
+from controller_v6 import ControllerError, EditorController, GENERATED_NAMES
 from native_metatile import GlyphBudgetExceeded, blank_pixels
 from recover_generated_terrain import recover_generated_set
 from terrain_repository import TerrainRepository, default_repo_path
-from wave_repository import (
-    WaveRepository,
-    WaveRepositoryError,
-    default_repo_path as default_wave_repo_path,
-)
 from workshop_ui import ImportDialog, WorkshopDialog
 from project import (
-    DEFAULT_STAGE_ROWS,
-    LevelProject,
-    MAX_STAGE_ROWS,
-    MAX_TURRETS,
-    MIN_STAGE_ROWS,
     OBJECT_TYPE_TURRET,
     ProjectValidationError,
     TURRET_POOL,
-    WAVE_MAX_COMPOSITION_COUNT,
     clamp_viewport_top,
-    composition_size,
     default_viewport_top,
     duplicate_metatile,
     MetatileInUseError,
     ensure_level_metatile_set,
     metatile_id_usage,
     remove_metatile,
-    export_readiness_errors,
-    iter_turrets,
-    load_project,
     max_viewport_top,
     metatile_set_entry_from_native,
     metatile_set_glyph_cost,
     repack_tileset_from_metatile_set,
-    save_project,
     stage_logical_rows,
-    turret_world_col,
     turret_world_row,
-    validate_project,
     wrap_seam_warning,
     turret_screen_peak,
 )
 
+# THE CURRENT ENGINE LIMITS, read from contract_v2 rather than the v5 module.
+# The old editor carried MIN/MAX_STAGE_ROWS of 1..768; the package caps the map
+# at LEVELPKG_MAP_MAX/10 = 440 metatile rows and the scroller needs more than a
+# screenful, so the legal range is 7..440.
+MIN_STAGE_ROWS = C.MIN_METATILE_ROWS
+MAX_STAGE_ROWS = C.MAX_METATILE_ROWS
+DEFAULT_STAGE_ROWS = 105
+MAX_TURRETS = C.MAX_TURRETS
+
 CHAR_SIZE = 8
 METATILE_PIXELS = METATILE_W * CHAR_SIZE
 LEVEL_WIDTH = METATILES_PER_ROW * METATILE_PIXELS
-PAL_FRAMES_PER_SECOND = 50
 # Approximate C64 palette for editor preview. Project data stores indices, not
 # RGB. The table itself lives in engine_data so non-GUI modules share it.
 C64_COLOURS = C64_PALETTE_HEX
@@ -83,8 +85,6 @@ GRID = "#555555"
 SELECTED = "#ffffff"
 VIEWPORT_EDGE = "#38d0ff"
 VIEWPORT_ACTIVATION = "#ffd000"
-TRIGGER_COLOUR = "#ff40c0"
-TRIGGER_HIT = 6            # px tolerance when clicking a trigger flag
 
 
 def _next_id(prefix, existing):
@@ -99,69 +99,52 @@ class LevelEditor(tk.Tk):
     def __init__(self, repo_root):
         super().__init__()
         self.repo_root = Path(repo_root)
-        self.data = load_engine_data(self.repo_root)
-        self.levels_dir = self.repo_root / "tools" / "level_editor" / "levels"
-        self.legacy_dir = self.repo_root / "tools" / "level_editor" / "projects"
+        self.editor_dir = self.repo_root / "tools" / "level_editor"
+        self.levels_dir = self.editor_dir / "levels"
+        self.legacy_dir = self.editor_dir / "projects"
         self.levels_dir.mkdir(parents=True, exist_ok=True)
 
-        self.attack_names = [n for n, _ in self.data.attack_catalogue]
-        self.attack_id_by_name = {n: i for n, i in self.data.attack_catalogue}
-        self.attack_name_by_id = {i: n for n, i in self.data.attack_catalogue}
-
-        self.project = self._seed_project("level1", [row[:] for row in self.data.stage_rows],
-                                          dict(self.data.source_palette),
-                                          self.data.source_scroll_frame_divider,
-                                          objects=[dict(t) for t in self.data.source_turrets])
-        ensure_level_metatile_set(self.project)
-        self.repo_path = default_repo_path(self.repo_root / "tools" / "level_editor")
+        # THE DEFAULT DOCUMENT IS THE CANONICAL v6 PROJECT, not a project
+        # reconstructed from the generated assembler. The old editor seeded
+        # itself by parsing src/level1/*.asm through engine_data, which made the
+        # DERIVED files the source of truth and could not represent encounters
+        # at all. levels/level1/level.v6.json is now authoritative and the ASM
+        # is what the exporter writes out of it.
+        self.controller = EditorController.canonical(self.editor_dir)
+        self.project = self.controller.view
+        self.repo_path = default_repo_path(self.editor_dir)
         try:
             self.repository = TerrainRepository.load(self.repo_path)
         except Exception:                                 # noqa: BLE001 - start empty on a bad file
             self.repository = TerrainRepository(path=self.repo_path)
-        # Global Wave Definition Repository - persists across sessions/projects,
-        # independent of any level. Levels keep their own waveDefinitions;
-        # library copies are snapshots (see wave_repository.py).
-        self.wave_repo_path = default_wave_repo_path(self.repo_root / "tools" / "level_editor")
-        try:
-            self.wave_repository = WaveRepository.load(self.wave_repo_path)
-        except Exception:                                 # noqa: BLE001 - start empty on a bad file
-            self.wave_repository = WaveRepository(path=self.wave_repo_path)
+        # THE WAVE REPOSITORY IS NOT LOADED. It stores v5 attack-catalogue
+        # snapshots (attackId/enemyType/composition) and there is nothing in a
+        # v6 project for them to be pasted into. The file is left on disk
+        # untouched; Phase 5B decides whether a v6 encounter library replaces it.
         # Persistent PNG import session: the ImportDialog is kept alive (hidden
         # between uses) so the user can return to an already-open spritesheet and
         # pick another tile without reopening/re-reading the file. Editor/runtime
         # state only - never persisted into level/project files.
         self._import_dialog = None
-        self.project_path = None
+        self.project_path = self.controller.path
         self.viewport_top = default_viewport_top(self.project)
 
         self.selected_tile = 0
         self.metatile_image_cache = {}
         self.last_painted_cell = None
-        self.edit_mode = tk.StringVar(value="terrain")   # terrain | turret | wave
+        self.edit_mode = tk.StringVar(value="terrain")   # terrain | turret
         self.selected_turret = None
-        self.selected_trigger = None                      # index into project.wave_triggers
-        self.selected_wave_def = None                     # index into project.wave_definitions
-        self._dragging_trigger = False
         self.show_grid = tk.BooleanVar(value=True)
         self.stage_row_count = tk.IntVar(value=self.project.height)
         self.viewport_var = tk.IntVar(value=self.viewport_top)
         self.duration_text = tk.StringVar()
         self.viewport_text = tk.StringVar()
         self.status_text = tk.StringVar()
-        self.scroll_divider_var = tk.IntVar(value=self.project.scroll_frame_divider)
+        self.encounter_text = tk.StringVar()
         self.palette_vars = {
             key: tk.IntVar(value=self.project.palette[key])
             for key in ("background", "multicolour1", "multicolour2", "character")
         }
-        # wave-definition editor vars
-        self.wd_name_var = tk.StringVar()
-        self.wd_attack_var = tk.StringVar()
-        self.wd_enemy_var = tk.IntVar(value=0)
-        self.wd_count_var = tk.IntVar(value=5)
-        self.wd_interval_var = tk.StringVar()
-        self.wt_row_var = tk.IntVar(value=0)
-        self.wt_def_var = tk.StringVar()
-
         self.saved_state = self._project_state()
         self.undo_stack = []
         self.redo_stack = []
@@ -176,19 +159,28 @@ class LevelEditor(tk.Tk):
         self._refresh_all()
 
     # ---- project construction ------------------------------------------
-    def _baseline_tileset(self):
-        return {
-            "glyphCount": self.data.glyph_count,
-            "glyphs": [list(self.data.glyphs[TERRAIN_GLYPH_BASE + i]) for i in range(self.data.glyph_count)],
-            "metatileDefs": [list(m) for m in self.data.metatiles],
-        }
+    def _seed_v6_project(self, name, rows):
+        """A new, empty v6 level that carries the current graphics.
 
-    def _seed_project(self, name, rows, palette, divider, objects=None,
-                      wave_definitions=None, wave_triggers=None, tileset=None):
-        return LevelProject(
-            name=name, metatile_rows=rows, palette=palette, scroll_frame_divider=divider,
-            objects=objects or [], tileset=tileset or self._baseline_tileset(),
-            wave_definitions=wave_definitions or [], wave_triggers=wave_triggers or [],
+        The map is blank and there are no turrets and no encounters, but the
+        charset, the metatile definitions and the native metatile set are copied
+        from the document that is open, because a level with no tiles to paint
+        with cannot be edited. noSpawnRow is derived the way migration derives
+        it, so a new project validates immediately rather than starting broken.
+        """
+        source = self.controller.project
+        rows = max(MIN_STAGE_ROWS, min(MAX_STAGE_ROWS, int(rows)))
+        return project_v6.ProjectV6(
+            name=name,
+            stage=project_v6.Stage(metatile_rows=rows,
+                                   no_spawn_row=C.default_no_spawn_row(rows)),
+            palette=project_v6.Palette(**DEFAULT_PALETTE),
+            glyphs=[list(g) for g in source.glyphs],
+            metatile_defs=[list(d) for d in source.metatile_defs],
+            level_metatile_set=json.loads(json.dumps(source.level_metatile_set))
+            if source.level_metatile_set is not None else None,
+            map_rows=[[0] * METATILES_PER_ROW for _ in range(rows)],
+            turrets=[], movement_programs=[], wave_definitions=[], triggers=[],
         )
 
     @property
@@ -201,31 +193,15 @@ class LevelEditor(tk.Tk):
 
     # ---- undo/dirty state --------------------------------------------------
     def _project_state(self):
-        return (
-            self.project.name,
-            tuple(tuple(row) for row in self.project.metatile_rows),
-            tuple(sorted(self.project.palette.items())),
-            self.project.scroll_frame_divider,
-            tuple(self._obj_key(o) for o in self.project.objects),
-            tuple(sorted(self.project.metatile_metadata.items())),
-            json.dumps(self.project.canonical_wave_definitions(), sort_keys=True),
-            json.dumps(self.project.canonical_wave_triggers(), sort_keys=True),
-            json.dumps(self.project.tileset, sort_keys=True) if self.project.tileset else None,
-            json.dumps(self.project.canonical_metatile_set(), sort_keys=True),
-        )
+        """A comparable snapshot of the WHOLE v6 document.
 
-    @staticmethod
-    def _obj_key(obj):
-        if isinstance(obj, dict):
-            return tuple(sorted((k, v) for k, v in obj.items()
-                                if not isinstance(v, (list, dict))))
-        return ("_opaque", repr(obj))
-
-    @staticmethod
-    def _obj_from_key(key):
-        if key and key[0] == "_opaque":
-            return None
-        return {k: v for k, v in key}
+        THE CANONICAL JSON IS THE SNAPSHOT, which is the point. The v5 version
+        listed the fields it knew about, so a change to anything else -- an
+        encounter, the no-spawn row -- was invisible to undo and to the dirty
+        marker. Hashing the serialised project means a field the GUI cannot yet
+        edit is still covered, and restoring one restores it exactly.
+        """
+        return self.controller.to_json()
 
     def _is_dirty(self):
         return self._project_state() != self.saved_state
@@ -267,7 +243,7 @@ class LevelEditor(tk.Tk):
         ttk.Checkbutton(toolbar, text="Metatile grid", variable=self.show_grid,
                         command=self._draw_level).pack(side="right")
         ttk.Label(toolbar, text="   Mode:").pack(side="left", padx=(16, 2))
-        for text, value in (("Terrain", "terrain"), ("Turrets", "turret"), ("Waves", "wave")):
+        for text, value in (("Terrain", "terrain"), ("Turrets", "turret")):
             ttk.Radiobutton(toolbar, text=text, value=value, variable=self.edit_mode,
                             command=self._on_mode_change).pack(side="left")
         self.delete_turret_button = ttk.Button(toolbar, text="Delete turret",
@@ -305,12 +281,12 @@ class LevelEditor(tk.Tk):
             spin.pack(side="left")
             spin.bind("<Return>", self._apply_level_settings)
             spin.bind("<FocusOut>", self._apply_level_settings)
-        ttk.Label(level_settings, text="Scroll divider").pack(side="left", padx=(14, 2))
-        divider_spin = ttk.Spinbox(level_settings, from_=1, to=255, width=4,
-                                   textvariable=self.scroll_divider_var, command=self._apply_level_settings)
-        divider_spin.pack(side="left")
-        divider_spin.bind("<Return>", self._apply_level_settings)
-        divider_spin.bind("<FocusOut>", self._apply_level_settings)
+        # NO SCROLL-DIVIDER CONTROL. The engine scrolls 1 px/frame
+        # unconditionally, v6 stores no such field, and the constant it used to
+        # write into stage_config.asm was read by nothing. Instead this row now
+        # reports what the project carries that this phase cannot edit.
+        ttk.Label(level_settings, text="   Encounters:").pack(side="left", padx=(14, 2))
+        ttk.Label(level_settings, textvariable=self.encounter_text).pack(side="left")
 
         body = ttk.Frame(self, padding=8)
         body.pack(fill="both", expand=True)
@@ -374,71 +350,10 @@ class LevelEditor(tk.Tk):
         self.bind_all("<BackSpace>", self._delete_selected)
         self._bind_mousewheel(self.level_canvas)
 
-        self._build_wave_panel(body)
-
         status = ttk.Frame(self, padding=(8, 2, 8, 8))
         status.pack(fill="x")
         ttk.Label(status, textvariable=self.status_text).pack(side="left")
 
-    def _build_wave_panel(self, body):
-        self.wave_frame = ttk.LabelFrame(body, text="Waves", padding=6)
-        self.wave_frame.grid(row=0, column=2, sticky="ns", padx=(8, 0))
-        ttk.Label(self.wave_frame, text="Wave definitions (reusable)").pack(anchor="w")
-        self.wd_list = tk.Listbox(self.wave_frame, height=6, width=30, exportselection=False)
-        self.wd_list.pack(fill="x")
-        self.wd_list.bind("<<ListboxSelect>>", self._on_wave_def_select)
-        wd_btns = ttk.Frame(self.wave_frame)
-        wd_btns.pack(fill="x", pady=(2, 2))
-        ttk.Button(wd_btns, text="New", width=8, command=self._add_wave_def).pack(side="left")
-        ttk.Button(wd_btns, text="Duplicate", width=9,
-                   command=self._duplicate_wave_def).pack(side="left", padx=(3, 0))
-        ttk.Button(wd_btns, text="Delete", width=8,
-                   command=self._delete_wave_def).pack(side="left", padx=(3, 0))
-        wd_btns2 = ttk.Frame(self.wave_frame)
-        wd_btns2.pack(fill="x", pady=(0, 6))
-        ttk.Button(wd_btns2, text="Add from Library…", width=17,
-                   command=self._wave_library_dialog).pack(side="left")
-        ttk.Button(wd_btns2, text="Save to Library", width=15,
-                   command=self._wave_def_save_to_library).pack(side="left", padx=(3, 0))
-
-        form = ttk.Frame(self.wave_frame)
-        form.pack(fill="x")
-        ttk.Label(form, text="Name").grid(row=0, column=0, sticky="w")
-        ttk.Entry(form, textvariable=self.wd_name_var, width=20).grid(row=0, column=1, sticky="ew")
-        ttk.Label(form, text="Formation").grid(row=1, column=0, sticky="w")
-        self.wd_attack_combo = ttk.Combobox(form, textvariable=self.wd_attack_var, width=24,
-                                            values=self.attack_names, state="readonly")
-        self.wd_attack_combo.grid(row=1, column=1, sticky="ew")
-        ttk.Label(form, text="Enemy type").grid(row=2, column=0, sticky="w")
-        ttk.Combobox(form, textvariable=self.wd_enemy_var, width=6, state="readonly",
-                     values=list(range(ENEMY_TYPE_COUNT))).grid(row=2, column=1, sticky="w")
-        ttk.Label(form, text="Count (size)").grid(row=3, column=0, sticky="w")
-        ttk.Spinbox(form, from_=1, to=WAVE_MAX_COMPOSITION_COUNT, width=6,
-                    textvariable=self.wd_count_var).grid(row=3, column=1, sticky="w")
-        ttk.Label(form, text="Spawn interval").grid(row=4, column=0, sticky="w")
-        ttk.Entry(form, textvariable=self.wd_interval_var, width=8).grid(row=4, column=1, sticky="w")
-        ttk.Button(form, text="Apply changes", command=self._apply_wave_def_form).grid(
-            row=5, column=1, sticky="e", pady=(4, 0))
-        form.columnconfigure(1, weight=1)
-
-        ttk.Separator(self.wave_frame, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Label(self.wave_frame, text="Trigger inspector (Waves mode:\nclick the stage to place)").pack(anchor="w")
-        tf = ttk.Frame(self.wave_frame)
-        tf.pack(fill="x", pady=(2, 0))
-        ttk.Label(tf, text="World row").grid(row=0, column=0, sticky="w")
-        self.wt_row_spin = ttk.Spinbox(tf, from_=0, to=10 ** 6, width=8, textvariable=self.wt_row_var,
-                                       command=self._apply_trigger_form)
-        self.wt_row_spin.grid(row=0, column=1, sticky="w")
-        self.wt_row_spin.bind("<Return>", self._apply_trigger_form)
-        ttk.Label(tf, text="Wave def").grid(row=1, column=0, sticky="w")
-        self.wt_def_combo = ttk.Combobox(tf, textvariable=self.wt_def_var, width=20, state="readonly")
-        self.wt_def_combo.grid(row=1, column=1, sticky="ew")
-        self.wt_def_combo.bind("<<ComboboxSelected>>", self._apply_trigger_form)
-        ttk.Button(tf, text="Delete trigger", command=self._delete_selected_trigger).grid(
-            row=2, column=1, sticky="e", pady=(4, 0))
-        tf.columnconfigure(1, weight=1)
-
-    # ---- mousewheel -----------------------------------------------------
     def _bind_mousewheel(self, canvas):
         canvas.bind("<MouseWheel>", lambda e, t=canvas: self._mousewheel(e, t))
         canvas.bind("<Button-4>", lambda e, t=canvas: (t.yview_scroll(-1, "units"), "break")[1])
@@ -567,10 +482,6 @@ class LevelEditor(tk.Tk):
             return s[tile_id].get("name") or f"M{tile_id}"
         return METATILE_NAMES[tile_id] if tile_id < len(METATILE_NAMES) else f"M{tile_id}"
 
-    def _metatile_row_usage(self):
-        """set of metatile IDs referenced by the current map."""
-        return {c for r in self.project.metatile_rows for c in r}
-
     def _draw_palette(self):
         self.palette_canvas.delete("all")
         item_height = 46
@@ -604,7 +515,6 @@ class LevelEditor(tk.Tk):
             for y in range(0, self.level_height + 1, METATILE_PIXELS):
                 self.level_canvas.create_line(0, y, LEVEL_WIDTH, y, fill=GRID, tags="grid")
         self._draw_turret_markers()
-        self._draw_wave_triggers()
         self._draw_viewport_overlay()
 
     def _draw_turret_markers(self):
@@ -630,22 +540,6 @@ class LevelEditor(tk.Tk):
             self.level_canvas.create_text(x0 + METATILE_PIXELS / 2, y0 + METATILE_PIXELS / 2,
                                           text="T", fill=outline,
                                           font=("TkDefaultFont", 10, "bold"), tags="turret_marker")
-
-    def _draw_wave_triggers(self):
-        self.level_canvas.delete("wave_trigger")
-        active = self.edit_mode.get() == "wave"
-        for index, wt in enumerate(self.project.wave_triggers):
-            y = int(wt.get("worldRow", 0)) * CHAR_SIZE
-            selected = active and index == self.selected_trigger
-            colour = SELECTED if selected else TRIGGER_COLOUR
-            self.level_canvas.create_line(0, y, LEVEL_WIDTH, y, fill=colour,
-                                          width=3 if selected else 2, tags="wave_trigger")
-            wd = self.project.wave_definition(wt.get("waveDef"))
-            label = (wd.get("name") if wd else wt.get("waveDef")) or "?"
-            self.level_canvas.create_text(4, y - 2, anchor="sw", fill=colour,
-                                          font=("TkDefaultFont", 8, "bold" if selected else "normal"),
-                                          text=f"▶ {label}  (row {wt.get('worldRow', 0)})",
-                                          tags="wave_trigger")
 
     def _palette_click(self, event):
         tile_id = int((self.palette_canvas.canvasy(event.y) - 4) // 46)
@@ -978,14 +872,17 @@ class LevelEditor(tk.Tk):
 
         def import_from_project():
             path = filedialog.askopenfilename(
-                title="Import metatiles from another project (V4/V5 level JSON)",
+                title="Import metatiles from another project (any version)",
                 initialdir=self.levels_dir, parent=picker,
                 filetypes=(("Level JSON", "*.json"), ("All files", "*.*")))
             if not path:
                 return
             try:
-                src = load_project(path, default_tileset=self._baseline_tileset())
-            except (OSError, ProjectValidationError) as exc:
+                # The same one-loader rule as Open: a v6 project reads directly
+                # and an older one migrates, so metatiles can be lifted out of
+                # either without a second, v5-only reader.
+                src = EditorController.load(path).view
+            except Exception as exc:                      # noqa: BLE001
                 messagebox.showerror("Import from project", f"Cannot read that project:\n{exc}",
                                      parent=picker)
                 return
@@ -1162,13 +1059,8 @@ class LevelEditor(tk.Tk):
             return row, col
         return None
 
-    def _logical_row_from_event(self, event):
-        y = int(self.level_canvas.canvasy(event.y))
-        return max(0, min(stage_logical_rows(self.project) - 1, round(y / CHAR_SIZE)))
-
     def _on_mode_change(self):
         self.selected_turret = None
-        self.selected_trigger = None
         self._draw_level()
         self._update_turret_ui()
         self._update_status()
@@ -1179,33 +1071,15 @@ class LevelEditor(tk.Tk):
         if mode == "turret":
             self._turret_click(event)
             return "break"
-        if mode == "wave":
-            self._wave_click(event)
-            return "break"
         self._paint_start(event)
 
     def _level_drag(self, event):
-        mode = self.edit_mode.get()
-        if mode == "wave" and self._dragging_trigger and self.selected_trigger is not None:
-            before = self._trigger_drag_before
-            self.project.wave_triggers[self.selected_trigger]["worldRow"] = self._logical_row_from_event(event)
-            self._draw_wave_triggers()
-            self._sync_trigger_form()
-            return "break"
-        if mode in ("turret", "wave"):
+        if self.edit_mode.get() == "turret":
             return "break"
         self._paint_event(event)
 
     def _level_click_end(self, event=None):
-        mode = self.edit_mode.get()
-        if mode == "wave" and self._dragging_trigger:
-            self._dragging_trigger = False
-            if self._trigger_drag_before != self._project_state():
-                self._push_undo(self._trigger_drag_before)
-            self._set_viewport(self.project.wave_triggers[self.selected_trigger]["worldRow"])
-            self._update_document_ui()
-            return "break"
-        if mode in ("turret", "wave"):
+        if self.edit_mode.get() == "turret":
             return "break"
         self._paint_end(event)
 
@@ -1215,17 +1089,10 @@ class LevelEditor(tk.Tk):
             if cell:
                 self._remove_turret_at(*cell)
             return "break"
-        if self.edit_mode.get() == "wave":
-            idx = self._trigger_at(event)
-            if idx is not None:
-                self._remove_trigger(idx)
-            return "break"
 
     def _delete_selected(self, event=None):
         if self.edit_mode.get() == "turret":
             return self._delete_selected_turret()
-        if self.edit_mode.get() == "wave":
-            return self._delete_selected_trigger()
         return "break"
 
     # ---- turret placement -------------------------------------------------
@@ -1233,12 +1100,6 @@ class LevelEditor(tk.Tk):
         for i, o in enumerate(self.project.objects):
             if (isinstance(o, dict) and o.get("type") == OBJECT_TYPE_TURRET
                     and o.get("metatileRow") == row and o.get("metatileCol") == col):
-                return i
-        return None
-
-    def _turret_index_in_row(self, row):
-        for i, o in enumerate(self.project.objects):
-            if (isinstance(o, dict) and o.get("type") == OBJECT_TYPE_TURRET and o.get("metatileRow") == row):
                 return i
         return None
 
@@ -1257,13 +1118,15 @@ class LevelEditor(tk.Tk):
             self._draw_level()
             self._update_turret_ui()
             return
-        if self._turret_index_in_row(row) is not None:
-            self.bell()
-            self.status_text.set(f"Metatile row {row} already has a turret (one per world row).")
-            return
         before = self._project_state()
-        self.project.objects.append({"type": OBJECT_TYPE_TURRET, "metatileRow": row, "metatileCol": col})
-        self.selected_turret = len(self.project.objects) - 1
+        try:
+            # THE CONTROLLER OWNS THE LIMITS, so the one-per-row rule and the
+            # eight-turret cap are enforced in one place and tested headlessly.
+            self.selected_turret = self.controller.add_turret(row, col)
+        except ControllerError as exc:
+            self.bell()
+            self.status_text.set(str(exc))
+            return
         self._push_undo(before)
         self._draw_level()
         self._update_turret_ui()
@@ -1274,7 +1137,7 @@ class LevelEditor(tk.Tk):
         if idx is None:
             return
         before = self._project_state()
-        del self.project.objects[idx]
+        self.controller.remove_turret(idx)
         self.selected_turret = None
         self._push_undo(before)
         self._draw_level()
@@ -1288,7 +1151,7 @@ class LevelEditor(tk.Tk):
             self.selected_turret = None
             return "break"
         before = self._project_state()
-        del self.project.objects[self.selected_turret]
+        self.controller.remove_turret(self.selected_turret)
         self.selected_turret = None
         self._push_undo(before)
         self._draw_level()
@@ -1301,309 +1164,7 @@ class LevelEditor(tk.Tk):
                and 0 <= (self.selected_turret or -1) < len(self.project.objects))
         self.delete_turret_button.configure(state="normal" if has else "disabled")
 
-    # ---- wave definitions ------------------------------------------------
-    def _refresh_wave_panel(self):
-        self.wd_list.delete(0, "end")
-        for wd in self.project.wave_definitions:
-            self.wd_list.insert("end", f"{wd.get('id')}  {wd.get('name', '')}  "
-                                       f"[{self.attack_name_by_id.get(int(wd.get('attackId', 0)), '?')}]"
-                                       f"  x{composition_size(wd)}")
-        ids = [wd["id"] for wd in self.project.wave_definitions]
-        self.wt_def_combo.configure(values=ids)
-        if self.selected_wave_def is not None and 0 <= self.selected_wave_def < len(self.project.wave_definitions):
-            self.wd_list.selection_clear(0, "end")
-            self.wd_list.selection_set(self.selected_wave_def)
-            self._sync_wave_def_form()
-        self._sync_trigger_form()
-
-    def _sync_wave_def_form(self):
-        if self.selected_wave_def is None or not 0 <= self.selected_wave_def < len(self.project.wave_definitions):
-            return
-        wd = self.project.wave_definitions[self.selected_wave_def]
-        self.wd_name_var.set(wd.get("name", ""))
-        self.wd_attack_var.set(self.attack_name_by_id.get(int(wd.get("attackId", 0)), ""))
-        comp = wd.get("composition") or [{"enemyType": 0, "count": 5}]
-        self.wd_enemy_var.set(int(comp[0].get("enemyType", 0)))
-        self.wd_count_var.set(int(comp[0].get("count", 5)))
-        self.wd_interval_var.set("" if wd.get("spawnInterval") in (None, "") else str(wd["spawnInterval"]))
-
-    def _on_wave_def_select(self, event=None):
-        sel = self.wd_list.curselection()
-        self.selected_wave_def = sel[0] if sel else None
-        self._sync_wave_def_form()
-        self._update_status()
-
-    def _add_wave_def(self):
-        before = self._project_state()
-        wd = {"id": _next_id("wd", self.project.wave_definitions),
-              "name": "New wave",
-              "attackId": self.attack_id_by_name.get(self.attack_names[0], 0) if self.attack_names else 0,
-              "composition": [{"enemyType": 0, "count": 5}], "spawnInterval": None}
-        self.project.wave_definitions.append(wd)
-        self.selected_wave_def = len(self.project.wave_definitions) - 1
-        self._push_undo(before)
-        self._refresh_wave_panel()
-        self._update_document_ui()
-
-    def _delete_wave_def(self):
-        if self.selected_wave_def is None or not 0 <= self.selected_wave_def < len(self.project.wave_definitions):
-            return
-        wd_id = self.project.wave_definitions[self.selected_wave_def]["id"]
-        if any(wt.get("waveDef") == wd_id for wt in self.project.wave_triggers):
-            self.bell()
-            self.status_text.set(f"Wave def {wd_id} is still referenced by a trigger.")
-            return
-        before = self._project_state()
-        del self.project.wave_definitions[self.selected_wave_def]
-        self.selected_wave_def = None
-        self._push_undo(before)
-        self._refresh_wave_panel()
-        self._update_document_ui()
-
-    def _apply_wave_def_form(self):
-        if self.selected_wave_def is None or not 0 <= self.selected_wave_def < len(self.project.wave_definitions):
-            return
-        before = self._project_state()
-        wd = self.project.wave_definitions[self.selected_wave_def]
-        wd["name"] = self.wd_name_var.get().strip() or wd["id"]
-        wd["attackId"] = self.attack_id_by_name.get(self.wd_attack_var.get(), wd.get("attackId", 0))
-        try:
-            et = max(0, min(ENEMY_TYPE_COUNT - 1, int(self.wd_enemy_var.get())))
-            cn = max(1, min(WAVE_MAX_COMPOSITION_COUNT, int(self.wd_count_var.get())))
-        except (tk.TclError, ValueError):
-            return
-        wd["composition"] = [{"enemyType": et, "count": cn}]
-        iv = self.wd_interval_var.get().strip()
-        wd["spawnInterval"] = int(iv) if iv.isdigit() and 1 <= int(iv) <= 255 else None
-        errs = validate_project(self.project)
-        if errs:
-            messagebox.showerror("Wave definition invalid", "\n".join(errs), parent=self)
-            self._restore_state(before)
-            return
-        self._push_undo(before)
-        self._refresh_wave_panel()
-        self._draw_wave_triggers()
-        self._update_document_ui()
-
-    def _duplicate_wave_def(self):
-        """Deep-copy the selected LOCAL wave definition as a new local definition
-        with a fresh local id. Triggers are unchanged (they still reference the
-        original). The copy is independent of the source."""
-        if self.selected_wave_def is None or not 0 <= self.selected_wave_def < len(self.project.wave_definitions):
-            return
-        src = self.project.wave_definitions[self.selected_wave_def]
-        before = self._project_state()
-        wd = {
-            "id": _next_id("wd", self.project.wave_definitions),
-            "name": f"{src.get('name', src['id'])} copy",
-            "attackId": int(src.get("attackId", 0)),
-            "composition": [dict(c) for c in (src.get("composition") or [{"enemyType": 0, "count": 5}])],
-            "spawnInterval": src.get("spawnInterval"),
-        }
-        self.project.wave_definitions.append(wd)
-        self.selected_wave_def = len(self.project.wave_definitions) - 1
-        self._push_undo(before)
-        self._refresh_wave_panel()
-        self._update_document_ui()
-
-    def _wave_def_save_to_library(self):
-        """Snapshot the selected LOCAL wave definition into the global Wave
-        Definition Repository. Level and library copies are independent
-        thereafter; no `worldRow` (trigger placement) is stored globally."""
-        if self.selected_wave_def is None or not 0 <= self.selected_wave_def < len(self.project.wave_definitions):
-            messagebox.showinfo("Save to Library", "Select a wave definition first.", parent=self)
-            return
-        wd = self.project.wave_definitions[self.selected_wave_def]
-        default = wd.get("name") or wd["id"]
-        name = simpledialog.askstring("Save to Wave Library",
-                                      "Library name for this wave definition:",
-                                      initialvalue=default, parent=self)
-        if name is None:
-            return
-        name = name.strip() or default
-        try:
-            asset = self.wave_repository.add_from_level_definition(wd, name=name, tags=["from-level"])
-            self.wave_repository.save()
-        except WaveRepositoryError as exc:
-            messagebox.showerror("Save to Library", str(exc), parent=self)
-            return
-        self.status_text.set(
-            f"Saved wave definition '{default}' to the library as {asset['id']} '{name}'.")
-
-    def _wave_library_dialog(self):
-        """Global Wave Definition Repository manager: copy a library definition
-        into this level (as an independent local snapshot), rename a library
-        definition, or delete one. Library edits never alter a level's local
-        copies (snapshot semantics)."""
-        dlg = tk.Toplevel(self)
-        dlg.title("Wave Definition Library (global)")
-        dlg.transient(self)
-        dlg.grab_set()
-        ttk.Label(dlg, text="Reusable wave definitions ('what'); no trigger placement stored here",
-                  padding=(8, 8, 8, 2)).pack(anchor="w")
-        lb = tk.Listbox(dlg, width=52, height=14, exportselection=False)
-        lb.pack(fill="both", expand=True, padx=8, pady=(0, 6))
-        state = {"defs": []}
-
-        def refresh(select_id=None):
-            state["defs"] = self.wave_repository.list()
-            lb.delete(0, "end")
-            for d in state["defs"]:
-                atk = self.attack_name_by_id.get(int(d["attackId"]), f"attack {d['attackId']}")
-                size = sum(int(c.get("count", 0)) for c in d["composition"])
-                lb.insert("end", f"{d['id']}  {d['name']}  [{atk}]  x{size}")
-            if select_id is not None:
-                for i, d in enumerate(state["defs"]):
-                    if d["id"] == select_id:
-                        lb.selection_set(i)
-                        lb.see(i)
-                        break
-
-        def selected():
-            sel = lb.curselection()
-            return state["defs"][sel[0]] if sel else None
-
-        def copy_to_level():
-            d = selected()
-            if d is None:
-                return
-            local_id = _next_id("wd", self.project.wave_definitions)
-            snap = self.wave_repository.snapshot(d["id"], local_id=local_id)
-            before = self._project_state()
-            self.project.wave_definitions.append(snap)
-            errs = validate_project(self.project)
-            if errs:
-                self.project.wave_definitions.pop()
-                messagebox.showerror("Add from Library", "\n".join(errs), parent=dlg)
-                return
-            self.selected_wave_def = len(self.project.wave_definitions) - 1
-            self._push_undo(before)
-            self._refresh_wave_panel()
-            self._update_document_ui()
-            self.status_text.set(
-                f"Copied library wave '{d['name']}' into the level as local def {local_id}.")
-
-        def rename():
-            d = selected()
-            if d is None:
-                return
-            new = simpledialog.askstring("Rename library wave", f"New name for {d['id']}:",
-                                         initialvalue=d["name"], parent=dlg)
-            if not new or not new.strip() or new.strip() == d["name"]:
-                return
-            try:
-                self.wave_repository.update_definition(d["id"], name=new.strip())
-                self.wave_repository.save()
-            except WaveRepositoryError as exc:
-                messagebox.showerror("Rename", str(exc), parent=dlg)
-                return
-            refresh(select_id=d["id"])
-
-        def delete():
-            d = selected()
-            if d is None:
-                return
-            if not messagebox.askyesno(
-                    "Delete library wave",
-                    f"Delete library wave definition {d['id']} ('{d['name']}')?\n\n"
-                    "Levels that already copied it keep their own independent "
-                    "local definition - they are NOT affected.", parent=dlg):
-                return
-            self.wave_repository.remove(d["id"])
-            self.wave_repository.save()
-            refresh()
-
-        bar = ttk.Frame(dlg)
-        bar.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Button(bar, text="Add to level (snapshot)", command=copy_to_level).pack(side="left")
-        ttk.Button(bar, text="Rename…", command=rename).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="Delete", command=delete).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="Close", command=dlg.destroy).pack(side="right")
-        refresh()
-
-    # ---- wave triggers -------------------------------------------------
-    def _trigger_at(self, event):
-        y = int(self.level_canvas.canvasy(event.y))
-        best, bestd = None, TRIGGER_HIT
-        for i, wt in enumerate(self.project.wave_triggers):
-            d = abs(int(wt.get("worldRow", 0)) * CHAR_SIZE - y)
-            if d <= bestd:
-                best, bestd = i, d
-        return best
-
-    def _wave_click(self, event):
-        idx = self._trigger_at(event)
-        if idx is not None:
-            self.selected_trigger = idx
-            self._dragging_trigger = True
-            self._trigger_drag_before = self._project_state()
-            self._draw_wave_triggers()
-            self._sync_trigger_form()
-            self._set_viewport(self.project.wave_triggers[idx]["worldRow"])
-            return
-        if not self.project.wave_definitions:
-            self.bell()
-            self.status_text.set("Add a wave definition first, then click the stage to place a trigger.")
-            return
-        wd_id = (self.project.wave_definitions[self.selected_wave_def]["id"]
-                 if self.selected_wave_def is not None
-                 and 0 <= self.selected_wave_def < len(self.project.wave_definitions)
-                 else self.project.wave_definitions[0]["id"])
-        before = self._project_state()
-        wt = {"id": _next_id("wt", self.project.wave_triggers),
-              "worldRow": self._logical_row_from_event(event), "waveDef": wd_id}
-        self.project.wave_triggers.append(wt)
-        self.selected_trigger = len(self.project.wave_triggers) - 1
-        self._push_undo(before)
-        self._draw_wave_triggers()
-        self._sync_trigger_form()
-        self._set_viewport(wt["worldRow"])
-        self._update_document_ui()
-
-    def _sync_trigger_form(self):
-        if self.selected_trigger is not None and 0 <= self.selected_trigger < len(self.project.wave_triggers):
-            wt = self.project.wave_triggers[self.selected_trigger]
-            self.wt_row_var.set(int(wt.get("worldRow", 0)))
-            self.wt_def_var.set(wt.get("waveDef", ""))
-
-    def _apply_trigger_form(self, event=None):
-        if self.selected_trigger is None or not 0 <= self.selected_trigger < len(self.project.wave_triggers):
-            return
-        before = self._project_state()
-        wt = self.project.wave_triggers[self.selected_trigger]
-        try:
-            wt["worldRow"] = max(0, min(stage_logical_rows(self.project) - 1, int(self.wt_row_var.get())))
-        except (tk.TclError, ValueError):
-            pass
-        if self.wt_def_var.get():
-            wt["waveDef"] = self.wt_def_var.get()
-        errs = validate_project(self.project)
-        if errs:
-            messagebox.showerror("Trigger invalid", "\n".join(errs), parent=self)
-            self._restore_state(before)
-            return
-        self._push_undo(before)
-        self._draw_wave_triggers()
-        self._set_viewport(wt["worldRow"])
-        self._update_document_ui()
-
-    def _remove_trigger(self, idx):
-        before = self._project_state()
-        del self.project.wave_triggers[idx]
-        self.selected_trigger = None
-        self._push_undo(before)
-        self._draw_wave_triggers()
-        self._sync_trigger_form()
-        self._update_document_ui()
-
-    def _delete_selected_trigger(self):
-        if self.edit_mode.get() != "wave" or self.selected_trigger is None:
-            return "break"
-        if 0 <= self.selected_trigger < len(self.project.wave_triggers):
-            self._remove_trigger(self.selected_trigger)
-        return "break"
-
-    # ---- terrain paint -------------------------------------------------
+    # ---- terrain painting ------------------------------------------------
     def _paint_start(self, event):
         self.paint_gesture_before = self._project_state()
         self.last_painted_cell = None
@@ -1643,11 +1204,22 @@ class LevelEditor(tk.Tk):
         if self.show_grid.get():
             self.level_canvas.create_rectangle(x0, y0, x1, y1, outline=GRID, tags=tag)
         self._draw_turret_markers()
-        self._draw_wave_triggers()
         self._draw_viewport_overlay()
 
     # ---- stage/level settings ---------------------------------------
     def _apply_stage_row_count(self, event=None):
+        """Resize the stage, refusing a shrink that would destroy data.
+
+        THE CONTROLLER DECIDES. It refuses a height that would strand a turret,
+        push the no-spawn row past the end of the stage, or leave a trigger with
+        nowhere to happen -- and says which. The v5 version offered to discard
+        turrets and wave triggers for you; with real encounters in the project
+        that is no longer an acceptable default, so the unsafe cases are
+        declined and the author resolves them explicitly.
+
+        Losing only BLANK terrain off the end is still allowed silently; losing
+        painted terrain still asks.
+        """
         try:
             requested = int(self.stage_row_count.get())
         except (tk.TclError, ValueError):
@@ -1658,30 +1230,25 @@ class LevelEditor(tk.Tk):
         if requested == current:
             self.stage_row_count.set(current)
             return "break" if event else None
+
         before = self._project_state()
         if requested < current:
-            removed = self.stage_rows[requested:]
-            slr_new = requested * METATILE_H
-            lost_t = [t for t in iter_turrets(self.project) if t["metatileRow"] >= requested]
-            lost_w = [w for w in self.project.wave_triggers if int(w.get("worldRow", 0)) >= slr_new]
-            has_terrain = any(t != 0 for r in removed for t in r)
-            if (has_terrain or lost_t or lost_w) and not messagebox.askyesno(
-                "Reduce stage height?",
-                f"Rows {requested}..{current - 1} will be discarded"
-                + (f", along with {len(lost_t)} turret(s)" if lost_t else "")
-                + (f" and {len(lost_w)} wave trigger(s)" if lost_w else "")
-                + ".\n\nReduce the stage height anyway?", parent=self):
+            has_terrain = any(t != 0 for r in self.stage_rows[requested:] for t in r)
+            if has_terrain and not messagebox.askyesno(
+                    "Reduce stage height?",
+                    f"Rows {requested}..{current - 1} carry painted terrain and "
+                    f"will be discarded.\n\nReduce the stage height anyway?",
+                    parent=self):
                 self.stage_row_count.set(current)
                 return "break" if event else None
-            del self.stage_rows[requested:]
-            self.project.objects = [o for o in self.project.objects
-                                    if not (isinstance(o, dict) and o.get("type") == OBJECT_TYPE_TURRET
-                                            and o.get("metatileRow", 0) >= requested)]
-            self.project.wave_triggers = [w for w in self.project.wave_triggers
-                                          if int(w.get("worldRow", 0)) < slr_new]
-        else:
-            self.stage_rows.extend([[0] * METATILES_PER_ROW for _ in range(requested - current)])
-        self.selected_turret = self.selected_trigger = None
+        try:
+            self.controller.resize(requested)
+        except ControllerError as exc:
+            messagebox.showerror("Cannot resize stage", str(exc), parent=self)
+            self.stage_row_count.set(current)
+            return "break" if event else None
+
+        self.selected_turret = None
         self._push_undo(before)
         self.stage_row_count.set(self.project.height)
         self._clamp_viewport()
@@ -1693,19 +1260,20 @@ class LevelEditor(tk.Tk):
     def _apply_level_settings(self, event=None):
         try:
             new_palette = {k: int(v.get()) for k, v in self.palette_vars.items()}
-            new_divider = int(self.scroll_divider_var.get())
         except (tk.TclError, ValueError):
             self._sync_level_settings_controls()
             return "break" if event else None
-        ranges = {"background": 15, "multicolour1": 15, "multicolour2": 15, "character": 7}
-        if any(not 0 <= new_palette[k] <= m for k, m in ranges.items()) or not 1 <= new_divider <= 255:
+        # The C64 palette is 0..15 and a character colour is 0..7, because the
+        # engine ORs it with the multicolour bit (TERRAIN_COLOUR_RAM = 8 | col).
+        ranges = {"background": C.MAX_C64_COLOUR, "multicolour1": C.MAX_C64_COLOUR,
+                  "multicolour2": C.MAX_C64_COLOUR, "character": C.MAX_CHARACTER_COLOUR}
+        if any(not 0 <= new_palette[k] <= m for k, m in ranges.items()):
             self._sync_level_settings_controls()
             return "break" if event else None
-        if new_palette == self.project.palette and new_divider == self.project.scroll_frame_divider:
+        if new_palette == self.project.palette:
             return "break" if event else None
         before = self._project_state()
         self.project.palette = new_palette
-        self.project.scroll_frame_divider = new_divider
         self.metatile_image_cache.clear()
         self._push_undo(before)
         self.level_canvas.configure(background=C64_COLOURS[self.project.palette["background"]])
@@ -1716,21 +1284,32 @@ class LevelEditor(tk.Tk):
         return "break" if event else None
 
     def _sync_level_settings_controls(self):
-        self.scroll_divider_var.set(self.project.scroll_frame_divider)
         for k, v in self.palette_vars.items():
             v.set(self.project.palette[k])
 
     def _update_stage_info(self):
-        total_pixels = self.level_height
-        seconds = total_pixels * self.project.scroll_frame_divider / PAL_FRAMES_PER_SECOND
+        """Duration under the CURRENT contract, derived by contract_v2.
+
+            logicalRows    = metatileRows * 4
+            playableRows   = logicalRows - 25      (a screenful never plays)
+            playableFrames = playableRows * 8      (1 px/frame, 8 px a row)
+            seconds        = playableFrames / 50   (PAL)
+
+        The old formula multiplied total pixels by a scroll divider that the
+        engine does not read, and counted the 25 rows the player never scrolls
+        through, so it over-reported every stage.
+        """
+        d = self.controller.duration()
+        seconds = d["seconds"]
         minutes = int(seconds // 60)
         rem = int(round(seconds - minutes * 60))
         if rem == 60:
             minutes, rem = minutes + 1, 0
-        plural = "s" if self.project.scroll_frame_divider != 1 else ""
         self.duration_text.set(
-            f"≈ {minutes}:{rem:02d} at 1 px/{self.project.scroll_frame_divider} frame{plural} PAL  "
-            f"({LEVEL_WIDTH} x {total_pixels}px, {stage_logical_rows(self.project)} logical rows)")
+            f"\u2248 {minutes}:{rem:02d} at 1 px/frame PAL  "
+            f"({d['playableRows']} playable of {d['logicalRows']} logical rows, "
+            f"{d['playableFrames']} frames)")
+        self.encounter_text.set(self.controller.encounter_summary_text())
         self._update_viewport_text()
         self._update_status()
 
@@ -1744,12 +1323,6 @@ class LevelEditor(tk.Tk):
                 f"Turret mode: {self._turret_count()} authored, up to {self._screen_peak_turrets()} on "
                 f"one gameplay screen (pool {TURRET_POOL})  |  click to place/select, right-click/Delete to remove")
             return
-        if mode == "wave":
-            self.status_text.set(
-                f"Wave mode: {len(self.project.wave_triggers)} trigger(s), "
-                f"{len(self.project.wave_definitions)} definition(s)  |  "
-                f"click the stage to place a trigger; drag to move; Delete to remove")
-            return
         info = metatile_set_glyph_cost(self.project)
         self.status_text.set(
             f"Selected: {self.selected_tile} {self._metatile_name(self.selected_tile)}  |  "
@@ -1757,7 +1330,7 @@ class LevelEditor(tk.Tk):
             f"Metatiles {self._metatile_count()}/64  ·  Terrain glyphs {info['used']}/{info['capacity']}  |  "
             f"Palette {self.project.palette['background']}/{self.project.palette['multicolour1']}/"
             f"{self.project.palette['multicolour2']}/{self.project.palette['character']}  |  "
-            f"Divider {self.project.scroll_frame_divider}")
+            f"v6  \u00b7  {self.controller.encounter_summary_text()}")
 
     def _update_document_ui(self):
         mark = " *" if self._is_dirty() else ""
@@ -1778,7 +1351,6 @@ class LevelEditor(tk.Tk):
         self.stage_row_count.set(self.project.height)
         self._draw_palette()
         self._draw_level()
-        self._refresh_wave_panel()
         self._update_stage_info()
         self._update_document_ui()
 
@@ -1788,20 +1360,16 @@ class LevelEditor(tk.Tk):
         self.redo_stack.clear()
 
     def _restore_state(self, state):
-        (name, rows, palette_items, divider, obj_keys, meta_items, defs_json, trig_json,
-         tileset_json, metatile_set_json) = state
-        self.project.name = name
-        self.project.metatile_rows = [list(r) for r in rows]
-        self.project.palette = dict(palette_items)
-        self.project.scroll_frame_divider = divider
-        self.project.objects = [o for o in (self._obj_from_key(k) for k in obj_keys) if o is not None]
-        self.project.metatile_metadata = dict(meta_items)
-        self.project.wave_definitions = json.loads(defs_json)
-        self.project.wave_triggers = json.loads(trig_json)
-        self.project.tileset = json.loads(tileset_json) if tileset_json else None
-        self.project.level_metatile_set = json.loads(metatile_set_json) if metatile_set_json else None
-        self.selected_turret = self.selected_trigger = None
-        self.selected_tile = min(self.selected_tile, self._metatile_count() - 1)
+        """Rebuild the document from a snapshot, encounters and all.
+
+        A whole-project restore rather than a field-by-field one: the snapshot
+        IS the project's JSON, so anything the GUI cannot edit is restored with
+        the same fidelity as the terrain, and undo can never quietly drop it.
+        """
+        self.controller.restore_json(state)
+        self.project = self.controller.view
+        self.selected_turret = None
+        self.selected_tile = min(self.selected_tile, max(0, self._metatile_count() - 1))
         self.metatile_image_cache.clear()
         self._refresh_all()
 
@@ -1829,18 +1397,22 @@ class LevelEditor(tk.Tk):
             return False
         return self._save_project() if answer else True
 
-    def _adopt_project(self, project, path):
-        """Switch to a level package, resetting ALL editor state (no stale data)."""
-        self.project = project
-        ensure_level_metatile_set(self.project)
+    def _adopt_project(self, controller, path):
+        """Switch to a level package, resetting ALL editor state (no stale data).
+
+        Takes a CONTROLLER, not a project: the controller is what holds the live
+        v6 document, its path and any migration notices, and swapping the whole
+        thing is what guarantees no field of the previous document survives.
+        """
+        self.controller = controller
+        self.project = controller.view
         self.project_path = Path(path) if path else None
         self.metatile_image_cache.clear()
         self.undo_stack.clear()
         self.redo_stack.clear()
-        self.selected_turret = self.selected_trigger = self.selected_wave_def = None
-        self.selected_tile = min(self.selected_tile, self._metatile_count() - 1)
+        self.selected_turret = None
+        self.selected_tile = min(self.selected_tile, max(0, self._metatile_count() - 1))
         self.paint_gesture_before = None
-        self._dragging_trigger = False
         self.edit_mode.set("terrain")
         self.viewport_top = default_viewport_top(self.project)
         self.saved_state = None if path is None else self._project_state()
@@ -1858,34 +1430,54 @@ class LevelEditor(tk.Tk):
                                        minvalue=MIN_STAGE_ROWS, maxvalue=MAX_STAGE_ROWS, parent=self)
         if rows is None:
             return "break"
-        project = self._seed_project(name, [[0] * METATILES_PER_ROW for _ in range(rows)],
-                                     dict(DEFAULT_PALETTE), DEFAULT_SCROLL_FRAME_DIVIDER)
-        self._adopt_project(project, None)   # unsaved; Save writes levels/<name>/level.json
+        controller = EditorController(self._seed_v6_project(name, rows))
+        self._adopt_project(controller, None)   # unsaved; Save writes level.v6.json
         return "break"
 
     def _open_level(self):
         if not self._confirm_discard():
             return "break"
-        initial = self.levels_dir if any(self.levels_dir.glob("*/level.json")) else self.legacy_dir
+        initial = self.levels_dir if self.levels_dir.exists() else self.legacy_dir
         path = filedialog.askopenfilename(
-            title="Open level package (levels/<name>/level.json) or legacy project",
+            title="Open level package (levels/<name>/level.v6.json) or an older project",
             initialdir=initial,
-            filetypes=(("Level packages", "level.json"), ("Level JSON", "*.json"), ("All files", "*.*")),
+            filetypes=(("v6 level packages", "level.v6.json"),
+                       ("Level JSON", "*.json"), ("All files", "*.*")),
             parent=self)
         if not path:
             return "break"
         try:
-            project = load_project(path, default_tileset=self._baseline_tileset())
-        except (OSError, ProjectValidationError) as exc:
+            # ONE LOADER FOR EVERY VERSION. v6 opens directly; v1..v5 go through
+            # the Phase 1 migration and keep their notices, so an author is told
+            # what could not be carried rather than discovering it later.
+            controller = EditorController.load(path)
+        except Exception as exc:                          # noqa: BLE001
             messagebox.showerror("Open Level", str(exc), parent=self)
             return "break"
-        self._adopt_project(project, path)
+        self._adopt_project(controller, path)
+        self._report_migration(controller)
         return "break"
 
+    def _report_migration(self, controller):
+        """Say what a migration discarded -- concisely, and only when it did."""
+        if not controller.migrated:
+            return
+        dropped = controller.discard_notices()
+        head = (f"Opened a formatVersion {controller.from_version} project and "
+                f"migrated it to v6.\n\nSaving will write v6.")
+        if dropped:
+            head += ("\n\nData that could NOT be carried forward:\n"
+                     + "\n".join(f"\u2022 {d.message}" for d in dropped))
+        messagebox.showinfo("Project migrated", head, parent=self)
+
     def _validate_before_write(self):
-        errors = validate_project(self.project)
-        if errors:
-            messagebox.showerror("Project validation failed", "\n".join(errors), parent=self)
+        """v6 validation. Errors block the write and are shown in full."""
+        result = self.controller.validate()
+        if not result.ok:
+            messagebox.showerror(
+                "Project validation failed",
+                "\n".join(f"\u2022 {i.message}" for i in result.errors),
+                parent=self)
             return False
         seam = wrap_seam_warning(self.project)
         if seam and not messagebox.askyesno("Possible wrap seam", seam + "\n\nSave anyway?", parent=self):
@@ -1893,15 +1485,11 @@ class LevelEditor(tk.Tk):
         return True
 
     def _default_level_path(self):
-        return self.levels_dir / self.project.name / "level.json"
+        return self.levels_dir / self.project.name / "level.v6.json"
 
     def _save_project(self):
         if self.project_path is None:
-            target = self._default_level_path()
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if not self._validate_before_write():
-                return False
-            return self._write_project(target, already_validated=True)
+            return self._write_project(self._default_level_path())
         return self._write_project(self.project_path)
 
     def _save_project_as(self):
@@ -1909,50 +1497,62 @@ class LevelEditor(tk.Tk):
             return False
         path = filedialog.asksaveasfilename(
             title="Save level package", initialdir=self._default_level_path().parent,
-            initialfile="level.json", defaultextension=".json",
-            filetypes=(("Level JSON", "*.json"), ("All files", "*.*")), parent=self)
+            initialfile="level.v6.json", defaultextension=".json",
+            filetypes=(("v6 level package", "*.json"), ("All files", "*.*")), parent=self)
         if not path:
             return False
         return self._write_project(Path(path), already_validated=True)
 
     def _write_project(self, path, already_validated=False):
+        """Write deterministic v6 through the controller.
+
+        THE WHOLE PROJECT IS WRITTEN, including the movement programs, wave
+        definitions, triggers and no-spawn row this phase cannot edit. Nothing
+        is reassembled from what the GUI happens to know about -- see
+        controller_v6 -- so opening and saving without an edit reproduces the
+        file byte for byte.
+        """
         if not already_validated and not self._validate_before_write():
             return False
         try:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            save_project(self.project, path)
-        except (OSError, ProjectValidationError) as exc:
+            self.controller.save(path)
+        except (OSError, ControllerError) as exc:
             messagebox.showerror("Save Project", str(exc), parent=self)
             return False
-        self.project_path = Path(path)
+        self.project_path = self.controller.path
         self.saved_state = self._project_state()
         self._update_document_ui()
         return True
 
     def _export_kickassembler(self):
-        readiness = export_readiness_errors(self.project)
-        if readiness:
-            messagebox.showerror("Cannot export", "\n".join(readiness), parent=self)
-            return "break"
+        """Generate the six level files with the Phase 4 v6 exporter."""
         if not self._validate_before_write():
             return "break"
-        # src/<level>/ is the current layout and the Makefile's LEVELDIR default;
-        # src/generated/<level>/ has not existed for some time.
+        # src/<level>/ is the current layout and the Makefile's LEVELDIR default.
+        # src/generated/<level>/ has not existed for a long time.
         default_dir = self.repo_root / "src" / self.project.name
-        out = filedialog.askdirectory(title=f"Export level '{self.project.name}' package (4 .asm files)",
-                                      initialdir=default_dir if default_dir.parent.exists() else self.repo_root,
-                                      parent=self)
+        out = filedialog.askdirectory(
+            title=f"Export level '{self.project.name}' package "
+                  f"({len(GENERATED_NAMES)} .asm files)",
+            initialdir=default_dir if default_dir.parent.exists() else self.repo_root,
+            parent=self)
         if not out:
             return "break"
         try:
-            paths = export_level(self.project, out, engine_data=self.data)
-        except (OSError, ProjectValidationError) as exc:
+            # carry_enemies_from is the destination itself: stage_enemies.asm is
+            # level-owned but hand-authored, and a level directory without it
+            # does not assemble.
+            written = self.controller.export(out, carry_enemies_from=out)
+        except (OSError, ControllerError) as exc:
             messagebox.showerror("Export failed", str(exc), parent=self)
             return "break"
-        gameplay = "  (imported by main.asm; rebuild to play)" if self.project.name == "level1" else \
-                   "  (coexists on disk; not imported by gameplay)"
-        messagebox.showinfo("Level package exported",
-                            "Generated:\n" + "\n".join(str(p) for p in paths) + "\n" + gameplay, parent=self)
+        gameplay = ("  (imported by main.asm; rebuild to play)"
+                    if self.project.name == "level1"
+                    else "  (coexists on disk; not imported by gameplay)")
+        messagebox.showinfo(
+            "Level package exported",
+            "Generated:\n" + "\n".join(str(written[k]) for k in sorted(written))
+            + "\n" + gameplay, parent=self)
         return "break"
 
     def _on_close(self):
