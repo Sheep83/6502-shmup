@@ -1386,6 +1386,13 @@ class LevelEditor(tk.Tk):
         self._draw_level()
         self._update_stage_info()
         self._update_document_ui()
+        # THE ENCOUNTER WORKSPACE IS PART OF THE DOCUMENT, and this is the one
+        # path every whole-document redraw goes through -- undo and redo
+        # included, via _restore_state. Phase 5B refreshed it only from the
+        # level-settings path, so undoing an encounter edit restored the model
+        # and left the other window showing the state before it.
+        if self._encounters is not None and self._encounters.winfo_exists():
+            self._encounters.refresh()
 
     # ---- undo/redo --------------------------------------------------
     def _push_undo(self, state):

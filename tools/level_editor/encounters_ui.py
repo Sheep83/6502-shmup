@@ -19,16 +19,18 @@ straight to the thing they are about. Widget code parses text (an integer entry
 refuses letters) and nothing more; there is no second opinion about what is
 legal, because two opinions is how an editor starts disagreeing with its engine.
 
-NO TRAJECTORY PREVIEW. Stages are a textual list in this phase. Drawing the path
-means reimplementing the quarter-pixel interpreter and the despawn rules, and
-half of that is worse than none -- it would pass paths the engine rejects.
-Phase 6 builds it against this model, which by then is proven.
+THE TRAJECTORY PREVIEW (Phase 6A) lives in preview_ui.py and draws nothing it
+computes itself: every position comes out of movement_sim, which is proved
+frame-for-frame against the real 6502. This file only tells it WHAT is
+selected and when the project changed underneath it. Previewing is read-only
+-- playing and scrubbing never reach the undo stack.
 """
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 import contract_v2 as C
 from controller_v6 import ControllerError
+from preview_ui import PreviewPanel
 
 # --- timeline geometry ------------------------------------------------------
 TL_W = 210                  # canvas width
@@ -71,8 +73,8 @@ class EncounterWorkspace(tk.Toplevel):
         self.host = host
         self.controller = host.controller
         self.title(f"Encounters — {self.controller.project.name}")
-        self.geometry("1180x760")
-        self.minsize(980, 620)
+        self.geometry("1620x800")
+        self.minsize(1100, 640)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         self.sel_trigger = None
@@ -129,6 +131,15 @@ class EncounterWorkspace(tk.Toplevel):
         self._build_triggers(self.tabs)
         self._build_waves(self.tabs)
         self._build_programs(self.tabs)
+        self.tabs.bind("<<NotebookTabChanged>>",
+                       lambda e: self._sync_preview_source())
+
+        # ---- the preview (Phase 6A) ------------------------------------
+        # A column of its own rather than a pane inside the notebook: the
+        # point of a preview is to be visible WHILE the stage being edited is
+        # visible, and a tab that hid the stage list would defeat it.
+        self.preview = PreviewPanel(body, self)
+        self.preview.grid(row=0, column=2, sticky="ns", padx=(8, 0))
 
         # ---- validation ------------------------------------------------
         vf = ttk.LabelFrame(self, text="Validation", padding=4)
@@ -370,9 +381,14 @@ class EncounterWorkspace(tk.Toplevel):
         self.controller = controller
         self.sel_trigger = self.sel_wave = self.sel_prog = self.sel_stage = None
         self.title(f"Encounters — {controller.project.name}")
+        # A preview left running would go on animating a wave belonging to the
+        # document that was just closed.
+        self.preview.pause()
+        self.preview.set_source(None)
         self.refresh()
 
     def _close(self):
+        self.preview.pause()        # never leave an after() job behind
         self.host._encounters = None
         self.destroy()
 
@@ -390,6 +406,38 @@ class EncounterWorkspace(tk.Toplevel):
             self._draw_timeline()
         finally:
             self._syncing = False
+        # AFTER the sync flag is down, and last. The preview reads the live
+        # project, so it must not run while half the widgets have been
+        # repopulated -- and it re-flies the wave only if what it depends on
+        # actually changed (see PreviewPanel._signature).
+        self._sync_preview_source()
+
+    def _sync_preview_source(self):
+        """Point the preview at whatever tab and row the author is on.
+
+        The TRIGGER is the most contextual, because it is the only selection
+        that resolves the whole authored chain -- species included, which is
+        what decides whether an ordinary-wave preview is honest at all.
+        """
+        if not hasattr(self, "preview") or not self.preview.winfo_exists():
+            return
+        try:
+            tab = self.tabs.index(self.tabs.select())
+        except tk.TclError:
+            tab = 0
+        proj = self.controller.project
+        source = None
+        if tab == 0 and self.sel_trigger is not None and (
+                0 <= self.sel_trigger < len(proj.triggers)):
+            source = ("trigger", self.sel_trigger)
+        elif tab == 1 and self.sel_wave is not None and (
+                0 <= self.sel_wave < len(proj.wave_definitions)):
+            source = ("wave", proj.wave_definitions[self.sel_wave].id)
+        elif tab == 2 and self.sel_prog is not None and (
+                0 <= self.sel_prog < len(proj.movement_programs)):
+            source = ("program", proj.movement_programs[self.sel_prog].id)
+        self.preview.set_source(source)
+        self.preview.refresh()
 
     def _refresh_status(self):
         cap = self.controller.capacity()
@@ -722,6 +770,7 @@ class EncounterWorkspace(tk.Toplevel):
         self.sel_trigger = int(sel[0]) if sel else None
         self._refresh_trigger_detail()
         self._draw_timeline()
+        self._sync_preview_source()
 
     def _trigger_add(self):
         n = len(self.controller.project.triggers)
@@ -787,6 +836,7 @@ class EncounterWorkspace(tk.Toplevel):
         sel = self.wave_list.curselection()
         self.sel_wave = sel[0] if sel else None
         self._refresh_wave_detail()
+        self._sync_preview_source()
 
     def _wave_add(self):
         i = self._edit(self.controller.add_wave_definition)
@@ -840,6 +890,7 @@ class EncounterWorkspace(tk.Toplevel):
         self.sel_prog = sel[0] if sel else None
         self.sel_stage = None
         self._refresh_stages()
+        self._sync_preview_source()
 
     def _prog_add(self):
         i = self._edit(self.controller.add_movement_program)
