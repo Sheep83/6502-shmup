@@ -153,10 +153,19 @@ build:
 	@mkdir -p build
 	@awk '/^metatileDefs:/,/^METATILE_DEFS_END:/' "$(MAPSRC)" > "$(MAPDEFS)"
 	@awk '/^stageMetatileRows:/,/^STAGE_METATILE_ROWS_END:/' "$(MAPSRC)" > "$(MAPROWS)"
-	java -jar "$(KA)" src/main.asm -libdir "$(LEVELDIR)" \
+# THE SECOND -libdir IS WHAT LETS A LEVEL OWN ITS ENCOUNTER SOURCE. The level's
+# wave_programs.asm / wave_encounters.asm live in $(LEVELDIR) and import the
+# ENGINE-owned vocabulary -- movement_format.asm, encounter_format.asm -- which
+# stays in src/. KickAssembler resolves an #import against the importing file's
+# own directory first and then the libdirs, so a level-owned file cannot reach
+# src/ without this. (That same precedence is why src/ may not keep copies of the
+# encounter files: while it did, the engine silently used those and editing the
+# level-owned ones did nothing -- measured, not assumed.)
+	java -jar "$(KA)" src/main.asm -libdir "$(LEVELDIR)" -libdir "$(ROOT)/src" \
 	      -odir "$(ROOT)/build" -o "$(PRG)" -vicesymbols
 	java -jar "$(KA)" src/level_package.asm -libdir "$(ROOT)/build" \
-	      -libdir "$(LEVELDIR)" -odir "$(ROOT)/build" -o "$(LEVELPRG)"
+	      -libdir "$(LEVELDIR)" -libdir "$(ROOT)/src" \
+	      -odir "$(ROOT)/build" -o "$(LEVELPRG)"
 	@rm -f "$(D64)"
 	@$(C1541) -format "6502engine,01" d64 "$(D64)" >/dev/null
 	@$(C1541) "$(D64)" -write "$(PRG)" engine >/dev/null

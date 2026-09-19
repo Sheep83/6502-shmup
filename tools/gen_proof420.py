@@ -63,6 +63,13 @@ def main():
     no_spawn = stage_end - QUIET_ROWS
     cfg2 = re.sub(r"(STAGE_METATILE_ROWS\s*=\s*)\d+", r"\g<1>%d" % rows, cfg, count=1)
     cfg2 = re.sub(r"(STAGE_NO_SPAWN_ROW\s*=\s*)\d+", r"\g<1>%d" % no_spawn, cfg2, count=1)
+    # The generated config's own comment quotes the derived stage end and quiet
+    # zone. Rescaling the constants and leaving the prose behind would ship a
+    # file that contradicts itself.
+    cfg2 = re.sub(r"(STAGE_METATILE_ROWS \* 4 - 25 = )\d+", r"\g<1>%d" % stage_end,
+                  cfg2, count=1)
+    cfg2 = re.sub(r"(// leaves )\d+( rows of approach)", r"\g<1>%d\g<2>" % QUIET_ROWS,
+                  cfg2, count=1)
     (out / "stage_config.asm").write_text(
         cfg2.replace("// Level: level1", "// Level: level1 x%d CAPACITY PROOF" % COPIES))
 
@@ -101,7 +108,13 @@ def main():
         ".var turretRows = List()" + "".join(".add(%d)" % r for r, _ in pairs) + "\n")
 
     # ---- shared, unchanged ------------------------------------------------
-    for f in ("stage_charset.asm", "stage_enemies.asm"):
+    # THE ENCOUNTER SOURCE TRAVELS TOO. wave_programs.asm and wave_encounters.asm
+    # are LEVEL-owned (Contract v2 Phase 4), so a level directory without them
+    # does not assemble. The proof's stage is four copies of level 1's terrain and
+    # it keeps level 1's encounters unchanged -- only the no-spawn row is rescaled
+    # above, and every authored trigger row stays far below it.
+    for f in ("stage_charset.asm", "stage_enemies.asm",
+              "wave_programs.asm", "wave_encounters.asm"):
         shutil.copyfile(SRC / f, out / f)
 
     print(f"{out}: {rows} metatile rows ({rows*10} map bytes), "
