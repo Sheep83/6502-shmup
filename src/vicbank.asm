@@ -109,6 +109,14 @@
     .error "the HUD bitmap block is not a whole number of mirror slices"
 }
 
+// vicMirrorHud pins the heat gauge to a whole-slice copy every frame, which is
+// only correct while the gauge is exactly slice 0 of the HUD block: blocks 0
+// and 1, bytes 0..VB_SLICE-1. Reorder the HUD and this fails the build rather
+// than silently going back to publishing the bar every seventh frame.
+.if (HUD_HEAT_L != HUD_SPRITES || HUD_HEAT_R - HUD_HEAT_L != 64 || VB_SLICE != 128) {
+    .error "the heat gauge is no longer exactly slice 0 -- revisit vicMirrorHud's pin"
+}
+
 // --- the assertions that make the layout a fact rather than a comment -------
 .if ((VB2_SCREEN & $3ff) != 0)   { .error "the bank 2 screen matrix must be 1 KB aligned" }
 .if ((VB2_CHARSET & $7ff) != 0)  { .error "the bank 2 terrain charset must be 2 KB aligned" }
@@ -487,6 +495,51 @@ vicMirrorTick:
     jmp vicMirrorSlice
 
 vicMirrorHud:
+    // ---- THE HEAT GAUGE CROSSES EVERY FRAME, AHEAD OF THE ROTATION ------
+    //
+    // THE ROUND ROBIN IS A PUBLICATION RATE, AND FOR ONE BLOCK IT WAS TOO SLOW.
+    // The reasoning below this routine says a seventh of a second of lag on a
+    // heat bar is not visible, and that is true -- but LAG is not the thing the
+    // player sees. QUANTISATION is. The bar moves one pixel every ~3 frames
+    // while firing and every ~2 while cooling, so publishing it every 7 frames
+    // does not show a smooth bar a seventh of a second late: it shows the bar
+    // standing still for six frames and then jumping the 2 or 3 pixels that
+    // accumulated. MEASURED over 23 boss frames with fire held: the bank 0
+    // bitmap hud.asm draws changed 8 times, the bank 2 copy the VIC actually
+    // fetches changed 3 -- one of those a 3-pixel step. The heat STATE was
+    // identical in LP_LEVEL and LP_BOSS throughout (+2 on 39 frames of 39), so
+    // nothing was wrong with the heat system; the gauge was simply being
+    // published at a seventh of the rate at which it changes.
+    //
+    // It is the only block in the HUD that animates continuously. The score,
+    // the lives and the P economy change a few times a fight, and for those the
+    // original reasoning holds exactly -- they keep taking turns.
+    //
+    // HUD_HEAT_L and HUD_HEAT_R are blocks 0 and 1, which is bytes 0..127 of
+    // the block: the heat gauge IS slice 0, whole and alone, so pinning it is
+    // one more VB_SLICE copy and no new cursor. The guard at the top of this
+    // file fails the build if that stops being true.
+    //
+    // COST: ~1,800 cycles per displayed frame, paid from the idle spin (see
+    // vicMirrorLive) and only while bank 2 is up. In bank 0 the VIC reads the
+    // originals and this routine is never reached.
+    lda #<HUD_HEAT_L
+    sta vbCopySrc + 1
+    lda #>HUD_HEAT_L
+    sta vbCopySrc + 2
+    lda #<(HUD_HEAT_L + VB2_BASE)
+    sta vbCopyDst + 1
+    lda #>(HUD_HEAT_L + VB2_BASE)
+    sta vbCopyDst + 2
+    jsr vicMirrorSlice
+
+    // ---- ...and the block as a whole still takes its turn ----------------
+    // The rotation is untouched: it still walks 0..VB_HUD_SLICES-1 and still
+    // raises vicMirrorDone on the wrap, so the pre-warm handshake in
+    // src/boss.asm means exactly what it did. Slice 0 comes round once every
+    // seven frames and is copied a second time that frame, which is 1,800
+    // wasted cycles a seventh of the time and not worth a cursor to dodge.
+    //
     // THE SLICE'S BYTE OFFSET IS n * 128, AND IT IS SIXTEEN BITS.
     //
     // This read `asl` for the low byte, which is n * 2 -- the right answer only

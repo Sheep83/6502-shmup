@@ -139,6 +139,7 @@ VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 .PHONY: test-boot test-production test-movement-pool test-no-spawn-row test-turret-regression
 .PHONY: test-encounter-director test-player-ship test-flight-paths test-ingress-egress test-clip-scratch
 .PHONY: test-sfx test-enemy-fire test-pickup test-lifecycle test-player-death test-boss
+.PHONY: test-heat-cadence
 .PHONY: run run-proof420 run-d64 clean
 
 all: build
@@ -318,6 +319,7 @@ test: build
 	python3 tests/test_lifecycle.py
 	python3 tests/test_player_death.py
 	python3 tests/test_boss.py
+	python3 tests/test_heat_cadence.py
 
 test-boot: build
 	python3 tests/test_boot.py
@@ -360,6 +362,15 @@ test-player-death: build
 
 test-boss: build
 	python3 tests/test_boss.py
+
+# The heat gauge is published at the same rate in the boss arena as in ordinary
+# play. The arena runs in VIC bank 2, where the HUD is a mirror walked across a
+# slice a frame -- and the gauge is slice 0, so it used to reach the player only
+# every VB_HUD_SLICES frames while it changes every 2-3. It asserts the heat
+# STATE cadence and the PUBLISHED cadence separately, because the state was
+# never wrong and a test that only checked it passes against the defect.
+test-heat-cadence: build
+	python3 tests/test_heat_cadence.py
 
 # NON-DEFAULT ON PURPOSE. The composable-movement vocabulary (v1.1): stage
 # transitions, a three-stage path walked end to end, an arc and its mirror on
