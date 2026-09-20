@@ -26,6 +26,7 @@ until a preview simulator exists that can be checked against them (Contract v2
 report §7.5, phases 4/6). Nothing structural is weakened to compensate.
 """
 from dataclasses import dataclass, field
+import re
 
 import contract_v2 as C
 from project_v6 import ProjectV6
@@ -67,8 +68,32 @@ class ValidationResult:
         return "\n".join(lines)
 
 
+# AN AUTHORED ID BECOMES AN ASSEMBLER LABEL. A wave definition called "loop x 5"
+# is a perfectly good name and an impossible symbol: the exporter would have to
+# emit `.const WAVE_DEF_LOOP X 5`, which does not assemble. The rule was already
+# enforced at export time, which meant an author could name a definition, work on
+# it, and only discover the problem when the whole package refused to write. It
+# is a validation rule now, so the panel and the rename dialog say so first.
+SYMBOL_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
 def _is_int(v):
     return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _check_id(r, kind, code, ident, path):
+    """Every id that becomes an assembler symbol must survive becoming one."""
+    if not ident:
+        r.error(f"{code}.no_id", f"a {kind} needs an id", path)
+        return False
+    if not SYMBOL_ID.match(ident):
+        r.error(f"{code}.bad_id",
+                f"{kind} id {ident!r} cannot become an assembler symbol. Use "
+                f"lower-case letters, digits and underscores, starting with a "
+                f"letter -- for example loop_x5, sweep_right, dive2",
+                path)
+        return False
+    return True
 
 
 def validate(project):
@@ -294,8 +319,8 @@ def _validate_movement(p, r):
     ids = set()
     for i, prog in enumerate(p.movement_programs):
         path = f"movementPrograms[{i}]"
-        if not prog.id:
-            r.error("movement.no_id", "a movement program needs an id", path)
+        if not _check_id(r, "movement program", "movement", prog.id, path):
+            pass
         elif prog.id in ids:
             r.error("movement.duplicate_id",
                     f"duplicate movement program id {prog.id!r}", path)
@@ -405,8 +430,8 @@ def _validate_wave_definitions(p, r):
     ids = set()
     for i, d in enumerate(p.wave_definitions):
         path = f"waveDefinitions[{i}]"
-        if not d.id:
-            r.error("wavedef.no_id", "a wave definition needs an id", path)
+        if not _check_id(r, "wave definition", "wavedef", d.id, path):
+            pass
         elif d.id in ids:
             r.error("wavedef.duplicate_id",
                     f"duplicate wave definition id {d.id!r}", path)
@@ -433,6 +458,29 @@ def _validate_wave_definitions(p, r):
                     f"startY must fit the eight bits logY carries 0..{C.MAX_SPAWN_Y}; "
                     f"got {d.start_y}", f"{path}.startY")
         if d.count >= 1:
+            # EVERY MEMBER MUST BE BORN OUT OF SIGHT, which src/waves.asm proves
+            # at assembly time -- so without this the first sign of a bad spawn
+            # was KickAssembler refusing the whole build, long after the field
+            # that caused it. Checked per member because xStep/yStep walk the
+            # later ones somewhere the first one never goes.
+            for m in range(d.count):
+                mx = d.start_x + d.x_step * m
+                my = d.start_y + d.y_step * m
+                if not (0 <= mx <= C.MAX_SPAWN_X and 0 <= my <= C.MAX_SPAWN_Y):
+                    continue            # reported by the range checks below
+                if not C.spawn_is_hidden(mx, my):
+                    r.error("wavedef.spawn_visible",
+                            f"wave {d.id!r} member {m} spawns at ({mx},{my}), "
+                            f"partially inside the visible playfield: a sprite "
+                            f"covers x..x+{C.SPRITE_LAST_COLUMN} and y..y+"
+                            f"{C.SPRITE_HEIGHT - 1}, and the playfield is columns "
+                            f"{C.DISPLAY_X_FIRST}..{C.DISPLAY_X_LAST} from raster "
+                            f"{C.APERTURE_TOP_RASTER}. Move it above the aperture "
+                            f"(y <= {C.APERTURE_TOP_RASTER - C.SPRITE_HEIGHT}), "
+                            f"off the left (x = 0) or off the right "
+                            f"(x > {C.DISPLAY_X_LAST})",
+                            f"{path}.member[{m}]")
+                    break               # one report per definition is enough
             last_x = d.start_x + d.x_step * (d.count - 1)
             last_y = d.start_y + d.y_step * (d.count - 1)
             if not (0 <= last_x <= C.MAX_SPAWN_X):
@@ -531,13 +579,12 @@ def _validate_triggers(p, r):
                     f"trigger rows must be non-decreasing: {rows[i]} follows "
                     f"{rows[i - 1]}", f"triggers[{i}].worldProgress")
             break
-    for i in range(1, len(ts)):
-        if ts[i].species == ts[i - 1].species and ts[i].species in C.SPECIES:
-            r.error("trigger.repeated_species",
-                    f"two consecutive authored waves use the same species "
-                    f"({ts[i].species}); the engine asserts the alternation",
-                    f"triggers[{i}].species")
-            break
+    # CONSECUTIVE TRIGGERS MAY SHARE A SPECIES. This used to be an error because
+    # src/waves.asm asserted the alternation at assembly time; that assertion was
+    # about Level 1's content, not about runtime safety, and it has been removed.
+    # A second Dropper arriving while one is alive is substituted with a Ring by
+    # the engine and still flies its authored path -- proved on the machine by
+    # tests/test_species_order.py -- so any order is legal to author.
     # WAVE_SLOTS instances run at once and a third arrival is DROPPED, not queued.
     for i in range(C.WAVE_SLOTS, len(ts)):
         window = rows[i] - rows[i - C.WAVE_SLOTS]

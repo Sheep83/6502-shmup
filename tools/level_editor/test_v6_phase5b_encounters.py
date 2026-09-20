@@ -88,38 +88,57 @@ def roundtrip(controller):
 # ===========================================================================
 # 1. What the canonical project carries
 # ===========================================================================
+# THE CANONICAL PROJECT IS AUTHORED CONTENT. These checks used to name Level 1's
+# four triggers and their exact rows, species, masks and sides -- so editing the
+# level failed the file that exists to protect editing it. The controller's job
+# is to surface what the FILE holds, so the expectation is read from the file.
 c = fresh()
-check("the canonical triggers are 48/52/90/126",
-      [t.world_progress for t in c.project.triggers] == [48, 52, 90, 126])
-check("...with species RING/DROPPER/RING/DROPPER",
-      [t.species for t in c.project.triggers] == ["RING", "DROPPER", "RING", "DROPPER"])
+_disk = json.loads(CANON.read_text(encoding="utf-8"))
+_dt = _disk["triggers"]
+check("the controller surfaces the canonical triggers exactly as stored",
+      [t.world_progress for t in c.project.triggers] == [d["worldProgress"] for d in _dt],
+      str([t.world_progress for t in c.project.triggers]))
+check("...with their authored species",
+      [t.species for t in c.project.triggers] == [d["species"] for d in _dt])
 check("...fire masks as member indices",
-      [t.fire_mask for t in c.project.triggers] == [[0, 2], [1], [0, 2], []])
-check("...and sides LEFT/LEFT/LEFT/RIGHT",
-      [t.dropper_side for t in c.project.triggers] == ["LEFT", "LEFT", "LEFT", "RIGHT"])
-check("capacity reports triggers, waves, records and bytes",
-      c.capacity() == {"triggers": (4, 180), "waveDefinitions": (4, 26),
-                       "movementRecords": (13, 64), "movementBytes": (52, 256)},
+      [t.fire_mask for t in c.project.triggers] == [d["fireMask"] for d in _dt])
+check("...and their Dropper sides",
+      [t.dropper_side for t in c.project.triggers] == [d["dropperSide"] for d in _dt])
+check("capacity reports triggers, waves, records and bytes against the caps",
+      c.capacity() == {"triggers": (len(_dt), 180),
+                       "waveDefinitions": (len(_disk["waveDefinitions"]), 26),
+                       "movementRecords": (c.project.movement_records, 64),
+                       "movementBytes": (c.project.movement_bytes, 256)},
       str(c.capacity()))
+_q = c.quiet_zone()
+_playable = _disk["stage"]["metatileRows"] * 4 - 25
 check("the quiet zone is derived from the 1 px/frame contract",
-      c.quiet_zone() == {"noSpawnRow": 340, "playableProgress": 395,
-                         "rows": 55, "seconds": 8.8}, str(c.quiet_zone()))
+      (_q["noSpawnRow"] == _disk["stage"]["noSpawnRow"]
+       and _q["playableProgress"] == _playable
+       and _q["rows"] == _playable - _q["noSpawnRow"]
+       and abs(_q["seconds"] - _q["rows"] * 8 / 50) < 1e-9), str(_q))
 check("the project validates clean before any edit", c.validate().ok)
 
 # ===========================================================================
 # 2. Trigger CRUD and ordering
 # ===========================================================================
+# CRUD IS TESTED RELATIVE TO WHATEVER THE LEVEL HOLDS: append past the last row,
+# move it between the first two, delete it, and expect the original list back.
 c = fresh()
-i = c.add_trigger(world_progress=200, wave_definition="sweep", species="RING")
-check("add_trigger inserts and returns its sorted index", i == 4,
+_rows0 = [t.world_progress for t in c.project.triggers]
+_wave = c.project.wave_definitions[0].id
+i = c.add_trigger(world_progress=_rows0[-1] + 40, wave_definition=_wave,
+                  species="RING")
+check("add_trigger inserts and returns its sorted index", i == len(_rows0),
       f"index {i}, rows {[t.world_progress for t in c.project.triggers]}")
-i = c.update_trigger(i, world_progress=60)
+_between = (_rows0[0] + _rows0[1]) // 2
+i = c.update_trigger(i, world_progress=_between)
 check("moving a trigger re-sorts and returns the new index",
-      i == 2 and [t.world_progress for t in c.project.triggers] == [48, 52, 60, 90, 126],
-      f"index {i}")
+      i == 1 and [t.world_progress for t in c.project.triggers]
+      == sorted(_rows0 + [_between]), f"index {i}")
 c.delete_trigger(i)
 check("delete_trigger removes exactly it",
-      [t.world_progress for t in c.project.triggers] == [48, 52, 90, 126])
+      [t.world_progress for t in c.project.triggers] == _rows0)
 
 # stable ordering for ties -- two triggers on one row is how a mixed-species
 # moment is authored, and re-saving must not shuffle them
@@ -135,11 +154,14 @@ check("...and the validator permits equal rows (only a DECREASE is an error)",
       "trigger.unsorted" not in codes(c2))
 
 c3 = fresh()
+_src = fresh().project.triggers[0]
 j = c3.duplicate_trigger(0)
 check("duplicate_trigger copies the whole trigger one row later",
-      (c3.project.triggers[j].world_progress == 49
-       and c3.project.triggers[j].wave_definition == "sweep"
-       and c3.project.triggers[j].fire_mask == [0, 2]),
+      (c3.project.triggers[j].world_progress == _src.world_progress + 1
+       and c3.project.triggers[j].wave_definition == _src.wave_definition
+       and c3.project.triggers[j].fire_mask == _src.fire_mask
+       and c3.project.triggers[j].species == _src.species
+       and c3.project.triggers[j].dropper_side == _src.dropper_side),
       f"index {j}")
 
 # ===========================================================================
@@ -185,12 +207,13 @@ c = fresh()
 c.set_no_spawn_row(200)
 check("noSpawnRow is editable", c.project.stage.no_spawn_row == 200)
 check("...and the quiet zone follows it",
-      c.quiet_zone()["rows"] == 195 and c.quiet_zone()["seconds"] == 31.2,
+      (c.quiet_zone()["rows"] == _playable - 200
+       and abs(c.quiet_zone()["seconds"] - (_playable - 200) * 8 / 50) < 1e-9),
       str(c.quiet_zone()))
-c.set_no_spawn_row(100)                           # now below triggers at 126
+c.set_no_spawn_row(_disk["triggers"][-1]["worldProgress"] - 1)   # strands the last
 check("a noSpawnRow that strands a trigger is a validation error, not a refusal",
       "trigger.at_or_after_no_spawn" in codes(c))
-c.set_no_spawn_row(340)
+c.set_no_spawn_row(_disk["stage"]["noSpawnRow"])
 check("...and putting it back clears the error", c.validate().ok)
 
 # ===========================================================================
@@ -199,8 +222,10 @@ check("...and putting it back clears the error", c.validate().ok)
 c = fresh()
 n = c.add_wave_definition()
 check("add_wave_definition creates one with a unique id",
-      len(c.project.wave_definitions) == 5
-      and c.project.wave_definitions[n].id == "wave", c.project.wave_definitions[n].id)
+      len(c.project.wave_definitions) == len(_disk["waveDefinitions"]) + 1
+      and c.project.wave_definitions[n].id not in
+      {d["id"] for d in _disk["waveDefinitions"]},
+      c.project.wave_definitions[n].id)
 try:
     c.add_wave_definition(ident="sweep")
     check("a duplicate wave id is refused", False, "allowed")
@@ -221,7 +246,8 @@ except ControllerError as e:
     check("deleting a referenced wave is refused, naming the users",
           "trigger(s)" in str(e), str(e)[:64])
 c.delete_wave_definition(n)
-check("...but an unreferenced one deletes", len(c.project.wave_definitions) == 4)
+check("...but an unreferenced one deletes",
+      len(c.project.wave_definitions) == len(_disk["waveDefinitions"]))
 
 c = fresh()
 k = c.duplicate_wave_definition(0)
@@ -330,17 +356,20 @@ def edit_cycle(name, mutate, verify, restore):
           asm_matches(back) == list(export_v6.GENERATED_NAMES))
 
 
+_rows_disk = [d["worldProgress"] for d in _disk["triggers"]]
+_moved = sorted(_rows_disk[:2] + [_rows_disk[1] + 1] + _rows_disk[3:])
 edit_cycle(
     "trigger move",
-    lambda c: c.update_trigger(2, world_progress=100),
-    lambda c: [t.world_progress for t in c.project.triggers] == [48, 52, 100, 126],
-    lambda c: c.update_trigger(2, world_progress=90))
+    lambda c: c.update_trigger(2, world_progress=_rows_disk[1] + 1),
+    lambda c: [t.world_progress for t in c.project.triggers] == _moved,
+    lambda c: c.update_trigger(2, world_progress=_rows_disk[2]))
 
+_ns = _disk["stage"]["noSpawnRow"]
 edit_cycle(
     "noSpawn change",
-    lambda c: c.set_no_spawn_row(300),
-    lambda c: c.project.stage.no_spawn_row == 300,
-    lambda c: c.set_no_spawn_row(340))
+    lambda c: c.set_no_spawn_row(_ns - 40),
+    lambda c: c.project.stage.no_spawn_row == _ns - 40,
+    lambda c: c.set_no_spawn_row(_ns))
 
 edit_cycle(
     "wave definition field",
@@ -348,7 +377,7 @@ edit_cycle(
     lambda c: (c.project.wave_definitions[2].interval == 30
                # references must be untouched by a field edit
                and [t.wave_definition for t in c.project.triggers]
-               == ["sweep", "s", "linger", "loop"]),
+               == [d["waveDefinition"] for d in _disk["triggers"]]),
     lambda c: c.update_wave_definition(2, interval=26))
 
 _orig_steps = fresh().project.movement_programs[1].stages[0].steps
@@ -357,7 +386,7 @@ edit_cycle(
     lambda c: c.update_stage(1, 0, steps=14),
     lambda c: (c.project.movement_programs[1].stages[0].steps == 14
                and [d.movement_program for d in c.project.wave_definitions]
-               == ["sweep", "s", "linger", "loop"]),
+               == [d["movementProgram"] for d in _disk["waveDefinitions"]]),
     lambda c: c.update_stage(1, 0, steps=_orig_steps))
 
 # ...and the canonical file on disk was never touched by any of it

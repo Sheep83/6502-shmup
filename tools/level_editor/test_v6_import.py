@@ -66,13 +66,28 @@ print("=== import the authoritative encounters ===")
 r = I.read_encounters(SRC)
 progs, defs, trigs = r.movement_programs, r.wave_definitions, r.triggers
 
-eq("movement programs", len(progs), 4)
+# THE EXPECTATION IS THE CANONICAL PROJECT, not Level 1's numbers as they stood
+# when this file was written. Importing the ASM and comparing it against the JSON
+# is a REAL cross-check -- the exporter wrote one from the other, and if either
+# side drifted they would stop agreeing -- and it lets the level be authored.
+CANON = json.loads((HERE / "levels" / "level1" / "level.v6.json")
+                   .read_text(encoding="utf-8"))
+
+eq("movement programs", len(progs), len(CANON["movementPrograms"]))
 eq("movement program ids (from the engine's PROG_* symbols)",
-   [p.id for p in progs], ["sweep", "s", "linger", "loop"])
-eq("stages per program", [len(p.stages) for p in progs], [3, 3, 4, 3])
-eq("total movement records", sum(len(p.stages) for p in progs), 13)
-eq("total movement pool bytes", sum(len(p.stages) for p in progs) * C.WM_STAGE_SIZE, 52)
-eq("program byte offsets", list(I.program_offsets(progs).values()), [0, 12, 24, 40])
+   [p.id for p in progs], [m["id"] for m in CANON["movementPrograms"]])
+eq("stages per program", [len(p.stages) for p in progs],
+   [len(m["stages"]) for m in CANON["movementPrograms"]])
+_records = sum(len(m["stages"]) for m in CANON["movementPrograms"])
+eq("total movement records", sum(len(p.stages) for p in progs), _records)
+eq("total movement pool bytes",
+   sum(len(p.stages) for p in progs) * C.WM_STAGE_SIZE,
+   _records * C.WM_STAGE_SIZE)
+_off, _at = [], 0
+for m in CANON["movementPrograms"]:
+    _off.append(_at)
+    _at += len(m["stages"]) * C.WM_STAGE_SIZE
+eq("program byte offsets", list(I.program_offsets(progs).values()), _off)
 
 # ---- every stage field, program by program --------------------------------
 def shape(p):
@@ -87,14 +102,15 @@ def shape(p):
     return out
 
 
-eq("sweep stages", shape(progs[0]),
-   [("STRAIGHT", 34, 6, 0), ("ARC", 16, 4, 0), ("EXIT",)])
-eq("s stages", shape(progs[1]),
-   [("ARC_MIRROR", 12, 3, 12), ("ARC", 20, 3, "CONT"), ("EXIT",)])
-eq("linger stages", shape(progs[2]),
-   [("STRAIGHT", 28, 3, 5), ("HOLD", 48, 0, 1), ("ARC", 12, 4, 10), ("EXIT",)])
-eq("loop stages", shape(progs[3]),
-   [("STRAIGHT", 40, 4, 4), ("ARC", 76, 2, 8), ("EXIT",)])
+for _i, _m in enumerate(CANON["movementPrograms"]):
+    eq(f"{_m['id']} stages match the project", shape(progs[_i]),
+       [tuple(v for v in (
+            (s["kind"], s.get("frames"), s.get("vx"), s.get("vy"))
+            if s["kind"] in C.TIMED_KINDS else
+            (s["kind"], s.get("steps"), s.get("framesPerStep"), s.get("entryHeading"))
+            if s["kind"] in C.ARC_KINDS else (s["kind"],)))
+        for s in _m["stages"]])
+
 ok("WM_HEAD_CONT ($ff) became the symbolic \"CONT\" on the S-turn's joining arc")
 assert progs[1].stages[0].entry_heading == 12
 ok("...and the arc BEFORE it kept its explicit entry heading 12")
@@ -103,55 +119,49 @@ for p in progs:
 ok("every program terminates in EXIT")
 
 # ---- wave definitions -----------------------------------------------------
-eq("wave definitions", len(defs), 4)
+eq("wave definitions", len(defs), len(CANON["waveDefinitions"]))
 eq("wave definition ids (from WAVE_DEF_* symbols)",
-   [d.id for d in defs], ["sweep", "s", "linger", "loop"])
-eq("sweep definition", defs[0].to_dict(),
-   {"id": "sweep", "count": 4, "interval": 22, "startX": 0, "startY": 64,
-    "xStep": 0, "yStep": 20, "colour": 10, "heading": 0, "movementProgram": "sweep"})
-eq("s definition", defs[1].to_dict(),
-   {"id": "s", "count": 3, "interval": 26, "startX": 90, "startY": 30,
-    "xStep": 28, "yStep": 0, "colour": 3, "heading": 12, "movementProgram": "s"})
-eq("linger definition", defs[2].to_dict(),
-   {"id": "linger", "count": 3, "interval": 26, "startX": 120, "startY": 30,
-    "xStep": 36, "yStep": 0, "colour": 7, "heading": 10, "movementProgram": "linger"})
-eq("loop definition", defs[3].to_dict(),
-   {"id": "loop", "count": 3, "interval": 34, "startX": 70, "startY": 30,
-    "xStep": 50, "yStep": 0, "colour": 13, "heading": 8, "movementProgram": "loop"})
+   [d.id for d in defs], [d["id"] for d in CANON["waveDefinitions"]])
+for _i, _d in enumerate(CANON["waveDefinitions"]):
+    eq(f"{_d['id']} definition matches the project", defs[_i].to_dict(), _d)
 ok("every definition resolves its program by ID, not by byte offset")
 
 # ---- triggers -------------------------------------------------------------
-eq("live triggers", len(trigs), 4)
-eq("trigger rows", [t.world_progress for t in trigs], [48, 52, 90, 126])
-eq("species sequence", [t.species for t in trigs],
-   ["RING", "DROPPER", "RING", "DROPPER"])
+_ct = CANON["triggers"]
+eq("live triggers", len(trigs), len(_ct))
+eq("trigger rows", [t.world_progress for t in trigs],
+   [d["worldProgress"] for d in _ct])
+eq("species sequence", [t.species for t in trigs], [d["species"] for d in _ct])
 eq("definition references", [t.wave_definition for t in trigs],
-   ["sweep", "s", "linger", "loop"])
+   [d["waveDefinition"] for d in _ct])
 eq("fire masks as member indices", [t.fire_mask for t in trigs],
-   [[0, 2], [1], [0, 2], []])
+   [d["fireMask"] for d in _ct])
 eq("Dropper sides", [t.dropper_side for t in trigs],
-   ["LEFT", "LEFT", "LEFT", "RIGHT"])
+   [d["dropperSide"] for d in _ct])
 dropper_sides = [t.dropper_side for t in trigs if t.species == "DROPPER"]
-eq("...so the first Dropper enters LEFT and the second RIGHT", dropper_sides,
-   ["LEFT", "RIGHT"])
+eq("...and every Dropper's side is the one the project authored", dropper_sides,
+   [d["dropperSide"] for d in _ct if d["species"] == "DROPPER"])
 
 # THE COLUMNS ARE PADDED TO 180 AND THE PADDING IS NOT CONTENT. A zero row, a
 # zero definition index and a zero species are all individually legal values, so
 # only WAVE_TRIGGERS distinguishes a live entry from the tail.
-eq("only WAVE_TRIGGERS live entries were imported", len(trigs), 4)
+eq("only WAVE_TRIGGERS live entries were imported", len(trigs), len(_ct))
 assert len(trigs) < C.MAX_TRIGGERS
 ok(f"the {C.MAX_TRIGGERS}-slot zero padding was not imported as encounters")
 
 # ---------------------------------------------------------------------------
 print("\n=== the reference re-encoding matches the authoritative package ===")
 pool = I.reference_encode_movement_pool(progs)
-eq("re-encoded movement pool bytes", len(pool), 52)
-assert pool == region(0xF532, 0xF565), "movement pool differs"
+# THE REGION BASES ARE FIXED BY src/levelpkg.asm; the LENGTHS follow the content.
+_POOL_BASE, _DEF_BASE = 0xF532, 0xF632
+eq("re-encoded movement pool bytes", len(pool), _records * C.WM_STAGE_SIZE)
+assert pool == region(_POOL_BASE, _POOL_BASE + len(pool) - 1), "movement pool differs"
 ok("*** all 52 movement pool bytes are IDENTICAL to build/level1.prg ***")
 
 wd = I.reference_encode_wave_definitions(defs, progs)
-eq("re-encoded wave definition bytes", len(wd), 40)
-assert wd == region(0xF632, 0xF659), "wave definitions differ"
+eq("re-encoded wave definition bytes", len(wd),
+   len(CANON["waveDefinitions"]) * C.WAVEDEF_SIZE)
+assert wd == region(_DEF_BASE, _DEF_BASE + len(wd) - 1), "wave definitions differ"
 ok("*** all 40 wave definition bytes are IDENTICAL ***")
 
 tc = I.reference_encode_trigger_columns(trigs, defs)
@@ -174,7 +184,8 @@ ok("every column's tail is zero in the authoritative package, as the importer as
 
 # fire mask: v6 semantics -> engine byte
 eq("fire mask member indices re-encode to the engine bytes",
-   [t.fire_bits for t in trigs], [0b101, 0b010, 0b101, 0b000])
+   [t.fire_bits for t in trigs],
+   [sum(1 << m for m in d["fireMask"]) for d in _ct])
 
 # ---------------------------------------------------------------------------
 print("\n=== overlay onto the Level 1 project ===")
@@ -192,9 +203,15 @@ for k in KEYS:
     assert before[k] == after[k], f"{k} changed during encounter import"
 ok("terrain, palette, glyphs, metatiles, map, turrets, stage and noSpawnRow "
    "are byte-identical after import")
-eq("stage rows still", project.stage.metatile_rows, 105)
-eq("noSpawnRow still", project.stage.no_spawn_row, 340)
-eq("turrets still", len(project.turrets), 8)
+# THE MIGRATED v5 PROJECT, not the canonical v6 one -- its terrain is whatever
+# levels/level1/level.json holds, and the point here is that encounter import
+# leaves all of it alone.
+_V5 = json.loads(LEVEL1_JSON.read_text(encoding="utf-8"))
+eq("stage rows still", project.stage.metatile_rows, len(_V5["metatileRows"]))
+eq("noSpawnRow still", project.stage.no_spawn_row,
+   C.default_no_spawn_row(len(_V5["metatileRows"])))
+eq("turrets still", len(project.turrets),
+   len([o for o in _V5["objects"] if o.get("type") == "turret"]))
 
 v = validate(project)
 if not v.ok or v.warnings:
@@ -209,7 +226,7 @@ except I.EncounterImportError as exc:
     assert "replace=True" in str(exc)
 ok("a second import is REFUSED rather than silently overwriting")
 I.import_encounters(project, SRC, replace=True)
-eq("...and replace=True is accepted", len(project.triggers), 4)
+eq("...and replace=True is accepted", len(project.triggers), len(_ct))
 
 # ---------------------------------------------------------------------------
 print("\n=== determinism ===")
@@ -301,14 +318,17 @@ rejects("an unknown Dropper side", "side",
             r"(\.var\s+trigSide\s*=\s*List\(\)\.add\()DROP_SIDE_LEFT,", r"\g<1>7,",
             "trigSide first entry")})
 rejects("mismatched trigger column lengths", "same length",
-        **{"wave_encounters.asm": sub(enc_src, r"List\(\)\.add\(48, 52, 90, 126\)",
-                                      "List().add(48, 52, 90)", "trigRow")})
+        # DROP THE LAST ROW, whatever the level authors, so the columns disagree.
+        **{"wave_encounters.asm": sub(
+            enc_src, r"(\.var\s+trigRow\s*=\s*List\(\)\.add\([^)]*), *\d+\)",
+            r"\g<1>)", "trigRow last entry")})
 rejects("a WAVE_TRIGGERS count beyond the authored rows", "only",
-        **{"wave_encounters.asm": sub(enc_src, r"(\.const\s+WAVE_TRIGGERS\s*=\s*)4",
-                                      r"\g<1>9", "WAVE_TRIGGERS")})
+        **{"wave_encounters.asm": sub(enc_src, r"(\.const\s+WAVE_TRIGGERS\s*=\s*)\d+",
+                                      r"\g<1>99", "WAVE_TRIGGERS")})
 rejects("WAVE_DEFS disagreeing with the definition list", "WAVE_DEFS",
-        **{"wave_encounters.asm": sub(enc_src, r"(\.const\s+WAVE_DEFS\s*=\s*)4",
-                                      r"\g<1>3", "WAVE_DEFS")})
+        **{"wave_encounters.asm": sub(enc_src, r"(\.const\s+WAVE_DEFS\s*=\s*)(\d+)",
+                                      lambda m: m.group(1) + str(int(m.group(2)) - 1),
+                                      "WAVE_DEFS")})
 # The sweep definition's launch heading is its penultimate field, the 0 just
 # before PROG_SWEEP. $ff is legal on an ARC's entry heading and illegal here.
 rejects("$ff where a launch heading is structurally required", "heading",
@@ -318,15 +338,18 @@ rejects("an unknown identifier", "unknown identifier",
         **{"wave_programs.asm": sub(progs_src, r"WM_ARC, 16, 4, 0", "WM_ARC, WM_NOPE, 4, 0",
                                     "sweep arc")})
 rejects("an expression outside the supported subset", "unsupported character",
-        **{"wave_encounters.asm": sub(enc_src, r"List\(\)\.add\(48, 52",
-                                      "List().add(48 << 1, 52", "trigRow")})
+        **{"wave_encounters.asm": sub(
+            enc_src, r"(\.var\s+trigRow\s*=\s*List\(\)\.add\()(\d+)",
+            r"\g<1>\g<2> << 1", "trigRow first entry")})
 rejects("a duplicate declaration", "already defined",
         **{"wave_encounters.asm": enc_src + "\n.const WAVE_TRIGGERS = 5\n"})
 rejects("a velocity too large for the signed byte it is emitted in", "signed byte",
         **{"wave_programs.asm": sub(progs_src, r"WM_STRAIGHT, 34, 6, 0",
                                     "WM_STRAIGHT, 34, 200, 0", "sweep straight")})
 rejects("a trigger row beyond sixteen bits", "sixteen bits",
-        **{"wave_encounters.asm": sub(enc_src, r"90, 126\)", "90, 70000)", "trigRow")})
+        **{"wave_encounters.asm": sub(
+            enc_src, r"(\.var\s+trigRow\s*=\s*List\(\)\.add\([^)]*), *\d+\)",
+            r"\g<1>, 70000)", "trigRow last entry")})
 
 # the reader refuses unsupported .eval forms outright
 d = with_source(**{"wave_programs.asm": progs_src + "\n.eval progs = 3\n"})

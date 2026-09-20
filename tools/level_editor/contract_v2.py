@@ -118,6 +118,49 @@ MAX_SPAWN_Y = 255               # logY is eight bits
 WAVE_SLOTS = 2
 
 # ---------------------------------------------------------------------------
+# Where a wave member may be born — src/waves.asm's spawn proof
+# ---------------------------------------------------------------------------
+# A MEMBER MUST BE ENTIRELY OUT OF SIGHT WHEN IT IS CREATED, or it pops into
+# existence inside the playfield. src/waves.asm states it as three alternatives
+# and errors if none holds:
+#
+#     hiddenAbove = (y0 + SPRITE_HEIGHT - 1) < APERTURE_TOP_RASTER
+#     hiddenLeft  = (x0 + 23) < 24
+#     hiddenRight = x0 > 343
+#
+# The sprite covers x0..x0+23 and y0..y0+20; the visible playfield is columns
+# 24..343 of rasters 55..247. The 23 and the 24 are literals in waves.asm rather
+# than named constants, so they are named here rather than re-derived.
+#
+# THERE IS NO "HIDDEN BELOW". A member born beneath the aperture would never
+# enter it -- the playfield scrolls down past the player, enemies arrive from
+# above or through a side -- so the engine does not offer that escape and
+# neither does this.
+SPRITE_HEIGHT = 21                  # src/renderer.asm
+APERTURE_TOP_RASTER = 55            # src/main.asm TOP_SPLIT_LINE
+SPRITE_LAST_COLUMN = 23             # a sprite covers x0..x0+23
+DISPLAY_X_FIRST = 24                # first visible column
+DISPLAY_X_LAST = 343                # last visible column
+
+
+def spawn_hiding(x0, y0):
+    """(hidden_above, hidden_left, hidden_right) for a member born at (x0, y0).
+
+    Mirrors src/waves.asm exactly. A member is legal when ANY of the three is
+    true; `any(spawn_hiding(x, y))` is the whole contract.
+    """
+    return (
+        (y0 + SPRITE_HEIGHT - 1) < APERTURE_TOP_RASTER,
+        (x0 + SPRITE_LAST_COLUMN) < DISPLAY_X_FIRST,
+        x0 > DISPLAY_X_LAST,
+    )
+
+
+def spawn_is_hidden(x0, y0):
+    return any(spawn_hiding(x0, y0))
+
+
+# ---------------------------------------------------------------------------
 # Species and sides — src/encounter_format.asm
 # ---------------------------------------------------------------------------
 # A SPECIES VALUE IS ITS ANIMATION ROW OFFSET, NOT AN INDEX (frame lookup is

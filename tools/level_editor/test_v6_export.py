@@ -22,6 +22,7 @@ is worth checking rather than assuming.
 
 Run:  python3 tools/level_editor/test_v6_export.py
 """
+import json
 import re
 import shutil
 import subprocess
@@ -122,14 +123,19 @@ auth_trt = (AUTH / "stage_turrets.asm").read_text()
 # ---------------------------------------------------------------------------
 print("\n=== A. stage_config.asm ===")
 e, a = asm_consts(exp_cfg), asm_consts(auth_cfg)
-eq("STAGE_METATILE_ROWS", e["STAGE_METATILE_ROWS"], "105")
-eq("STAGE_NO_SPAWN_ROW", e["STAGE_NO_SPAWN_ROW"], "340")
-eq("STAGE_METATILE_COUNT", e["STAGE_METATILE_COUNT"], "34")
-eq("TERRAIN_GLYPH_COUNT", e["TERRAIN_GLYPH_COUNT"], "72")
-eq("TERRAIN_BACKGROUND_COLOUR", e["TERRAIN_BACKGROUND_COLOUR"], "12")
-eq("TERRAIN_MC_COLOUR_1", e["TERRAIN_MC_COLOUR_1"], "15")
-eq("TERRAIN_MC_COLOUR_2", e["TERRAIN_MC_COLOUR_2"], "11")
-eq("TERRAIN_CHARACTER_COLOUR", e["TERRAIN_CHARACTER_COLOUR"], "1")
+# THE EXPECTED VALUES ARE THE PROJECT'S OWN. They were Level 1's numbers when
+# this was written, so authoring the level failed the exporter's own test.
+_doc = json.loads(CANONICAL.read_text(encoding="utf-8"))
+_pal = _doc["palette"]
+eq("STAGE_METATILE_ROWS", e["STAGE_METATILE_ROWS"],
+   str(_doc["stage"]["metatileRows"]))
+eq("STAGE_NO_SPAWN_ROW", e["STAGE_NO_SPAWN_ROW"], str(_doc["stage"]["noSpawnRow"]))
+eq("STAGE_METATILE_COUNT", e["STAGE_METATILE_COUNT"], str(len(_doc["metatileDefs"])))
+eq("TERRAIN_GLYPH_COUNT", e["TERRAIN_GLYPH_COUNT"], str(_doc["glyphs"]["count"]))
+eq("TERRAIN_BACKGROUND_COLOUR", e["TERRAIN_BACKGROUND_COLOUR"], str(_pal["background"]))
+eq("TERRAIN_MC_COLOUR_1", e["TERRAIN_MC_COLOUR_1"], str(_pal["multicolour1"]))
+eq("TERRAIN_MC_COLOUR_2", e["TERRAIN_MC_COLOUR_2"], str(_pal["multicolour2"]))
+eq("TERRAIN_CHARACTER_COLOUR", e["TERRAIN_CHARACTER_COLOUR"], str(_pal["character"]))
 eq("TERRAIN_COLOUR_RAM", e["TERRAIN_COLOUR_RAM"], "8 | TERRAIN_CHARACTER_COLOUR")
 
 assert "SCROLL_FRAME_DIVIDER" not in e, "the retired scroll divider was emitted"
@@ -147,14 +153,17 @@ assert "SCROLL_FRAME_DIVIDER" not in a, "the production config carries the divid
 ok("...and neither side carries the retired SCROLL_FRAME_DIVIDER")
 
 # Derived, not stored.
-eq("derived playable progress", project.stage.playable_progress, 395)
-eq("derived terrain seconds", round(project.stage.terrain_seconds, 1), 63.2)
+_rows = _doc["stage"]["metatileRows"]
+eq("derived playable progress", project.stage.playable_progress, _rows * 4 - 25)
+eq("derived terrain seconds", round(project.stage.terrain_seconds, 1),
+   round((_rows * 4 - 25) * 8 / 50, 1))
 
 # ---------------------------------------------------------------------------
 print("\n=== B. stage_charset.asm ===")
 eb, ab = asm_bytes(exp_chr), asm_bytes(auth_chr)
-eq("glyph bytes emitted", len(eb), 72 * C.GLYPH_BYTES)
-eq("...which is 72 glyphs x 8", len(eb), 576)
+_nglyph = _doc["glyphs"]["count"]
+eq("glyph bytes emitted", len(eb), _nglyph * C.GLYPH_BYTES)
+eq(f"...which is {_nglyph} glyphs x 8", len(eb), _nglyph * 8)
 if eb != ab:
     first = next(i for i, (x, y) in enumerate(zip(eb, ab)) if x != y)
     raise AssertionError(f"charset differs first at byte {first}: {eb[first]} vs {ab[first]}")
@@ -179,26 +188,31 @@ ok("all four Makefile split labels are present at the start of their lines")
 
 ed = asm_bytes(exp_map, "metatileDefs:", "METATILE_DEFS_END:")
 ad = asm_bytes(auth_map, "metatileDefs:", "METATILE_DEFS_END:")
-eq("metatile definition bytes", len(ed), 34 * 16)
-eq("...which is 544", len(ed), 544)
+_ndefs = len(_doc["metatileDefs"])
+eq("metatile definition bytes", len(ed), _ndefs * 16)
+eq(f"...which is {_ndefs * 16}", len(ed), _ndefs * 16)
 assert ed == ad, "metatile definitions differ from authoritative"
-ok("all 544 metatile definition bytes are IDENTICAL")
+ok(f"all {_ndefs * 16} metatile definition bytes are IDENTICAL")
 
 em = asm_bytes(exp_map, "stageMetatileRows:", "STAGE_METATILE_ROWS_END:")
 am = asm_bytes(auth_map, "stageMetatileRows:", "STAGE_METATILE_ROWS_END:")
-eq("map bytes", len(em), 105 * 10)
-eq("...which is 1050", len(em), 1050)
+eq("map bytes", len(em), _rows * 10)
+eq(f"...which is {_rows * 10}", len(em), _rows * 10)
 assert em == am, "map rows differ from authoritative"
-ok("all 1050 map bytes are IDENTICAL")
+ok(f"all {_rows * 10} map bytes are IDENTICAL")
 eq("no padding to the 440-row budget", len(em) < C.LEVELPKG_MAP_MAX, True)
 
 # ---------------------------------------------------------------------------
 print("\n=== D. stage_turrets.asm ===")
-eq("TURRET_TOTAL", asm_consts(exp_trt)["TURRET_TOTAL"], "8")
+# THE TURRETS ARE THE PROJECT'S. Derived world row = metatileRow*4+1, world col
+# = metatileCol*4+1, emitted DESCENDING by row -- that derivation is the contract
+# here, not the eight turrets Level 1 happened to carry.
+_t = sorted(_doc["turrets"], key=lambda o: -(o["metatileRow"] * 4 + 1))
+eq("TURRET_TOTAL", asm_consts(exp_trt)["TURRET_TOTAL"], str(len(_t)))
 rows = asm_list(exp_trt, "turretRows")
 cols = asm_list(exp_trt, "turretCols")
-eq("turret rows", rows, [345, 337, 225, 217, 117, 109, 25, 5])
-eq("turret cols", cols, [17, 25, 29, 9, 25, 13, 25, 13])
+eq("turret rows", rows, [o["metatileRow"] * 4 + 1 for o in _t])
+eq("turret cols", cols, [o["metatileCol"] * 4 + 1 for o in _t])
 eq("rows are strictly descending", rows == sorted(rows, reverse=True), True)
 assert rows == asm_list(auth_trt, "turretRows")
 assert cols == asm_list(auth_trt, "turretCols")

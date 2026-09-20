@@ -451,8 +451,12 @@ refuses("an empty program is refused",
 # =======================================================================
 ring = [i for i, t in enumerate(proj.triggers) if t.species == "RING"]
 drop = [i for i, t in enumerate(proj.triggers) if t.species == "DROPPER"]
+# ONE OF EACH IS WHAT THIS SECTION NEEDS. It used to require exactly two of
+# each, which is a fact about how Level 1 happened to be authored rather than
+# anything the simulator depends on.
 check("the canonical level has both RING and DROPPER triggers",
-      len(ring) == 2 and len(drop) == 2)
+      len(ring) >= 1 and len(drop) >= 1,
+      f"{len(ring)} RING, {len(drop)} DROPPER")
 sim = ms.simulate_trigger(proj, ring[0])
 check("a RING trigger resolves through its wave to its movement program",
       sim.wave_id == proj.triggers[ring[0]].wave_definition

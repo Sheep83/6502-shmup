@@ -64,10 +64,13 @@ class SimulationError(Exception):
 WM_ARC_SPEED = 6            # src/movement_format.asm: quarter pixels a frame
 WM_HEAD_MASK = C.WM_HEAD_LEN - 1
 
-SPRITE_HEIGHT = 21          # src/renderer.asm
+# SHARED WITH THE VALIDATOR, not copied: contract_v2 owns the geometry that
+# src/waves.asm's spawn proof uses, so the simulator and the validator cannot
+# drift apart about where the screen starts or how tall a sprite is.
+SPRITE_HEIGHT = C.SPRITE_HEIGHT             # src/renderer.asm
 MIN_SPRITE_Y = 55           # src/renderer.asm: first admitted sprite Y
 MAX_SPRITE_Y = 226          # src/renderer.asm: last admitted sprite Y
-APERTURE_TOP_RASTER = 55    # src/main.asm TOP_SPLIT_LINE
+APERTURE_TOP_RASTER = C.APERTURE_TOP_RASTER  # src/main.asm TOP_SPLIT_LINE
 APERTURE_BOT_RASTER = 247   # src/enemy.asm derives ENEMY_CLEAR_Y from it
 
 ENEMY_CLEAR_X_LEFT = 4                      # src/enemy.asm
@@ -79,8 +82,8 @@ ENEMY_CLEAR_Y_TOP = ENEMY_HIDDEN_Y + 1                  # 35
 
 # The horizontal display window, in the same nine-bit X the objects use.
 # src/waves.asm's spawn proof uses exactly these numbers ("columns 24..343").
-DISPLAY_X_FIRST = 24
-DISPLAY_X_LAST = 343
+DISPLAY_X_FIRST = C.DISPLAY_X_FIRST
+DISPLAY_X_LAST = C.DISPLAY_X_LAST
 
 SIM_FRAME_BUDGET = 900      # src/waves.asm: frames before a path is stuck
 

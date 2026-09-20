@@ -168,10 +168,17 @@ try:
     assert "wave" not in [v for _, v in (("Terrain", "terrain"), ("Turrets", "turret"))]
     assert app.edit_mode.get() in ("terrain", "turret")
     # ...and the encounters the project really carries are intact and visible.
+    # WHAT THE PROJECT CARRIES, not what Level 1 carried when this was written.
+    import json as _json
+    _d = _json.loads((HERE / "levels" / "level1" / "level.v6.json").read_text())
     s6 = app.controller.encounter_summary()
-    assert s6 == {"movementPrograms": 4, "waveDefinitions": 4, "triggers": 4,
-                  "movementRecords": 13, "movementBytes": 52, "noSpawnRow": 340}, s6
-    assert "4 programs" in app.encounter_text.get()
+    assert s6 == {"movementPrograms": len(_d["movementPrograms"]),
+                  "waveDefinitions": len(_d["waveDefinitions"]),
+                  "triggers": len(_d["triggers"]),
+                  "movementRecords": app.controller.project.movement_records,
+                  "movementBytes": app.controller.project.movement_bytes,
+                  "noSpawnRow": _d["stage"]["noSpawnRow"]}, s6
+    assert f"{len(_d['movementPrograms'])} programs" in app.encounter_text.get()
     ok("v5 wave library removed; v6 encounters preserved and reported read-only")
 
     print(f"\nAll {len(PASS)} editor asset-workflow GUI smoke checks passed.")

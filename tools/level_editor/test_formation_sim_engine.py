@@ -140,8 +140,13 @@ def main():
 
     trig_species = {t.wave_definition: t.species for t in proj.triggers}
     ring_waves = [wid for wid in waves if trig_species.get(wid) == "RING"]
+    # NAMED WAVES USED TO BE LISTED HERE. The check is that the recording's RING
+    # waves are exactly the project's RING waves -- which is what the sentence
+    # always said and what a level may change at will.
+    expected_ring = sorted(wid for wid, sp in trig_species.items() if sp == "RING")
     check("the RING waves in the recording are the ones the project says",
-          sorted(ring_waves) == ["linger", "sweep"], str(sorted(ring_waves)))
+          sorted(ring_waves) == expected_ring,
+          f"{sorted(ring_waves)} vs {expected_ring}")
 
     print()
     print("  wave    member  spawn frame           placement          "

@@ -82,19 +82,28 @@ def graphics_fingerprint(project):
 CANON_BYTES = CANON.read_bytes()
 c = EditorController.canonical(HERE)
 
+# THE CANONICAL PROJECT IS AUTHORED CONTENT AND MAY CHANGE. These checks used to
+# name 105 rows, 8 turrets, 72 glyphs and four of everything, which meant that
+# authoring the level failed the file that exists to protect it. What matters is
+# that the controller loads what is ON DISK without losing any of it, so the
+# expectation is read from the same JSON.
+_on_disk = json.loads(CANON.read_text(encoding="utf-8"))
 check("the canonical v6 project loads through the GUI's controller",
-      c.project.stage.metatile_rows == 105 and len(c.project.turrets) == 8,
+      (c.project.stage.metatile_rows == _on_disk["stage"]["metatileRows"]
+       and len(c.project.turrets) == len(_on_disk["turrets"])),
       f"{c.metatile_rows} rows, {len(c.turrets)} turrets")
 check("...as formatVersion 6, with no migration",
       not c.migrated and c.from_version == project_v6.FORMAT_VERSION)
 check("...and the live model is a ProjectV6, not a v5 LevelProject",
       isinstance(c.project, project_v6.ProjectV6))
-check("...with the expected content",
-      (len(c.project.glyphs) == 72 and len(c.project.metatile_defs) == 34
-       and c.metatile_cols == 10 and c.no_spawn_row == 340
-       and len(c.project.movement_programs) == 4
-       and len(c.project.wave_definitions) == 4
-       and len(c.project.triggers) == 4),
+check("...with every part of the document the file holds",
+      (len(c.project.glyphs) == _on_disk["glyphs"]["count"]
+       and len(c.project.metatile_defs) == len(_on_disk["metatileDefs"])
+       and c.metatile_cols == 10
+       and c.no_spawn_row == _on_disk["stage"]["noSpawnRow"]
+       and len(c.project.movement_programs) == len(_on_disk["movementPrograms"])
+       and len(c.project.wave_definitions) == len(_on_disk["waveDefinitions"])
+       and len(c.project.triggers) == len(_on_disk["triggers"])),
       f"{len(c.project.glyphs)} glyphs, {len(c.project.metatile_defs)} defs, "
       f"noSpawn {c.no_spawn_row}")
 check("...and it validates clean", c.validate().ok,
@@ -163,13 +172,17 @@ with tempfile.TemporaryDirectory() as d:
 # here is a REMOVAL -- placing a ninth is refused, and proving that is section 6.
 c3 = EditorController.canonical(HERE)
 map0 = json.dumps(c3.project.map_rows)
+_turrets_before = len(c3.turrets)
 removed = (c3.turrets[2].metatile_row, c3.turrets[2].metatile_col)
 c3.remove_turret(2)
-check("a turret edit removes exactly one turret", len(c3.turrets) == 7,
-      f"removed metatile row {removed[0]}, col {removed[1]}")
+check("a turret edit removes exactly one turret",
+      len(c3.turrets) == _turrets_before - 1,
+      f"{_turrets_before} -> {len(c3.turrets)}; removed metatile row "
+      f"{removed[0]}, col {removed[1]}")
 check("...and leaves every encounter untouched",
       encounter_fingerprint(c3.project) == enc0)
-check("...and leaves noSpawnRow untouched", c3.no_spawn_row == 340)
+check("...and leaves noSpawnRow untouched",
+      c3.no_spawn_row == _on_disk["stage"]["noSpawnRow"])
 check("...and leaves the terrain untouched",
       json.dumps(c3.project.map_rows) == map0)
 check("...and leaves palette, glyphs and metatile definitions untouched",
@@ -234,15 +247,20 @@ check("the legal stage range is the current 7..440",
 check("...and the retired 768-row ceiling is gone",
       C.MAX_METATILE_ROWS != 768)
 
-d105 = EditorController.canonical(HERE).duration()
+# DURATION IS A FORMULA, NOT A NUMBER. Asserting the 63.2 seconds of a 105-row
+# stage tested the content; asserting rows*4, -25, *8, /50 tests the contract.
+_dc = EditorController.canonical(HERE)
+_rows = _dc.metatile_rows
+dur = _dc.duration()
 check("duration uses the current 1 px/frame contract",
-      d105 == {"logicalRows": 420, "playableRows": 395,
-               "playableFrames": 3160, "seconds": 63.2}, str(d105))
-check("...derived from metatileRows alone: rows*4, -25, *8, /50",
-      (d105["logicalRows"] == 105 * 4
-       and d105["playableRows"] == d105["logicalRows"] - 25
-       and d105["playableFrames"] == d105["playableRows"] * 8
-       and abs(d105["seconds"] - d105["playableFrames"] / 50) < 1e-9))
+      (dur["logicalRows"] == _rows * 4
+       and dur["playableRows"] == dur["logicalRows"] - 25
+       and dur["playableFrames"] == dur["playableRows"] * 8
+       and abs(dur["seconds"] - dur["playableFrames"] / 50) < 1e-9),
+      f"{_rows} rows -> {dur}")
+check("...and there is no scroll divider anywhere in it",
+      set(dur) == {"logicalRows", "playableRows", "playableFrames", "seconds"},
+      str(sorted(dur)))
 
 resizer = EditorController.canonical(HERE)
 for bad_rows in (6, 441):
@@ -253,11 +271,17 @@ for bad_rows in (6, 441):
         ok(f"resize to {bad_rows} rows is refused")
 
 # growing is safe; shrinking past a turret is not
+# GROWING IS RELATIVE TO WHATEVER THE LEVEL IS. This asked for 120 rows, which
+# grew a 105-row Level 1 and SHRANK the 200-row one -- so the new last row was
+# not blank and the check failed on content rather than on behaviour.
 grower = EditorController.canonical(HERE)
-grower.resize(120)
+_grown = grower.metatile_rows + 15
+grower.resize(_grown)
 check("growing the stage adds blank rows and updates the derived height",
-      grower.metatile_rows == 120 and grower.project.stage.metatile_rows == 120
-      and all(v == 0 for v in grower.project.map_rows[119]))
+      grower.metatile_rows == _grown
+      and grower.project.stage.metatile_rows == _grown
+      and all(v == 0 for v in grower.project.map_rows[_grown - 1]),
+      f"{_grown} rows")
 try:
     grower.resize(10)          # turrets live far above row 10
     check("shrinking past a turret is refused", False, "allowed")
@@ -277,13 +301,22 @@ except ControllerError as exc:
     check("a second turret in one metatile row is refused", "one per row" in str(exc),
           str(exc)[:60])
 free = [r for r in range(t.metatile_rows) if t.turret_index_at(r) is None]
+# FILL TO THE CAP FIRST. This used to assume Level 1 already had eight turrets;
+# a level with six would simply have accepted the next one and the cap would
+# never have been exercised at all.
+_filled = 0
+while len(t.turrets) < C.MAX_TURRETS:
+    t.add_turret(free[_filled], 0)
+    _filled += 1
+check(f"the level can be filled to the cap of {C.MAX_TURRETS}",
+      len(t.turrets) == C.MAX_TURRETS, f"added {_filled}")
 try:
-    t.add_turret(free[0], 0)    # Level 1 already has eight
-    check("a ninth turret is refused", False, "allowed")
+    t.add_turret(free[_filled], 0)
+    check("one past the cap is refused", False, "allowed")
 except ControllerError as exc:
-    check("a ninth turret is refused", "maximum" in str(exc), str(exc)[:60])
+    check("one past the cap is refused", "maximum" in str(exc), str(exc)[:60])
 t.remove_turret(0)
-t.add_turret(free[0], 0)
+t.add_turret(free[_filled], 0)
 check("...and one may be placed once room is made", len(t.turrets) == 8)
 try:
     t.add_turret(free[1], 0)

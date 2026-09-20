@@ -40,6 +40,7 @@ from engine_data import (
 )
 import contract_v2 as C
 import project_v6
+import export_v6
 from controller_v6 import ControllerError, EditorController, GENERATED_NAMES
 from encounters_ui import EncounterWorkspace
 from native_metatile import GlyphBudgetExceeded, blank_pixels
@@ -63,7 +64,6 @@ from project import (
     repack_tileset_from_metatile_set,
     stage_logical_rows,
     turret_world_row,
-    wrap_seam_warning,
     turret_screen_peak,
 )
 
@@ -1170,8 +1170,18 @@ class LevelEditor(tk.Tk):
         return "break"
 
     def _update_turret_ui(self):
-        has = (self.edit_mode.get() == "turret" and self.selected_turret is not None
-               and 0 <= (self.selected_turret or -1) < len(self.project.objects))
+        # `self.selected_turret or -1` MADE TURRET ZERO UNDELETABLE. Index 0 is
+        # falsy, so `or -1` turned the perfectly good selection 0 into -1 and the
+        # button disabled itself. Turrets are canonically ordered by metatile row,
+        # so index 0 is ALWAYS the top-most turret in the level -- the one nearest
+        # the boss, because play starts at the bottom of the map. It looked like a
+        # boss/no-spawn interaction and it was `or`.
+        #
+        # The None case is already handled by the test in front of it, so the
+        # index is used as it is.
+        index = self.selected_turret
+        has = (self.edit_mode.get() == "turret" and index is not None
+               and 0 <= index < len(self.project.objects))
         self.delete_turret_button.configure(state="normal" if has else "disabled")
 
     # ---- terrain painting ------------------------------------------------
@@ -1521,9 +1531,14 @@ class LevelEditor(tk.Tk):
                 "\n".join(f"\u2022 {i.message}" for i in result.errors),
                 parent=self)
             return False
-        seam = wrap_seam_warning(self.project)
-        if seam and not messagebox.askyesno("Possible wrap seam", seam + "\n\nSave anyway?", parent=self):
-            return False
+        # THE WRAP-SEAM PROMPT IS GONE, and it was not a matter of taste. It
+        # asked whether the first and last stage rows matched "because the stage
+        # wraps vertically" -- which stopped being true when stages got a real
+        # end. src/scroll.asm sets stageComplete the moment worldProgress reaches
+        # STAGE_FINAL_VIEW_PROGRESS and src/boss.asm takes over from there, so a
+        # production stage never reaches the row that would fold back to its own
+        # beginning. A level now has a beginning and an end, and its last row is
+        # the one under the boss.
         return True
 
     def _default_level_path(self):
@@ -1585,7 +1600,13 @@ class LevelEditor(tk.Tk):
             # level-owned but hand-authored, and a level directory without it
             # does not assemble.
             written = self.controller.export(out, carry_enemies_from=out)
-        except (OSError, ControllerError) as exc:
+        except (OSError, ControllerError, export_v6.ExportRefused) as exc:
+            # ExportRefused IS CAUGHT HERE TOO. The controller validates first and
+            # normally catches everything, but the exporter keeps its own refusals
+            # for anything the model cannot express -- and one of them, a wave id
+            # that cannot become an assembler symbol, reached a user as a raw Tk
+            # callback traceback. A refusal is an ordinary outcome of pressing
+            # Export and it gets an ordinary dialog.
             messagebox.showerror("Export failed", str(exc), parent=self)
             return "break"
         gameplay = ("  (imported by main.asm; rebuild to play)"

@@ -251,10 +251,20 @@ expect_error(p, "trigger.fire_member", "a non-integer fire mask member is reject
 p = build()
 p.triggers = [Trigger(10, "w", "RING", [0]), Trigger(5, "w", "DROPPER", [0])]
 expect_error(p, "trigger.unsorted", "trigger rows going backwards are rejected")
+# CONSECUTIVE TRIGGERS MAY NOW SHARE A SPECIES. src/waves.asm used to assert the
+# alternation at assembly time; the assertion was about Level 1's content, not
+# about runtime safety, and tests/test_species_order.py proves on the machine
+# that RRRRR, DDDDD and RDDRR all fire correctly with at most one live Dropper.
 p = build()
 p.triggers = [Trigger(10, "w", "RING", [0]), Trigger(20, "w", "RING", [0])]
-expect_error(p, "trigger.repeated_species",
-             "two consecutive waves of the same species are rejected")
+expect_clean(p, "two consecutive RING waves are accepted")
+p = build()
+p.triggers = [Trigger(10, "w", "DROPPER", [0]), Trigger(20, "w", "DROPPER", [0])]
+expect_clean(p, "two consecutive DROPPER waves are accepted")
+p = build()
+p.triggers = [Trigger(10, "w", "RING", [0]), Trigger(20, "w", "DROPPER", [0]),
+              Trigger(30, "w", "DROPPER", [0]), Trigger(40, "w", "RING", [0])]
+expect_clean(p, "RING -> DROPPER -> DROPPER -> RING is accepted")
 
 p = build()
 p.triggers = [Trigger(i * 2, "w", "RING" if i % 2 == 0 else "DROPPER", [0])

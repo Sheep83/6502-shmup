@@ -99,47 +99,58 @@ try:
         check(f"{name} is back to the starting document",
               app.controller.to_json() == before and undo_back())
 
+    # RELATIVE TO WHATEVER THE LEVEL HOLDS. These counted to five because Level 1
+    # had four triggers; authoring a fifth made "add" look like it had done
+    # nothing.
+    _n_trig = len(app.controller.project.triggers)
     cycle("trigger add",
           lambda: w._trigger_add(),
-          lambda: len(app.controller.project.triggers) == 5,
-          lambda: len(app.controller.project.triggers) == 4)
+          lambda: len(app.controller.project.triggers) == _n_trig + 1,
+          lambda: len(app.controller.project.triggers) == _n_trig)
 
+    # EVERY "restore" VALUE IS CAPTURED, not typed. They were Level 1's numbers
+    # when this file was written; the level is content and may be anything.
     w.sel_trigger = 0
     w._refresh_trigger_detail()
+    _row0 = app.controller.project.triggers[0].world_progress
+    _edit_row = _row0 + 7
     cycle("trigger edit",
-          lambda: (w.t_prog.delete(0, "end"), w.t_prog.insert(0, "30"),
+          lambda: (w.t_prog.delete(0, "end"), w.t_prog.insert(0, str(_edit_row)),
                    w._trigger_apply()),
-          lambda: app.controller.project.triggers[0].world_progress == 30,
-          lambda: app.controller.project.triggers[0].world_progress == 48)
+          lambda: app.controller.project.triggers[0].world_progress == _edit_row,
+          lambda: app.controller.project.triggers[0].world_progress == _row0)
 
     w.sel_trigger = 1
     w._refresh_trigger_detail()
     cycle("trigger delete",
           lambda: w._trigger_delete(),
-          lambda: len(app.controller.project.triggers) == 3,
-          lambda: len(app.controller.project.triggers) == 4)
+          lambda: len(app.controller.project.triggers) == _n_trig - 1,
+          lambda: len(app.controller.project.triggers) == _n_trig)
 
+    _ns0 = app.controller.project.stage.no_spawn_row
     cycle("noSpawn change",
-          lambda: (w.no_spawn_var.set("300"), w._apply_no_spawn()),
-          lambda: app.controller.project.stage.no_spawn_row == 300,
-          lambda: app.controller.project.stage.no_spawn_row == 340)
+          lambda: (w.no_spawn_var.set(str(_ns0 - 40)), w._apply_no_spawn()),
+          lambda: app.controller.project.stage.no_spawn_row == _ns0 - 40,
+          lambda: app.controller.project.stage.no_spawn_row == _ns0)
 
     w.sel_wave = 2
     w._refresh_wave_detail()
+    _iv0 = app.controller.project.wave_definitions[2].interval
     cycle("wave definition field edit",
           lambda: (w.w_fields["interval"].delete(0, "end"),
                    w.w_fields["interval"].insert(0, "31"), w._wave_apply()),
           lambda: app.controller.project.wave_definitions[2].interval == 31,
-          lambda: app.controller.project.wave_definitions[2].interval == 26)
+          lambda: app.controller.project.wave_definitions[2].interval == _iv0)
 
     w.sel_prog, w.sel_stage = 1, 0
     w._refresh_stages()
     w._refresh_stage_detail()
+    _st0 = app.controller.project.movement_programs[1].stages[0].steps
     cycle("movement stage edit",
           lambda: (w.s_fields["steps"].delete(0, "end"),
                    w.s_fields["steps"].insert(0, "19"), w._stage_apply()),
           lambda: app.controller.project.movement_programs[1].stages[0].steps == 19,
-          lambda: app.controller.project.movement_programs[1].stages[0].steps == 12)
+          lambda: app.controller.project.movement_programs[1].stages[0].steps == _st0)
 
     w.sel_prog, w.sel_stage = 2, 0
     w._refresh_stages()
@@ -155,15 +166,21 @@ try:
     # =====================================================================
     w.sel_trigger = 0
     w._refresh_trigger_detail()
+    _t0 = app.controller.project.triggers[0]
+    _wave0 = next(d for d in app.controller.project.wave_definitions
+                  if d.id == _t0.wave_definition)
+    _mask0 = list(_t0.fire_mask)
     check("the fire boxes match the referenced wave's member count",
-          len(w._fire_vars) == 4, f"{len(w._fire_vars)} boxes")
+          len(w._fire_vars) == _wave0.count,
+          f"{len(w._fire_vars)} boxes for a wave of {_wave0.count}")
     check("...and reflect the authored mask",
-          [m for m, v in w._fire_vars if v.get()] == [0, 2])
+          [m for m, v in w._fire_vars if v.get()] == _mask0, str(_mask0))
+    _spare = next(m for m in range(_wave0.count) if m not in _mask0)
     before = app.controller.to_json()
-    dict(w._fire_vars)[1].set(1)
+    dict(w._fire_vars)[_spare].set(1)
     w._fire_changed()
     check("ticking a member writes it into the trigger",
-          app.controller.project.triggers[0].fire_mask == [0, 1, 2],
+          app.controller.project.triggers[0].fire_mask == sorted(_mask0 + [_spare]),
           str(app.controller.project.triggers[0].fire_mask))
     app._undo()
     check("...and it is undoable", app.controller.to_json() == before)
@@ -202,8 +219,10 @@ try:
         check("reopening follows the workspace onto the new document",
               w.controller is app.controller)
         rows = [w.trig_tree.item(i, "values") for i in w.trig_tree.get_children()]
-        check("...and it shows the same four triggers",
-              [int(r[0]) for r in rows] == [48, 52, 90, 126], str(rows))
+        check("...and it shows the reopened document's own triggers",
+              [int(r[0]) for r in rows]
+              == [t.world_progress for t in app.controller.project.triggers],
+              str([r[0] for r in rows]))
 
     # =====================================================================
     # validation feedback is the validator's, not a second rule set

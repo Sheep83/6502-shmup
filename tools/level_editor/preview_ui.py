@@ -50,6 +50,13 @@ SPEEDS = (("0.25x", 0.25), ("0.5x", 0.5), ("1x", 1.0), ("2x", 2.0), ("4x", 4.0))
 PAL_FRAME_MS = 20               # 50 Hz
 
 
+def _first_line(text):
+    """The summary line of a multi-line reason, for the one-line detail strip."""
+    if not text:
+        return ""
+    return text.strip().splitlines()[0]
+
+
 class PreviewPanel(ttk.LabelFrame):
     """The preview, over whatever the workspace currently has selected.
 
@@ -128,7 +135,16 @@ class PreviewPanel(ttk.LabelFrame):
         self.member_box.bind("<<ComboboxSelected>>", self._member_picked)
         ttk.Label(mem, textvariable=self.diag,
                   font=("TkDefaultFont", 9)).pack(side="left", padx=(10, 0))
+        # WRAPLENGTH IS LOAD-BEARING HERE, not cosmetic. This label is the only
+        # thing in the panel without a width of its own -- the canvas is a fixed
+        # CANVAS_W and the headline already wraps to it -- so whatever it holds
+        # decides how wide the panel asks to be. Selecting a DROPPER trigger put
+        # a four-line explanation in it, the label reported the longest line as
+        # its requested width, and the pane grew until the encounter controls
+        # were off-screen. Bounded to the canvas, the panel cannot widen past the
+        # picture it is drawn around.
         ttk.Label(self, textvariable=self.detail, foreground=COL_TEXT,
+                  wraplength=CANVAS_W, justify="left",
                   font=("TkFixedFont", 9)).pack(anchor="w", pady=(2, 0))
 
     # =====================================================================
@@ -472,7 +488,11 @@ class PreviewPanel(ttk.LabelFrame):
     def _draw_diagnostics(self):
         if not self.sim:
             self.diag.set("")
-            self.detail.set(self.error or "")
+            # THE CANVAS ALREADY SHOWS THE REASON, centred and width-constrained.
+            # Repeating all of it down here was duplicate text that also happened
+            # to be the widest thing in the panel; the first line is the summary
+            # and the canvas carries the explanation.
+            self.detail.set(_first_line(self.error))
             return
         here = {f.member: f for f in self.sim.at(self.frame)}
         f = here.get(self._member)

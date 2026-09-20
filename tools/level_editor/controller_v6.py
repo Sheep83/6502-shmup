@@ -590,17 +590,19 @@ class EditorController:
         return None
 
     def suggested_species(self, at_index=None):
-        """A default that does not immediately break the alternation rule.
+        """The species a NEW trigger starts as. Always RING.
 
-        The engine asserts that consecutive authored waves use different
-        species. This is a DEFAULT for a new trigger, not a correction of an
-        existing one -- nothing here rewrites what an author chose.
+        IT USED TO ALTERNATE, because src/waves.asm asserted that consecutive
+        authored waves differed and a new trigger that repeated the last one
+        would not assemble. That assertion is gone -- it was about content, not
+        safety -- so Add Trigger no longer guesses. A predictable default an
+        author changes is better than a clever one they have to notice.
+
+        RING is the plain case: it has no side, no token, no encounter behind it,
+        and it is what a level is mostly made of. Duplicate is the operation that
+        inherits the selected trigger's species.
         """
-        ts = self.project.triggers
-        if not ts:
-            return "RING"
-        prev = ts[at_index - 1] if at_index else ts[-1]
-        return "DROPPER" if prev.species == "RING" else "RING"
+        return "RING"
 
     def add_trigger(self, world_progress=None, wave_definition=None,
                     species=None, fire_mask=None, dropper_side="LEFT"):

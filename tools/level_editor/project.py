@@ -908,7 +908,19 @@ def save_project(project, path):
 
 
 def wrap_seam_warning(project):
-    """Warn when the first and last metatile rows differ materially."""
+    """DEAD, and kept only so a v5 caller does not break. Returns None.
+
+    It used to warn that the first and last metatile rows differed "because the
+    stage wraps vertically". Stages have a real end now: src/scroll.asm sets
+    stageComplete at STAGE_FINAL_VIEW_PROGRESS and src/boss.asm enters the arena,
+    so the fold back to row 0 is unreachable in play. The check was firing on
+    every save of a perfectly good level and asking the author to justify it.
+    """
+    return None
+
+
+def _retired_wrap_seam_warning(project):
+    """The original body, retained for the record only."""
     if project.height < 2:
         return None
     first = project.metatile_rows[0]

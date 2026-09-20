@@ -38,6 +38,7 @@ DESTINATION IS ALWAYS EXPLICIT. Nothing here defaults to the repository, so a
 test cannot overwrite the authoritative src/level1/ by omission.
 """
 from pathlib import Path
+import os
 import re
 import shutil
 
@@ -589,11 +590,32 @@ def export_level(project, dest_dir, *, level_name=None, validate_first=True,
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
 
-    written = {}
-    for name, text in render_all(project, level_name).items():
-        path = dest / name
-        path.write_text(text, encoding="utf-8", newline="\n")
-        written[name] = path
+    # RENDER EVERYTHING BEFORE WRITING ANYTHING. render_all() returns a complete
+    # dict, so a refusal -- a bad id, a missing reference -- happens with the
+    # destination untouched rather than three files into a six-file package.
+    rendered = render_all(project, level_name)
+
+    # THEN REPLACE, RATHER THAN OVERWRITE. Each file goes to a temporary beside
+    # its target and is moved into place with os.replace, which is atomic on one
+    # filesystem. A disk filling up halfway through cannot leave a level package
+    # half old and half new -- a state that still assembles and is wrong, which
+    # is the worst kind of failure this could have.
+    written, temps = {}, []
+    try:
+        for name, text in rendered.items():
+            tmp = dest / (name + ".tmp")
+            tmp.write_text(text, encoding="utf-8", newline="\n")
+            temps.append((tmp, dest / name))
+        for tmp, target in temps:
+            os.replace(tmp, target)
+            written[target.name] = target
+    except OSError:
+        for tmp, _ in temps:                    # leave the destination as it was
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
 
     if carry_enemies_from is not None:
         src = Path(carry_enemies_from) / ENEMIES_NAME
