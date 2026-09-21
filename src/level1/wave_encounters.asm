@@ -71,12 +71,22 @@
     8,                        // launch heading
     PROG_LOOP)                // movement program INDEX
 
-.var waveDefs = List().add(defSweep).add(defS).add(defLinger).add(defLoop)
-.const WAVE_DEFS              = 4
+.var defLoop5 = List().add(
+    5, 34,                    // count, interval
+    70, 0,                    // startX = 70, nine bits split low/high
+    30,                       // startY
+    50, 0,                    // xStep, yStep -- signed, per member
+    13,                       // colour
+    8,                        // launch heading
+    PROG_LOOP)                // movement program INDEX
+
+.var waveDefs = List().add(defSweep).add(defS).add(defLinger).add(defLoop).add(defLoop5)
+.const WAVE_DEFS              = 5
 .const WAVE_DEF_SWEEP         = 0
 .const WAVE_DEF_S             = 1
 .const WAVE_DEF_LINGER        = 2
 .const WAVE_DEF_LOOP          = 3
+.const WAVE_DEF_LOOP_5        = 4
 .if (waveDefs.size() != WAVE_DEFS) { .error "wave definition count disagrees with the table" }
 
 // --- the absolute trigger list --------------------------------------
@@ -84,24 +94,24 @@
 // A trigger names one row; once consumed it never becomes due again. The
 // rows must be NON-DECREASING because the director's cursor only ever
 // walks forward, and every row must be below STAGE_NO_SPAWN_ROW.
-.var trigRow      = List().add(48, 52, 90, 126)
+.var trigRow      = List().add(20, 52, 90, 126, 160)
 
 // Which definition each appearance plays.
-.var trigDef      = List().add(WAVE_DEF_SWEEP, WAVE_DEF_S, WAVE_DEF_LINGER, WAVE_DEF_LOOP)
+.var trigDef      = List().add(WAVE_DEF_SWEEP, WAVE_DEF_S, WAVE_DEF_LINGER, WAVE_DEF_LOOP, WAVE_DEF_LOOP_5)
 
 // WHICH ENEMY THE WAVE IS MADE OF -- an authored column rather than
 // arithmetic on the cursor, so inserting a trigger cannot silently invert
 // every wave after it.
-.var trigSpecies  = List().add(SPECIES_RING, SPECIES_DROPPER, SPECIES_RING, SPECIES_DROPPER)
+.var trigSpecies  = List().add(SPECIES_RING, SPECIES_DROPPER, SPECIES_RING, SPECIES_DROPPER, SPECIES_RING)
 
 // WHICH SIDE A DROPPER FLIES IN FROM. Read only when the species above is
 // SPECIES_DROPPER; a Ring wave carries whatever is written here and
 // ignores it.
-.var trigSide     = List().add(DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_RIGHT)
+.var trigSide     = List().add(DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_RIGHT, DROP_SIDE_LEFT)
 
 // WHICH MEMBERS OF THIS APPEARANCE MAY SHOOT -- a bitmask over MEMBER
 // INDEX, bit 0 the first member sent, and zero for a formation that does
 // not shoot at all.
-.var trigFire     = List().add(%00000101, %00000010, %00000101, %00000000)
+.var trigFire     = List().add(%00000101, %00000010, %00000101, %00000000, %00000101)
 
-.const WAVE_TRIGGERS          = 4
+.const WAVE_TRIGGERS          = 5

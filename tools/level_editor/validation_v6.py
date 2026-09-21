@@ -29,6 +29,9 @@ from dataclasses import dataclass, field
 import re
 
 import contract_v2 as C
+# IMPORTED LAZILY INSIDE THE RULE, not here: movement_semantic imports
+# movement_sim, and the validator must stay importable by anything that
+# only wants to check a project's shape.
 from project_v6 import ProjectV6
 
 
@@ -387,6 +390,79 @@ def _validate_movement(p, r):
                     r.error("movement.entry_heading",
                             f"an arc's entry heading is a heading 0..{C.WM_HEAD_LEN - 1} "
                             f"or \"CONT\"; got {h!r}", f"{spath}.entryHeading")
+
+    # ---- an unfinished draft is not a shippable program (Phase 6B.1) -----
+    # THE STRICT HALF OF THE DRAFT/PRODUCTION SPLIT. The editor lets an author
+    # build a program a segment at a time, and the preview flies whatever
+    # prefix compiles -- which is what makes progressive authoring possible.
+    # This is where that tolerance stops: a semantic program must compile IN
+    # FULL to be saved or exported.
+    #
+    # ASKED OF THE SEGMENTS, NOT THE RECORDS, and that distinction is
+    # load-bearing. A draft's stored records are the compiled PREFIX, so a
+    # malformed segment is simply absent from them -- checking records alone
+    # would call the program clean and then Save would quietly ship it with
+    # the author's unfinished work dropped on the floor.
+    for prog in p.movement_programs:
+        if not prog.segments:
+            continue
+        heading = next((d.heading for d in p.wave_definitions
+                        if d.movement_program == prog.id), 0)
+        try:
+            import movement_semantic
+            movement_semantic.compile_segments(prog.segments, heading)
+        except Exception as exc:                # noqa: BLE001
+            r.error("movement.unfinished",
+                    f"movement program {prog.id!r} is not finished: {exc}",
+                    f"movementPrograms[{prog.id}].segments")
+
+    # ---- trajectory continuity (Phase 6B) --------------------------------
+    # A WARNING, NOT AN ERROR: the engine runs a kinked path perfectly well
+    # and `linger` has shipped with one since before this rule existed, so
+    # erroring would condemn working content. But an instantaneous direction
+    # change is almost never what an author meant, and it is invisible in the
+    # records -- it only shows up when the path is flown.
+    #
+    # WHY IT HAPPENS: WM_STRAIGHT and WM_HOLD write a velocity and never touch
+    # wmPhase (src/movement_format.asm says so), so a leg that does not travel
+    # along the stored heading leaves the two disagreeing -- and an arc
+    # entering on "CONT" then snaps to the stale heading. Programs authored as
+    # SEMANTIC SEGMENTS cannot do this; raw records can.
+    _launch = {}
+    for d in p.wave_definitions:
+        _launch.setdefault(d.movement_program, d.heading)
+    for prog in p.movement_programs:
+        if not prog.stages or prog.stages[-1].kind != "EXIT":
+            continue                    # already an error above; do not fly it
+        try:
+            import movement_semantic
+            breaks = movement_semantic.continuity_breaks(
+                prog.stages, _launch.get(prog.id, 0))
+        except Exception:               # noqa: BLE001 -- never block validation
+            continue
+        for b in breaks:
+            # TWO SHAPES, AND THEY WANT DIFFERENT ADVICE. An arc that snapped
+            # is the stale-wmPhase case and has a one-byte fix; a straight or
+            # hold that snapped is simply pointing somewhere else, and only
+            # the author knows whether that was meant.
+            if b["to_kind"] in C.ARC_KINDS:
+                fix = (f"the arc continued from the stored heading "
+                       f"{b['stored_heading']}, which is not the way it was "
+                       f"travelling (heading {b['travel_heading']}) -- a "
+                       f"straight or a hold sets a velocity without updating "
+                       f"the heading. Entering it on heading "
+                       f"{b['travel_heading']} instead would make it "
+                       f"continuous.")
+            else:
+                fix = (f"it was travelling {b['was']} and this stage sets "
+                       f"{b['now']}, which points elsewhere. Authoring the "
+                       f"program as semantic segments would keep it "
+                       f"continuous.")
+            r.warn("movement.discontinuity",
+                   f"program {prog.id!r} changes direction by "
+                   f"{b['degrees']:.0f} degrees at stage {b['stage']} "
+                   f"({b['from_kind']} -> {b['to_kind']}): {fix}",
+                   f"movementPrograms[{prog.id}].stages[{b['stage']}]")
 
     records, pool = p.movement_records, p.movement_bytes
     if records > C.MAX_MOVEMENT_RECORDS:

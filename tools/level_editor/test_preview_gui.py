@@ -261,9 +261,13 @@ try:
     app.update()
     check("selecting a movement program previews it on its own",
           p.sim is not None and p.sim.program_id == prog_id, p.headline.get())
-    check("...and says whose launch context it borrowed",
-          "borrowed from wave" in p.headline.get()
-          or "launch heading" in p.headline.get(), p.headline.get())
+    # Phase 6B reworded this header at the author's request: the heading is
+    # named in compass terms ("preview heading: Down (16)") rather than left
+    # as a bare engine number, and the wave it came from is named in brackets.
+    check("...and says which heading it is flown on, in words, and where that "
+          "heading came from",
+          "preview heading:" in p.headline.get()
+          and "from wave" in p.headline.get(), p.headline.get())
     before = [(f.x, f.y) for f in p.sim.paths[0]]
     w.sel_stage = 0
     w._refresh_stage_detail()

@@ -290,7 +290,15 @@ try:
         ok(f"...IDENTICAL to authoritative")
 
     hdr = region(exp_pkg, 0xF530, 0xF531)
-    eq("the stage header encodes noSpawnRow", hdr[0] | (hdr[1] << 8), 340)
+    # DERIVED FROM THE PROJECT, NOT FROM HISTORY. The contract under test is
+    # "the stage header carries the project's noSpawnRow as a sixteen-bit
+    # little-endian value" -- which is true whatever the authored level says.
+    # Hard-coding 340 made this a test of one particular level, and it broke
+    # the moment the level legitimately grew. The authored value is checked
+    # for plausibility so a zero from a failed load cannot pass vacuously.
+    assert project.stage.no_spawn_row > 0, "the project has no noSpawnRow"
+    eq("the stage header encodes the project's noSpawnRow",
+       hdr[0] | (hdr[1] << 8), project.stage.no_spawn_row)
 
     # SINCE PHASE 4 THE ENCOUNTER REGIONS ARE EXPORTED TOO, from the canonical
     # project's movement programs, wave definitions and triggers. They must still

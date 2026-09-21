@@ -4,7 +4,7 @@
   "stage": {
     "metatileRows": 200,
     "metatileCols": 10,
-    "noSpawnRow": 340
+    "noSpawnRow": 725
   },
   "palette": {
     "background": 12,
@@ -3960,10 +3960,6 @@
     ]
   ],
   "turrets": [
-    {
-      "metatileRow": 1,
-      "metatileCol": 3
-    },
     {
       "metatileRow": 27,
       "metatileCol": 3

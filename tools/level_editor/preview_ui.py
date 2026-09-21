@@ -23,6 +23,7 @@ leave, and it is drawn dimmed rather than cropped.
 import tkinter as tk
 from tkinter import ttk
 
+import movement_semantic as sem
 import movement_sim as ms
 
 # The world the preview shows. Wide enough for the whole nine-bit despawn
@@ -32,7 +33,14 @@ WORLD_Y0, WORLD_Y1 = 0, 256
 
 SPRITE_W, SPRITE_H = 24, 21
 
-CANVAS_W, CANVAS_H = 430, 276
+# THE CANVAS SCALES TO WHAT IT IS GIVEN. These are a starting size and a
+# floor, not a demand: _scale() already fits the world to the canvas's actual
+# width and height, so the panel shrinks gracefully and the authoring pane
+# gets the room. Before this the panel asked for a fixed 430 and the movement
+# controls beside it were crushed at ordinary laptop widths.
+CANVAS_W, CANVAS_H = 300, 210
+CANVAS_MIN_W, CANVAS_MIN_H = 220, 150
+TEXT_WRAP = 280                 # every label in the panel wraps to this
 
 COL_VOID = "#1b1b1b"            # simulated space outside the display window
 COL_FIELD = "#2c2c2c"           # the visible playfield
@@ -40,6 +48,8 @@ COL_FIELD_EDGE = "#6a6a6a"
 COL_CLEAR = "#4a3030"           # despawn margins
 COL_TEXT = "#b0b0b0"
 COL_START = "#909090"
+COL_WARN = "#e0a000"            # the workspace's own amber
+COL_CUT = "#e0a000"             # where an unfinished path stops
 
 # One colour per member, so a formation reads as several objects rather than
 # one scribble. Deliberately the workspace's own accents plus neutrals.
@@ -48,6 +58,9 @@ MEMBER_COLOURS = ("#38d0ff", "#ffd000", "#7ef08a", "#ff8ad0",
 
 SPEEDS = (("0.25x", 0.25), ("0.5x", 0.5), ("1x", 1.0), ("2x", 2.0), ("4x", 4.0))
 PAL_FRAME_MS = 20               # 50 Hz
+
+# What the preview-heading box says when it is NOT overriding anything.
+USE_WAVE_HEADING = "from wave"
 
 
 def _first_line(text):
@@ -78,7 +91,15 @@ class PreviewPanel(ttk.LabelFrame):
         self._markers = {}
         self._member = 0
 
+        # AUTHORING CONTEXT, NOT PROJECT DATA. None means "use whatever the
+        # wave supplies"; a number is a temporary stand-in for a launch this
+        # program has not been given yet. Never saved, never written to the
+        # asset -- see _program_context.
+        self.preview_heading = None
+
         self.headline = tk.StringVar(value="nothing selected")
+        self.warning = tk.StringVar(value="")
+        self.launch_text = tk.StringVar(value="")
         self.diag = tk.StringVar(value="")
         self.detail = tk.StringVar(value="")
         self.frame_text = tk.StringVar(value="frame 0 / 0")
@@ -91,33 +112,67 @@ class PreviewPanel(ttk.LabelFrame):
     # construction
     # =====================================================================
     def _build(self):
-        ttk.Label(self, textvariable=self.headline, wraplength=CANVAS_W,
+        ttk.Label(self, textvariable=self.headline, wraplength=TEXT_WRAP,
                   justify="left", font=("TkDefaultFont", 9)).pack(
                       anchor="w", pady=(0, 3))
+
+        # ---- the preview launch heading ---------------------------------
+        # Only meaningful while a MOVEMENT PROGRAM is selected: a trigger and
+        # a wave both carry a real launch heading of their own, and offering
+        # to override those here would blur the ownership this control exists
+        # to make clear.
+        self.launch_row = ttk.Frame(self)
+        ttk.Label(self.launch_row, text="preview launch").pack(side="left")
+        self.launch_box = ttk.Combobox(
+            self.launch_row, state="readonly", width=12,
+            values=[USE_WAVE_HEADING] + [name for name, _h in sem.COMPASS])
+        self.launch_box.pack(side="left", padx=(4, 6))
+        self.launch_box.bind("<<ComboboxSelected>>", self._launch_picked)
+        # BOUNDED TIGHT. Whatever this row asks for is width the authoring
+        # tabs do not get, and the preview column is unweighted -- so its
+        # requested width is its actual width. Kept short and wrapped narrow
+        # for that reason rather than for looks.
+        ttk.Label(self.launch_row, textvariable=self.launch_text,
+                  wraplength=TEXT_WRAP, justify="left", foreground=COL_TEXT,
+                  font=("TkDefaultFont", 8)).pack(side="left")
+
+        # THE INCOMPLETE-DRAFT NOTICE. Amber, wrapped, directly under the
+        # headline, because an author who cannot see why the path stops short
+        # will assume the editor is broken.
+        self.warn_label = ttk.Label(self, textvariable=self.warning,
+                                    foreground=COL_WARN, wraplength=TEXT_WRAP,
+                                    justify="left",
+                                    font=("TkDefaultFont", 9))
 
         self.canvas = tk.Canvas(self, width=CANVAS_W, height=CANVAS_H,
                                 highlightthickness=0, background=COL_VOID)
         self.canvas.pack(fill="both", expand=True)
+        # A FLOOR, NOT A DEMAND: below this the picture stops being readable,
+        # but anything above it is welcome and _scale() will use it.
+        self.canvas.configure(width=CANVAS_MIN_W, height=CANVAS_MIN_H)
         self.canvas.bind("<Configure>", lambda e: self.redraw())
 
         bar = ttk.Frame(self)
         bar.pack(fill="x", pady=(5, 0))
-        self.play_btn = ttk.Button(bar, text="Play", width=7,
+        # NARROW ON PURPOSE. This column carries no grid weight, so whatever
+        # the widest row in it asks for IS the preview's width -- and every
+        # pixel of that is taken from the authoring tabs beside it. On macOS a
+        # ttk.Button is far wider than its `width=` suggests, so this row was
+        # quietly the widest thing in the panel; the paths toggle moved down a
+        # row for the same reason.
+        self.play_btn = ttk.Button(bar, text="Play", width=5,
                                    command=self.toggle_play)
         self.play_btn.pack(side="left")
-        ttk.Button(bar, text="Restart", width=8,
+        ttk.Button(bar, text="Reset", width=5,
                    command=self.restart).pack(side="left", padx=2)
-        ttk.Button(bar, text="◀", width=3,
-                   command=lambda: self.step(-1)).pack(side="left", padx=(6, 1))
-        ttk.Button(bar, text="▶", width=3,
+        ttk.Button(bar, text="◀", width=2,
+                   command=lambda: self.step(-1)).pack(side="left", padx=(4, 1))
+        ttk.Button(bar, text="▶", width=2,
                    command=lambda: self.step(1)).pack(side="left")
-        ttk.Label(bar, text="speed").pack(side="left", padx=(8, 2))
         self.speed_box = ttk.Combobox(bar, textvariable=self.speed, width=5,
                                       state="readonly",
                                       values=[n for n, _ in SPEEDS])
-        self.speed_box.pack(side="left")
-        ttk.Checkbutton(bar, text="paths", variable=self.show_paths,
-                        command=self.redraw).pack(side="left", padx=(8, 0))
+        self.speed_box.pack(side="left", padx=(6, 0))
 
         sc = ttk.Frame(self)
         sc.pack(fill="x", pady=(4, 0))
@@ -133,8 +188,15 @@ class PreviewPanel(ttk.LabelFrame):
         self.member_box = ttk.Combobox(mem, width=4, state="readonly", values=())
         self.member_box.pack(side="left", padx=(4, 0))
         self.member_box.bind("<<ComboboxSelected>>", self._member_picked)
-        ttk.Label(mem, textvariable=self.diag,
-                  font=("TkDefaultFont", 9)).pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(mem, text="paths", variable=self.show_paths,
+                        command=self.redraw).pack(side="left", padx=(8, 0))
+        # THE READOUT GETS ITS OWN ROW. It holds "X 123 Y 45 stage 2 EXIT
+        # heading 40 - off screen", which fits on one line and therefore
+        # REQUESTED a line's worth of width -- making this row, and so the
+        # whole preview column, 443px wide at the authoring controls' expense.
+        ttk.Label(self, textvariable=self.diag, wraplength=TEXT_WRAP,
+                  justify="left",
+                  font=("TkDefaultFont", 9)).pack(anchor="w", pady=(3, 0))
         # WRAPLENGTH IS LOAD-BEARING HERE, not cosmetic. This label is the only
         # thing in the panel without a width of its own -- the canvas is a fixed
         # CANVAS_W and the headline already wraps to it -- so whatever it holds
@@ -144,12 +206,41 @@ class PreviewPanel(ttk.LabelFrame):
         # were off-screen. Bounded to the canvas, the panel cannot widen past the
         # picture it is drawn around.
         ttk.Label(self, textvariable=self.detail, foreground=COL_TEXT,
-                  wraplength=CANVAS_W, justify="left",
+                  wraplength=TEXT_WRAP, justify="left",
                   font=("TkFixedFont", 9)).pack(anchor="w", pady=(2, 0))
 
     # =====================================================================
     # what is being previewed
     # =====================================================================
+    def _launch_picked(self, _evt=None):
+        """Change the heading this program is previewed from.
+
+        TOUCHES NO PROJECT DATA. It re-flies the same authored segments from a
+        different entry state, which is the whole point of a reusable movement
+        -- and it deliberately does not go through the workspace's _edit(), so
+        it can never dirty the document or reach the undo stack.
+        """
+        choice = self.launch_box.get()
+        self.preview_heading = (None if choice == USE_WAVE_HEADING
+                                else sem.COMPASS_HEADING.get(choice))
+        self.frame = 0
+        self.pause()
+        self.invalidate()
+
+    def _refresh_launch_row(self):
+        """Show the control only where a preview heading means something."""
+        is_program = bool(self.source) and self.source[0] == "program"
+        if not is_program:
+            self.launch_row.pack_forget()
+            self.launch_text.set("")
+            return
+        self.launch_row.pack(fill="x", pady=(0, 3), before=self.canvas)
+        self.launch_box.set(USE_WAVE_HEADING if self.preview_heading is None
+                            else sem.heading_label(self.preview_heading))
+        self.launch_text.set("preview only \u2014 the wave owns the real one"
+                             if self.preview_heading is not None
+                             else "as the wave launches it")
+
     def set_source(self, source):
         """Point the preview at a trigger, a wave definition or a program.
 
@@ -160,6 +251,10 @@ class PreviewPanel(ttk.LabelFrame):
             return
         self.source = source
         self._member = 0
+        # A NEW SELECTION STARTS FROM ITS OWN LAUNCH STATE. Carrying an
+        # override from the last program onto the next one would quietly
+        # misrepresent a wave's actual heading.
+        self.preview_heading = None
         self.pause()
         self.frame = 0
         self.invalidate()
@@ -199,16 +294,52 @@ class PreviewPanel(ttk.LabelFrame):
             prog_id = wave.movement_program if wave is not None else ref
             prog = next((p for p in proj.movement_programs if p.id == prog_id),
                         None)
-            return (kind, key,
+            # THE PREVIEW HEADING IS PART OF THE SIGNATURE. Without it,
+            # changing the heading would leave the previous simulation on
+            # screen -- the project has not changed, so nothing else here
+            # would notice.
+            return (kind, key, self.preview_heading,
                     None if wave is None else tuple(sorted(wave.to_dict().items())),
                     None if prog is None else
-                    tuple(tuple(sorted(s.to_dict().items())) for s in prog.stages))
+                    tuple(tuple(sorted(s.to_dict().items())) for s in prog.stages),
+                    None if prog is None else
+                    tuple(tuple(sorted(g.to_dict().items()))
+                          for g in prog.segments))
         except Exception:                                   # noqa: BLE001
             return ("broken",)
+
+    def _draft_for(self, prog, heading):
+        """(stages, max_frames, warning) for a program that may be unfinished.
+
+        THE PREVIEW IS TOLERANT AND PRODUCTION IS NOT. A program being built
+        has no terminal EXIT for most of its life, and blanking the picture
+        until one appears makes progressive authoring impossible -- so the
+        longest prefix that compiles is flown, truncated at the end of the
+        last authored segment, and the shortfall is said out loud. Saving and
+        exporting stay strict; that is validation_v6's business, not this
+        panel's.
+        """
+        if not prog.is_semantic:
+            return prog.stages, None, ""
+        draft = sem.compile_draft(prog.segments, heading)
+        if not draft.stages:
+            return [], None, (draft.reason or "nothing to preview yet")
+        note = ""
+        if not draft.complete:
+            note = ("Incomplete movement: no EXIT segment; preview stops at "
+                    "the end of the authored path.")
+        if draft.stopped_at is not None:
+            note = (f"Preview stops after segment {draft.used}: segment "
+                    f"{draft.stopped_at + 1} cannot be simulated \u2014 "
+                    f"{draft.reason}")
+        # +1 so the last authored frame is included rather than cut short.
+        return (list(draft.stages),
+                None if draft.frames is None else draft.frames + 1, note)
 
     def _rebuild(self):
         proj = self.ws.controller.project
         self.sim, self.error = None, None
+        self.warning.set("")
         if self.source is None:
             self.headline.set("select a trigger, wave definition or movement "
                               "program to preview it")
@@ -219,7 +350,14 @@ class PreviewPanel(ttk.LabelFrame):
                 if not 0 <= ref < len(proj.triggers):
                     raise ms.SimulationError("no trigger selected")
                 t = proj.triggers[ref]
-                self.sim = ms.simulate_trigger(proj, ref)
+                # Routed through the draft resolver so an unfinished program
+                # still previews wherever it is reached from.
+                _w = ms.wave_by_id(proj, t.wave_definition)
+                _p = ms.resolve_program(proj, _w)
+                st, cap, note = self._draft_for(_p, _w.heading)
+                self.warning.set(note)
+                self.sim = ms.simulate_trigger(proj, ref, stages=st or None,
+                                               max_frames=cap)
                 self.headline.set(
                     f"trigger at worldProgress {t.world_progress} → wave "
                     f"{self.sim.wave_id!r} → program "
@@ -227,7 +365,11 @@ class PreviewPanel(ttk.LabelFrame):
                     f"{self.sim.interval}-frame interval)")
             elif kind == "wave":
                 wave = ms.wave_by_id(proj, ref)
-                self.sim = ms.simulate_wave(proj, wave)
+                _p = ms.resolve_program(proj, wave)
+                st, cap, note = self._draft_for(_p, wave.heading)
+                self.warning.set(note)
+                self.sim = ms.simulate_wave(proj, wave, stages=st or None,
+                                            max_frames=cap)
                 self.headline.set(
                     f"wave {ref!r} → program {self.sim.program_id!r}   "
                     f"({self.sim.count} members, {self.sim.interval}-frame "
@@ -239,13 +381,27 @@ class PreviewPanel(ttk.LabelFrame):
                     raise ms.SimulationError(
                         f"movement program {ref!r} does not exist")
                 head, start = self._program_context(proj, prog)
+                # A SEMANTIC PROGRAM IS RECOMPILED FOR THE PREVIEW HEADING and
+                # the result is flown WITHOUT BEING STORED: a straight leg
+                # bakes its velocity into its record, so the stored records
+                # only describe the heading they were compiled against.
+                # Compiling here is what lets one reusable movement be tried
+                # pointing Down as readily as Right with the asset untouched.
+                stages, cap, note = self._draft_for(prog, head)
+                self.warning.set(note)
+                if not stages:
+                    raise ms.SimulationError(note or "nothing to preview yet")
                 self.sim = ms.preview_program(proj, prog, heading=head,
-                                              start=start)
+                                              start=start, stages=stages,
+                                              max_frames=cap)
+                kindword = "semantic" if prog.is_semantic else "raw records"
+                borrowed = ("" if self._ctx is None
+                            or self.preview_heading is not None
+                            else f"   (from wave {self._ctx!r})")
                 self.headline.set(
-                    f"movement program {ref!r}, flown on its own from "
-                    f"({start[0]}, {start[1]}) on launch heading {head}"
-                    + ("" if self._ctx is None else
-                       f"   — borrowed from wave {self._ctx!r}"))
+                    f"movement program {ref!r} — {kindword}, preview heading: "
+                    f"{sem.heading_name(head)}{borrowed}   "
+                    f"from ({start[0]}, {start[1]})")
         except ms.SimulationError as exc:
             self.error = str(exc)
             self.headline.set("preview unavailable")
@@ -263,14 +419,25 @@ class PreviewPanel(ttk.LabelFrame):
         name. So the first wave that actually uses this program lends its own,
         and the panel says whose they are rather than pretending the numbers
         came from the program.
+
+        THE PREVIEW HEADING OVERRIDES BOTH, and is authoring context rather
+        than project data: it is how a reusable movement gets designed and
+        tested in isolation, before any wave launches it. It is never saved
+        and never reaches the asset. WHO OWNS WHAT, restated because this is
+        the seam: the WAVE DEFINITION supplies the real launch heading, the
+        MOVEMENT PROGRAM inherits it, and this is a stand-in for that
+        inheritance while there is no wave in the picture.
         """
         for w in proj.wave_definitions:
             if w.movement_program == prog.id:
                 lo, hi, y = ms.member_start(w, 0)
                 self._ctx = w.id
-                return w.heading, (lo | (hi << 8), y)
+                start = (lo | (hi << 8), y)
+                return (w.heading if self.preview_heading is None
+                        else self.preview_heading), start
         self._ctx = None
-        return 0, (160, 40)
+        return (0 if self.preview_heading is None
+                else self.preview_heading), (160, 40)
 
     # =====================================================================
     # transport
@@ -382,6 +549,11 @@ class PreviewPanel(ttk.LabelFrame):
         self.redraw()
 
     def redraw(self):
+        self._refresh_launch_row()
+        if self.warning.get():
+            self.warn_label.pack(fill="x", pady=(0, 3), before=self.canvas)
+        else:
+            self.warn_label.pack_forget()
         self._draw_field()
         self._draw_paths()
         self._draw_markers()
@@ -452,8 +624,18 @@ class PreviewPanel(ttk.LabelFrame):
             c.create_rectangle(sx - 2, sy - 2, sx + 2, sy + 2, outline=COL_START,
                                fill="", tags="path")
             ex, ey = self._centre(path[-1])
-            c.create_line(ex - 3, ey - 3, ex + 3, ey + 3, fill=col, tags="path")
-            c.create_line(ex - 3, ey + 3, ex + 3, ey - 3, fill=col, tags="path")
+            if self.warning.get():
+                # AN OPEN RING, NOT A CROSS. The cross means "this is where the
+                # path ends"; a program with no EXIT has not ended, it has run
+                # out of authored segments, and the two should not look alike.
+                c.create_oval(ex - 4, ey - 4, ex + 4, ey + 4, outline=COL_CUT,
+                              fill="", width=2, tags="path")
+                c.create_text(ex + 7, ey, text="incomplete", anchor="w",
+                              fill=COL_CUT, font=("TkDefaultFont", 8),
+                              tags="path")
+            else:
+                c.create_line(ex - 3, ey - 3, ex + 3, ey + 3, fill=col, tags="path")
+                c.create_line(ex - 3, ey + 3, ex + 3, ey - 3, fill=col, tags="path")
 
     def _draw_markers(self):
         """Only the live positions. Called every playback frame, so it moves

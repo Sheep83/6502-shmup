@@ -95,8 +95,31 @@ class MovementStage:
 
 @dataclass
 class MovementProgram:
+    """A named path, in one or both of two forms.
+
+    `stages` IS ALWAYS THE TRUTH THE ENGINE RUNS. The exporter, the validator
+    and the faithful simulator read it and nothing else, so nothing downstream
+    of this class had to learn a new idea in Phase 6B.
+
+    `segments` is OPTIONAL and is what the designer actually wrote (Phase 6B,
+    tools/level_editor/movement_semantic.py). When it is present it is the
+    SOURCE and `stages` is its deterministic compilation, rewritten on every
+    semantic edit; when it is absent the program is RAW and its records are
+    left exactly as they were found. That is what lets a project mix the two
+    and what keeps a project authored before Phase 6B byte-identical:
+    `to_dict` emits the key only when there is something to emit.
+
+    THE SEGMENTS ARE THE ASSET; THE STAGES ARE A CACHE. A movement program is
+    meant to be reusable across stages, and its semantic form is what would
+    travel. The records are the compilation of it against ONE launch heading,
+    which is a per-use resolution rather than a property of the program -- so
+    when programs become a project-level encounter library, `segments` is what
+    moves and `stages` is what the exporter regenerates for each stage that
+    references it. Nothing here assumes a program belongs to one stage.
+    """
     id: str
     stages: list = field(default_factory=list)
+    segments: list = field(default_factory=list)
 
     @property
     def record_count(self):
@@ -106,8 +129,15 @@ class MovementProgram:
     def byte_length(self):
         return len(self.stages) * C.WM_STAGE_SIZE
 
+    @property
+    def is_semantic(self):
+        return bool(self.segments)
+
     def to_dict(self):
-        return {"id": self.id, "stages": [s.to_dict() for s in self.stages]}
+        d = {"id": self.id, "stages": [s.to_dict() for s in self.stages]}
+        if self.segments:
+            d["segments"] = [s.to_dict() for s in self.segments]
+        return d
 
     @staticmethod
     def from_dict(raw, path):
@@ -116,10 +146,19 @@ class MovementProgram:
         stages = raw.get("stages") or []
         if not isinstance(stages, list):
             raise ProjectV6Error(f"{path}.stages must be a list")
+        segments = raw.get("segments") or []
+        if not isinstance(segments, list):
+            raise ProjectV6Error(f"{path}.segments must be a list")
+        # IMPORTED LAZILY. movement_semantic imports movement_sim, which
+        # imports this module; the authored-data model must not depend on the
+        # simulator to be loadable.
+        from movement_semantic import Segment
         return MovementProgram(
             id=str(raw.get("id", "")),
             stages=[MovementStage.from_dict(s, f"{path}.stages[{i}]")
                     for i, s in enumerate(stages)],
+            segments=[Segment.from_dict(s, f"{path}.segments[{i}]")
+                      for i, s in enumerate(segments)],
         )
 
 

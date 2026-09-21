@@ -18,7 +18,7 @@
 // stage_charset.asm); it is declared here so the engine's early glyph-
 // namespace guards resolve before the byte block is imported.
 // ==========================================================================
-.const STAGE_METATILE_ROWS     = 105
+.const STAGE_METATILE_ROWS     = 200
 
 // THE BOSS APPROACH. No ordinary authored encounter may START at or after
 // this world-progress row, which is what turns the run-in to the boss from
@@ -27,16 +27,16 @@
 //
 // SAME COORDINATE DOMAIN AS A TRIGGER ROW: coarse rows of worldProgress,
 // 16-bit, counted from the start of the stage. This stage's own last
-// complete view is STAGE_METATILE_ROWS * 4 - 25 = 395, so this
-// leaves 55 rows of approach.
+// complete view is STAGE_METATILE_ROWS * 4 - 25 = 775, so this
+// leaves 50 rows of approach.
 //
 // IT FORBIDS, IT DOES NOT DESCRIBE. The value says where authoring STOPS,
 // not where the action happens to stop.
-.const STAGE_NO_SPAWN_ROW      = 340
-.const STAGE_METATILE_COUNT   = 34
+.const STAGE_NO_SPAWN_ROW      = 725
+.const STAGE_METATILE_COUNT   = 41
 .const TERRAIN_BACKGROUND_COLOUR = 12
 .const TERRAIN_MC_COLOUR_1     = 15
 .const TERRAIN_MC_COLOUR_2     = 11
 .const TERRAIN_CHARACTER_COLOUR = 1
 .const TERRAIN_COLOUR_RAM      = 8 | TERRAIN_CHARACTER_COLOUR
-.const TERRAIN_GLYPH_COUNT     = 72
+.const TERRAIN_GLYPH_COUNT     = 80

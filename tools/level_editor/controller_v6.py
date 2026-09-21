@@ -53,9 +53,12 @@ Two v5 names survive only as inert compatibility:
 """
 from pathlib import Path
 
+import dataclasses
+
 import contract_v2 as C
 import export_v6
 import migration_v6
+import movement_semantic
 import project_v6
 import validation_v6
 from project import (
@@ -729,6 +732,7 @@ class EditorController:
                     if self.project.movement_programs else ""))
         d = project_v6.WaveDefinition(id=ident, movement_program=prog, **fields)
         self.project.wave_definitions.append(d)
+        self.resync_semantic_programs()
         return len(self.project.wave_definitions) - 1
 
     def update_wave_definition(self, index, **fields):
@@ -739,6 +743,7 @@ class EditorController:
             if not hasattr(d, key):
                 raise ControllerError(f"a wave definition has no field {key!r}")
             setattr(d, key, str(value) if key == "movement_program" else int(value))
+        self.resync_semantic_programs()
         return index
 
     def rename_wave_definition(self, index, new_id):
@@ -757,6 +762,7 @@ class EditorController:
                 t.wave_definition = new_id
                 moved += 1
         d.id = new_id
+        self.resync_semantic_programs()
         return moved
 
     def delete_wave_definition(self, index):
@@ -771,6 +777,7 @@ class EditorController:
                 f"{'…' if len(users) > 6 else ''}). "
                 "Point them at another definition or delete them first.")
         del self.project.wave_definitions[index]
+        self.resync_semantic_programs()
         return True
 
     def duplicate_wave_definition(self, index):
@@ -785,6 +792,7 @@ class EditorController:
             y_step=src.y_step, colour=src.colour, heading=src.heading,
             movement_program=src.movement_program)
         self.project.wave_definitions.append(clone)
+        self.resync_semantic_programs()
         return len(self.project.wave_definitions) - 1
 
     # ---- movement programs --------------------------------------------------
@@ -929,3 +937,365 @@ class EditorController:
         st = prog.stages.pop(stage_index)
         prog.stages.insert(new, st)
         return new
+
+    # =====================================================================
+    # SEMANTIC MOVEMENT AUTHORING  (Phase 6B)
+    # =====================================================================
+    # A program is SEMANTIC when it carries segments and RAW when it does not.
+    # Every operation here leaves `stages` equal to the deterministic
+    # compilation of `segments`, because `stages` is what the exporter, the
+    # validator and the simulator read -- so a semantic edit reaches the engine
+    # by the same path a raw one always did, and nothing downstream changed.
+    #
+    # NONE OF THEM VALIDATES CAPACITY. validation_v6 is still the one rule set
+    # and it already counts compiled records and bytes, so an edit that
+    # overflows the pool performs and the workspace shows the validator's own
+    # error -- the Phase 5B contract, unchanged.
+
+    def program_continuity(self, prog_index):
+        """Where this program's flown path changes direction instantaneously.
+
+        Reported for RAW programs, which can do it; a semantic program cannot
+        (see movement_semantic.compile_segments). Read from the faithful
+        simulator, so it is a fact about the trajectory rather than about the
+        bytes.
+        """
+        prog = self.project.movement_programs[prog_index]
+        if not prog.stages or prog.stages[-1].kind != "EXIT":
+            return []
+        heading, _n = self.program_launch_heading(prog_index)
+        try:
+            return movement_semantic.continuity_breaks(prog.stages, heading)
+        except Exception:                                   # noqa: BLE001
+            return []
+
+    def make_stage_continuous(self, prog_index, stage_index):
+        """Enter a raw arc on the heading the object is ACTUALLY travelling.
+
+        THE ONE-BYTE FIX for the stale-heading kink, and it needs no engine
+        change: byte 3 of an arc is its entry heading, so naming the heading
+        the previous leg was flying on removes the snap outright. Explicit and
+        undoable -- the alternative, rewriting it silently, would be the
+        editor authoring on the designer's behalf.
+        """
+        prog = self.project.movement_programs[prog_index]
+        breaks = {b["stage"]: b for b in self.program_continuity(prog_index)}
+        b = breaks.get(stage_index)
+        if b is None:
+            raise ControllerError(
+                "that stage already continues smoothly from the one before it")
+        stage = prog.stages[stage_index]
+        if stage.kind not in C.ARC_KINDS:
+            raise ControllerError(
+                f"a {stage.kind} stage carries its own velocity, so there is no "
+                f"entry heading to correct. Change its vx/vy, or author the "
+                f"program as semantic segments.")
+        if b["travel_heading"] is None:
+            raise ControllerError(
+                "the previous stage leaves the object standing still, so there "
+                "is no direction of travel to continue from")
+        stage.entry_heading = b["travel_heading"]
+        return b["travel_heading"]
+
+    def program_launch_heading(self, prog_index):
+        """(heading, note) this program's records are compiled against."""
+        prog = self.project.movement_programs[prog_index]
+        return movement_semantic.resolve_launch_heading(
+            self.project, prog.id, prog.segments or None)
+
+    def _recompile(self, prog):
+        """segments -> stages. The single place compilation is triggered.
+
+        DRAFTS ARE ALLOWED HERE AND REFUSED AT THE DOOR. A program being built
+        is routinely incomplete -- no terminal EXIT yet, or a segment whose
+        numbers are still being typed -- and refusing the edit would make
+        progressive authoring impossible. So the compiled prefix is stored and
+        `validation_v6` decides whether the result may be SAVED or EXPORTED.
+        The synthetic terminator the draft used for previewing is dropped, so
+        an unfinished program still reads as unfinished to the validator.
+        """
+        heading, _note = movement_semantic.resolve_launch_heading(
+            self.project, prog.id, prog.segments or None)
+        draft = movement_semantic.compile_draft(prog.segments, heading)
+        prog.stages = draft.authored_stages
+        return draft
+
+    def segment_incoming_heading(self, prog_index, index):
+        """The direction the object is travelling as it REACHES this segment.
+
+        What the dial shows before an author has chosen anything: turning
+        "Set direction" on should not move the path, it should offer the
+        direction already being flown as the starting point.
+        """
+        prog = self.project.movement_programs[prog_index]
+        heading, _note = movement_semantic.resolve_launch_heading(
+            self.project, prog.id, prog.segments or None)
+        return movement_semantic.final_heading(prog.segments[:index], heading)
+
+    def program_draft(self, prog_index):
+        """How far this program currently compiles, and why it stops."""
+        prog = self.project.movement_programs[prog_index]
+        if not prog.is_semantic:
+            return None
+        heading, _note = movement_semantic.resolve_launch_heading(
+            self.project, prog.id, prog.segments or None)
+        return movement_semantic.compile_draft(prog.segments, heading)
+
+    def program_cost(self, prog_index):
+        """What this program costs the runtime pool, and what it was written as.
+
+        THE POINT OF SHOWING BOTH is that macros and turns expand: seven
+        segments are not seven records, and an author who cannot see the
+        difference will meet it as an export failure instead.
+        """
+        prog = self.project.movement_programs[prog_index]
+        return {"segments": len(prog.segments),
+                "records": len(prog.stages),
+                "bytes": len(prog.stages) * C.WM_STAGE_SIZE,
+                "semantic": prog.is_semantic}
+
+    def make_semantic(self, prog_index):
+        """Convert a raw program to segments, ONLY if the path is unchanged.
+
+        Returns a dict describing what happened. Refuses rather than
+        approximates: some records cannot be said as relative segments, and
+        those programs stay raw for ever, which is a supported state and not a
+        failure.
+        """
+        prog = self.project.movement_programs[prog_index]
+        if prog.is_semantic:
+            raise ControllerError(
+                f"{prog.id!r} is already a semantic program")
+        heading, _note = movement_semantic.resolve_launch_heading(
+            self.project, prog.id)
+        segs, why, same_bytes = movement_semantic.lift_is_exact(
+            prog.stages, heading)
+        if segs is None:
+            raise ControllerError(
+                f"{prog.id!r} cannot be converted without changing it: {why}")
+        prog.segments = segs
+        self._recompile(prog)
+        return {"heading": heading, "bytes_identical": same_bytes,
+                "segments": len(segs)}
+
+    def preview_make_semantic(self, prog_index):
+        """What make_semantic WOULD do, without doing it.
+
+        So the editor can put the consequence in front of the author -- in
+        particular that the compiled bytes change even though the flight does
+        not -- before anything is committed to the undo stack.
+        """
+        prog = self.project.movement_programs[prog_index]
+        if prog.is_semantic:
+            return None, "already semantic", False
+        heading, _note = movement_semantic.resolve_launch_heading(
+            self.project, prog.id)
+        return movement_semantic.lift_is_exact(prog.stages, heading)
+
+    def start_semantic(self, prog_index):
+        """Begin a program as segments, discarding whatever records it had.
+
+        FOR A PROGRAM THAT CANNOT BE LIFTED, and for a brand-new one. The seed
+        is STRAIGHT then EXIT rather than a bare EXIT, because a bare EXIT
+        inherits no velocity and so does not compile -- the engine would give
+        the object a pool slot and no way to leave. Destructive and therefore
+        explicit: make_semantic() is the non-destructive route and is tried
+        first everywhere this is offered.
+        """
+        prog = self.project.movement_programs[prog_index]
+        segs = [movement_semantic.Segment(kind="STRAIGHT", frames=30),
+                movement_semantic.Segment(kind="EXIT")]
+        return self._commit(prog, segs, 0)
+
+    def make_raw(self, prog_index):
+        """Drop back to raw records, keeping the compiled ones as they stand.
+
+        THE SEGMENTS ARE DISCARDED, not hidden. A stale semantic program kept
+        alongside hand-edited records is exactly the "hidden stale payload"
+        Phase 5B refused: it would reappear and overwrite the records the
+        moment anything recompiled.
+        """
+        prog = self.project.movement_programs[prog_index]
+        if not prog.is_semantic:
+            return False
+        prog.segments = []
+        return True
+
+    @staticmethod
+    def new_segment(kind):
+        """A segment of `kind` with parameters that actually do something."""
+        if kind == "STRAIGHT":
+            return movement_semantic.Segment(kind="STRAIGHT", frames=30)
+        if kind == "TURN":
+            return movement_semantic.Segment(
+                kind="TURN", direction="RIGHT", steps=16,
+                rate=movement_semantic.DEFAULT_RATE)
+        if kind == "HOLD":
+            return movement_semantic.Segment(kind="HOLD", frames=30)
+        return movement_semantic.Segment(kind="EXIT")
+
+    def add_segment(self, prog_index, kind="STRAIGHT", at=None):
+        """Insert one segment, keeping the terminal EXIT terminal."""
+        prog = self._semantic(prog_index)
+        segs = list(prog.segments)
+        if at is None:
+            at = (len(segs) - 1 if segs and segs[-1].kind == "EXIT"
+                  and kind != "EXIT" else len(segs))
+        at = max(0, min(len(segs), int(at)))
+        segs.insert(at, self.new_segment(kind))
+        return self._commit(prog, segs, at)
+
+    def insert_macro(self, prog_index, name, at=None):
+        """Expand a named manoeuvre into core segments, in place.
+
+        EXPANDED NOW, NOT STORED. See movement_semantic.MACROS for why: the
+        author sees the records it cost the moment it lands, and can then tune
+        either half.
+        """
+        prog = self._semantic(prog_index)
+        if name not in movement_semantic.MACROS:
+            raise ControllerError(f"no movement macro named {name!r}")
+        new = movement_semantic.MACROS[name]()
+        segs = list(prog.segments)
+        if at is None:
+            at = (len(segs) - 1 if segs and segs[-1].kind == "EXIT"
+                  else len(segs))
+        at = max(0, min(len(segs), int(at)))
+        segs[at:at] = new
+        return self._commit(prog, segs, at)
+
+    def set_segment_kind(self, prog_index, index, kind):
+        """Change a segment's kind, re-initialising it. No stale payload."""
+        prog = self._semantic(prog_index)
+        if prog.segments[index].kind == kind:
+            return index
+        segs = list(prog.segments)
+        segs[index] = self.new_segment(kind)
+        return self._commit(prog, segs, index)
+
+    def update_segment(self, prog_index, index, **fields):
+        """Edit one segment's parameters. Segments are immutable, so this
+        replaces rather than mutates."""
+        prog = self._semantic(prog_index)
+        seg = prog.segments[index]
+        for key in fields:
+            if not hasattr(seg, key):
+                raise ControllerError(f"a movement segment has no field {key!r}")
+            if key == "kind":
+                raise ControllerError(
+                    "use set_segment_kind to change a segment's kind")
+        clean = {}
+        for key, value in fields.items():
+            if key == "direction":
+                if value not in movement_semantic.DIRECTIONS:
+                    raise ControllerError(
+                        f"direction must be LEFT or RIGHT, not {value!r}")
+                clean[key] = value
+            elif key == "heading":
+                # None IS A VALUE HERE, and the important one: it is Continue,
+                # the default that keeps a program relative. Coercing it to an
+                # integer would silently turn every straight into an explicit
+                # direction and quietly destroy reusability.
+                clean[key] = None if value is None else int(value)
+            else:
+                clean[key] = int(value)
+        segs = list(prog.segments)
+        segs[index] = dataclasses.replace(seg, **clean)
+        return self._commit(prog, segs, index)
+
+    def delete_segment(self, prog_index, index):
+        prog = self._semantic(prog_index)
+        if len(prog.segments) <= 1:
+            raise ControllerError(
+                "a movement program needs at least one segment; delete the "
+                "program instead")
+        segs = list(prog.segments)
+        del segs[index]
+        return self._commit(prog, segs, min(index, len(segs) - 1))
+
+    def duplicate_segment(self, prog_index, index):
+        prog = self._semantic(prog_index)
+        segs = list(prog.segments)
+        segs.insert(index + 1, segs[index])
+        return self._commit(prog, segs, index + 1)
+
+    def move_segment(self, prog_index, index, delta):
+        prog = self._semantic(prog_index)
+        new = index + int(delta)
+        if not (0 <= new < len(prog.segments)) or new == index:
+            return index
+        segs = list(prog.segments)
+        segs.insert(new, segs.pop(index))
+        return self._commit(prog, segs, new)
+
+    def mirror_program(self, prog_index):
+        """Mirror the MOVEMENT. The launch state is the wave's business.
+
+        Returns the launch heading a wave would need for this to read as a
+        screen-space reflection, so the editor can say so explicitly rather
+        than silently rewriting a wave definition the author did not select.
+        """
+        prog = self._semantic(prog_index)
+        segs = movement_semantic.mirror_segments(prog.segments)
+        heading, _note = movement_semantic.resolve_launch_heading(
+            self.project, prog.id, segs)
+        self._commit(prog, segs, 0)
+        return {"mirrored_launch_heading":
+                movement_semantic.mirror_heading(heading),
+                "current_launch_heading": heading}
+
+    def resync_semantic_programs(self):
+        """Recompile every semantic program against its CURRENT launch heading.
+
+        A STRAIGHT bakes its velocity into the record, so a semantic program's
+        compiled records depend on the launch heading of the waves that use it
+        -- which means editing a WAVE can invalidate a PROGRAM. Pointing a new
+        wave at a program, or changing an existing wave's heading, would
+        otherwise leave records compiled for the old heading: the editor would
+        show a straight leg going one way and the engine would fly it another.
+
+        Called after every wave-definition change. Cheap (a project holds a
+        handful of programs), deterministic, and it only rewrites records that
+        actually differ, so it cannot manufacture a spurious edit.
+
+        Returns the ids whose records it had to change.
+        """
+        changed = []
+        for prog in self.project.movement_programs:
+            if not prog.is_semantic:
+                continue                        # raw records are never touched
+            heading, _note = movement_semantic.resolve_launch_heading(
+                self.project, prog.id, prog.segments)
+            try:
+                fresh = movement_semantic.compile_segments(prog.segments, heading)
+            except movement_semantic.CompileError:
+                # An uncompilable program is already an error the validator
+                # reports; leaving the last good records in place is better
+                # than blanking them behind the author's back.
+                continue
+            if [s.to_dict() for s in fresh] != [s.to_dict() for s in prog.stages]:
+                prog.stages = fresh
+                changed.append(prog.id)
+        return changed
+
+    def _semantic(self, prog_index):
+        prog = self.project.movement_programs[prog_index]
+        if not prog.is_semantic:
+            raise ControllerError(
+                f"{prog.id!r} is a raw program: convert it to segments first, "
+                f"or edit its records in the Advanced view")
+        return prog
+
+    def _commit(self, prog, segs, cursor):
+        """Adopt new segments and recompile the records from them.
+
+        NO LONGER ALL-OR-NOTHING, because "nothing" is the wrong answer while
+        a program is being built: an author who has not yet added EXIT, or who
+        is halfway through typing a step count, must still be able to make the
+        edit and see it. `segments` stays the source of truth, `stages`
+        becomes the compiled prefix, and the two cannot disagree because one
+        is derived from the other every time.
+        """
+        prog.segments = segs
+        self._recompile(prog)
+        return cursor

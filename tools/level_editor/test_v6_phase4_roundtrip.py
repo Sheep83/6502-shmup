@@ -197,12 +197,22 @@ refuse("a 181st trigger is refused", "trigger.too_many",
        lambda p: p.triggers.extend(
            Trigger(200 + i, "sweep", "RING" if i % 2 else "DROPPER", [0])
            for i in range(177)))
+# DERIVED FROM THE PROJECT, NOT FROM A REMEMBERED ROW NUMBER. These test the
+# noSpawn boundary RULE, so they have to move a trigger to wherever that
+# boundary currently is -- pinning it to 340 made them a test of one level's
+# content, and once the authored level grew they started failing for the wrong
+# reason (the moved trigger landed out of order and tripped a different rule
+# first). Moving the LAST trigger keeps the list sorted so the rule under test
+# is the one that fires.
 refuse("a trigger AT noSpawnRow is refused", "trigger.at_or_after_no_spawn",
-       lambda p: setattr(p.triggers[3], "world_progress", 340))
+       lambda p: setattr(p.triggers[-1], "world_progress",
+                         p.stage.no_spawn_row))
 refuse("a trigger after noSpawnRow is refused", "trigger.at_or_after_no_spawn",
-       lambda p: setattr(p.triggers[3], "world_progress", 341))
+       lambda p: setattr(p.triggers[-1], "world_progress",
+                         p.stage.no_spawn_row + 1))
 refuse("descending trigger rows are refused", "trigger.unsorted",
-       lambda p: setattr(p.triggers[0], "world_progress", 200))
+       lambda p: setattr(p.triggers[-1], "world_progress",
+                         max(0, p.triggers[0].world_progress - 1)))
 refuse("a dangling movement-program reference is refused",
        "wavedef.dangling_program",
        lambda p: setattr(p.wave_definitions[0], "movement_program", "nope"))

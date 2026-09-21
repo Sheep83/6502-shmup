@@ -214,9 +214,19 @@ eq("turrets still", len(project.turrets),
    len([o for o in _V5["objects"] if o.get("type") == "turret"]))
 
 v = validate(project)
-if not v.ok or v.warnings:
+# NO ERRORS, AND NO WARNING THIS FILE CANNOT NAME. The imported `linger`
+# program really does kink 31 degrees either side of its drifting hold -- its
+# hold drifts (0, 1) while the object is travelling (3, 5) -- so the Phase 6B
+# continuity rule reports it, correctly. Still asserting "no warnings at all"
+# would mean deleting a true finding to keep a test quiet; asserting the exact
+# set keeps every other warning a failure.
+_expected = {("movement.discontinuity", "movementPrograms[linger].stages[1]"),
+             ("movement.discontinuity", "movementPrograms[linger].stages[2]")}
+_got = {(i.code, i.path) for i in v.warnings}
+if not v.ok or _got != _expected:
     raise AssertionError(f"the populated project does not validate cleanly:\n{v}")
-ok("the populated project validates with no errors and no warnings")
+ok("the populated project validates with no errors, and its only warnings are "
+   "the two real discontinuities in the imported 'linger' program")
 
 # refuses to overwrite silently
 try:

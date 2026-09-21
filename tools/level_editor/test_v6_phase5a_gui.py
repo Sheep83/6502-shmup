@@ -152,7 +152,12 @@ check("a terrain edit changes exactly one map cell",
       f"({row},{col}) {original} -> {replacement}")
 check("...and leaves every encounter untouched",
       encounter_fingerprint(c2.project) == enc0)
-check("...and leaves noSpawnRow untouched", c2.no_spawn_row == 340)
+# COMPARED WITH THE PROJECT, NOT WITH A REMEMBERED NUMBER. The claim is that
+# a terrain edit leaves noSpawnRow ALONE, which is true whatever the authored
+# level sets it to; pinning it to 340 made it a test of one level's content.
+check("...and leaves noSpawnRow untouched",
+      c2.no_spawn_row == EditorController.canonical(HERE).no_spawn_row,
+      str(c2.no_spawn_row))
 check("...and leaves turrets untouched",
       [(t.metatile_row, t.metatile_col) for t in c2.turrets]
       == [(t.metatile_row, t.metatile_col) for t in c.turrets])
@@ -228,8 +233,12 @@ with tempfile.TemporaryDirectory() as d:
 
 # export is refused when the project is invalid
 bad = EditorController.canonical(HERE)
-bad.project.turrets.append(project_v6.Turret(0, 0))
-bad.project.turrets.append(project_v6.Turret(1, 0))   # 10 turrets: over the cap
+# ENOUGH TO EXCEED THE CAP FROM WHEREVER THE PROJECT STARTS. Adding a fixed
+# two assumed the level had eight turrets; it has since been authored down to
+# five, so the "invalid" project was quietly valid and the refusal under test
+# never fired.
+while len(bad.project.turrets) <= C.MAX_TURRETS:
+    bad.project.turrets.append(project_v6.Turret(0, len(bad.project.turrets)))
 try:
     with tempfile.TemporaryDirectory() as d:
         bad.export(d)

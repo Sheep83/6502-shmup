@@ -3,10 +3,10 @@
 // Level: level1
 //
 // LEVEL-OWNED terrain glyph bitmaps - the swappable tileset unit.
-// This level authors 72 glyph(s) at character codes 96..167.
+// This level authors 80 glyph(s) at character codes 96..175.
 //
 // The terrain charset window is $0800-$0FFF (src/terrain.asm,
-// TERRAIN_CHARSET), so these bitmaps resolve to $0B00-$0D3F
+// TERRAIN_CHARSET), so these bitmaps resolve to $0B00-$0D7F
 // (TERRAIN_GLYPHS = TERRAIN_CHARSET + 96 * 8).
 //
 // The ceiling is 130 glyphs: src/turrets.asm fails the
@@ -83,11 +83,19 @@ terrainGlyphs:
     .byte  85, 85, 85, 85, 85, 85, 85, 64   // code 160
     .byte 170, 85, 85, 85, 85, 85, 85,  0   // code 161
     .byte  85, 85, 85, 85, 85, 85, 85,  1   // code 162
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 163
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 164
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 165
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 166
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 167
+    .byte 245,245,245,245,245,245,245,245   // code 163
+    .byte  85, 85, 85, 85, 87, 87, 87, 87   // code 164
+    .byte  87, 87, 87, 87, 85, 85, 85, 85   // code 165
+    .byte  85, 85, 85, 85,213,213,213,213   // code 166
+    .byte  95, 95, 95, 95, 95, 95, 95, 95   // code 167
+    .byte 213,213,213,213, 85, 85, 85, 85   // code 168
+    .byte  85, 85,125,125,125,125, 85, 85   // code 169
+    .byte 213,213,213,213,213,213,234,170   // code 170
+    .byte 170,170, 85, 85, 85, 85, 85, 85   // code 171
+    .byte 195, 15, 60,240,195, 15, 60,195   // code 172
+    .byte  85, 85, 85, 85, 85, 85,255,255   // code 173
+    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 174
+    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 175
 terrainGlyphsEnd:
 .if (terrainGlyphsEnd - terrainGlyphs != TERRAIN_GLYPH_COUNT * 8) {
     .error "terrainGlyphs data size does not match TERRAIN_GLYPH_COUNT * 8"

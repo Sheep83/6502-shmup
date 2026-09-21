@@ -508,7 +508,7 @@ def resolve_program(project, wave):
         f"{wave.movement_program!r}, which does not exist")
 
 
-def simulate_wave(project, wave, *, max_frames=None):
+def simulate_wave(project, wave, *, max_frames=None, stages=None):
     """A complete ordinary wave over its whole useful life.
 
     Frame 0 is the frame the trigger became due, and MEMBER 0 IS SENT ON IT.
@@ -535,7 +535,15 @@ def simulate_wave(project, wave, *, max_frames=None):
             f"whole formation in one frame")
 
     prog = resolve_program(project, wave)
-    stages = prog.stages
+    # `stages` OVERRIDES what the program has stored, and exists for exactly
+    # one caller: previewing a SEMANTIC program from a heading no wave uses.
+    # Those stored records were compiled against the launch heading of the
+    # waves that use it, so a straight leg's velocity is baked in -- flying
+    # them from some other heading would show a path the engine never flies.
+    # The caller compiles the segments afresh and passes the result. Nothing
+    # is written back: a preview must not edit the asset it is previewing.
+    if stages is None:
+        stages = prog.stages
     if not stages:
         raise SimulationError(f"movement program {prog.id!r} has no stages")
     if stages[-1].kind != "EXIT":
@@ -601,7 +609,7 @@ def wave_by_id(project, wave_id):
     raise SimulationError(f"wave definition {wave_id!r} does not exist")
 
 
-def simulate_trigger(project, index):
+def simulate_trigger(project, index, *, stages=None, max_frames=None):
     """trigger -> wave definition -> movement program, on the LIVE project.
 
     Refuses a Dropper rather than drawing one: src/waves.asm calls
@@ -619,11 +627,12 @@ def simulate_trigger(project, index):
             "spawns -- src/dropper.asm installs its own three-pass flight over "
             "the top of the aperture -- so an ordinary-wave preview would show "
             "a trajectory the engine never flies.")
-    return simulate_wave(project, wave_by_id(project, trig.wave_definition))
+    return simulate_wave(project, wave_by_id(project, trig.wave_definition),
+                         stages=stages, max_frames=max_frames)
 
 
 def preview_program(project, program, *, heading=0, start=(160, 40),
-                    max_frames=None):
+                    max_frames=None, stages=None):
     """One movement program on its own, with no wave around it.
 
     For previewing from the Movement programs tab, where there is no formation
@@ -635,4 +644,4 @@ def preview_program(project, program, *, heading=0, start=(160, 40),
         id=f"({program.id})", count=1, interval=1,
         start_x=start[0], start_y=start[1], x_step=0, y_step=0,
         colour=1, heading=heading, movement_program=program.id)
-    return simulate_wave(project, fake, max_frames=max_frames)
+    return simulate_wave(project, fake, max_frames=max_frames, stages=stages)
