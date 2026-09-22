@@ -16,9 +16,9 @@ WHAT IT GROUNDS that the direct-drive fixture cannot:
       runs after objectUpdateAll, so its first wmTick is a frame away);
     * the exact frame src/enemy.asm's despawn rules free each member.
 
-ONLY THE RING WAVES ARE USABLE. Level 1's other two triggers are DROPPER
-appearances and src/dropper.asm takes those off the authored path
-immediately, so they are recorded but marked, not compared.
+ONLY THE RING WAVES ARE USABLE. Any DROPPER trigger is taken off its wave's
+authored path immediately by src/dropper.asm, so those are recorded but
+marked, not compared.
 
 The sample point is the breakpoint at gameFrame, which is the top of a frame
 and therefore the settled END of the one before it -- after objectUpdateAll
@@ -42,8 +42,25 @@ MAX_OBJECTS = 16
 WAVE_SLOTS = 2
 TYPE_ENEMY = 1
 PORT = 6573
-MAX_FRAMES = 1150       # row 90 is ~720 frames in at eight frames a coarse
-                        # row, and `linger` flies for ~260 more
+
+
+def _frame_budget():
+    """Long enough for the LAST authored trigger, derived from the level.
+
+    A coarse row is eight displayed frames, so the window has to reach the
+    last trigger's row and then cover the flight it starts. This was a
+    hard-coded 1150, sized for the rows the level happened to use when it was
+    written; the level was authored further, the last three waves fell outside
+    the recording, and the fixture quietly stopped covering them.
+    """
+    import json
+    doc = json.loads((ROOT / "tools/level_editor/levels/level1/level.v6.json")
+                     .read_text())
+    last = max((t["worldProgress"] for t in doc["triggers"]), default=0)
+    return last * 8 + 600           # + the flight after the final spawn
+
+
+MAX_FRAMES = _frame_budget()
 
 
 def sample(mon):
@@ -97,8 +114,8 @@ def main():
 
     v = None
     try:
-        # boot="exact" wakes at worldProgress 0, so all four authored triggers
-        # are still ahead. A "fast" boot lands hundreds of rows in, where the
+        # boot="exact" wakes at worldProgress 0, so every authored trigger
+        # is still ahead. A "fast" boot lands hundreds of rows in, where the
         # director is already exhausted and there is nothing to watch.
         v = Vice(PORT, PRG, boot="exact")
         mon = v.mon

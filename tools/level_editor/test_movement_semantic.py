@@ -823,10 +823,19 @@ proj = migration_v6.load_any(CANON).project
 raw_bytes = CANON.read_bytes()
 c = EditorController(proj)
 
-check("the canonical project's programs all start RAW",
-      not any(p.is_semantic for p in proj.movement_programs))
+# THE CANONICAL PROJECT IS AUTHORED CONTENT AND WILL KEEP CHANGING. It once
+# held only raw programs; it now holds semantic ones too, because the feature
+# shipped and the author used it. What matters here is the RULE -- a raw
+# program writes no segments key, a semantic one does -- not the census.
+_semantic_ids_before = {p.id for p in proj.movement_programs if p.is_semantic}
+_raw = [p for p in proj.movement_programs if not p.is_semantic]
+check("the canonical project still contains raw programs to exercise",
+      _raw, f"{len(_raw)} raw of {len(proj.movement_programs)}")
 check("...and a raw program writes no segments key at all",
-      "segments" not in proj.movement_programs[0].to_dict())
+      all("segments" not in p.to_dict() for p in _raw))
+check("...while every semantic one does",
+      all("segments" in p.to_dict()
+          for p in proj.movement_programs if p.is_semantic))
 check("opening and saving the canonical project changes nothing",
       c.to_json().encode() == raw_bytes)
 
@@ -869,8 +878,12 @@ check("...and its records still fly the identical path",
       sem.trajectories_match(
           [project_v6.MovementStage.from_dict(d, "p") for d in before],
           proj.movement_programs[0].stages, 0))
-check("...while the other programs are untouched and still raw",
-      not any(p.is_semantic for p in proj.movement_programs[1:]))
+# THE PROGRAMS THAT WERE RAW BEFORE THE CONVERSION ARE STILL RAW. Phrased
+# against the set captured earlier rather than "all of them", because the
+# authored project legitimately contains semantic programs of its own now.
+check("...while every other program is left exactly as it was",
+      all(q.is_semantic == (q.id in _semantic_ids_before)
+          for q in proj.movement_programs[1:]))
 check("a semantic and a raw program coexist in one project",
       validate(proj).ok, str([i.message for i in validate(proj).errors][:2]))
 refuses("converting an already-semantic program is refused",

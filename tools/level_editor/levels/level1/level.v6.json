@@ -4067,6 +4067,78 @@
           "kind": "EXIT"
         }
       ]
+    },
+    {
+      "id": "dive_bomb",
+      "stages": [
+        {
+          "kind": "STRAIGHT",
+          "frames": 60,
+          "vx": 0,
+          "vy": 6
+        },
+        {
+          "kind": "ARC",
+          "steps": 32,
+          "framesPerStep": 4,
+          "entryHeading": 16
+        },
+        {
+          "kind": "EXIT"
+        }
+      ],
+      "segments": [
+        {
+          "kind": "STRAIGHT",
+          "frames": 60,
+          "heading": 16
+        },
+        {
+          "kind": "TURN",
+          "direction": "RIGHT",
+          "steps": 32,
+          "rate": 4
+        },
+        {
+          "kind": "EXIT"
+        }
+      ]
+    },
+    {
+      "id": "up_n_over",
+      "stages": [
+        {
+          "kind": "STRAIGHT",
+          "frames": 125,
+          "vx": 4,
+          "vy": -4
+        },
+        {
+          "kind": "ARC",
+          "steps": 16,
+          "framesPerStep": 4,
+          "entryHeading": 56
+        },
+        {
+          "kind": "EXIT"
+        }
+      ],
+      "segments": [
+        {
+          "kind": "STRAIGHT",
+          "frames": 125,
+          "heading": 56
+        },
+        {
+          "kind": "TURN",
+          "direction": "RIGHT",
+          "steps": 16,
+          "rate": 4
+        },
+        {
+          "kind": "EXIT"
+        }
+      ]
     }
   ],
   "waveDefinitions": [
@@ -4129,6 +4201,30 @@
       "colour": 13,
       "heading": 8,
       "movementProgram": "loop"
+    },
+    {
+      "id": "dive_4",
+      "count": 4,
+      "interval": 30,
+      "startX": 175,
+      "startY": 0,
+      "xStep": 35,
+      "yStep": 0,
+      "colour": 1,
+      "heading": 0,
+      "movementProgram": "dive_bomb"
+    },
+    {
+      "id": "up_n_over",
+      "count": 6,
+      "interval": 25,
+      "startX": 0,
+      "startY": 200,
+      "xStep": 0,
+      "yStep": 0,
+      "colour": 1,
+      "heading": 0,
+      "movementProgram": "up_n_over"
     }
   ],
   "triggers": [
@@ -4175,6 +4271,44 @@
       "fireMask": [
         0,
         2
+      ],
+      "dropperSide": "LEFT"
+    },
+    {
+      "worldProgress": 205,
+      "waveDefinition": "dive_4",
+      "species": "RING",
+      "fireMask": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "dropperSide": "LEFT"
+    },
+    {
+      "worldProgress": 260,
+      "waveDefinition": "up_n_over",
+      "species": "RING",
+      "fireMask": [
+        0,
+        1,
+        2,
+        4,
+        5
+      ],
+      "dropperSide": "LEFT"
+    },
+    {
+      "worldProgress": 665,
+      "waveDefinition": "up_n_over",
+      "species": "RING",
+      "fireMask": [
+        0,
+        1,
+        2,
+        4,
+        5
       ],
       "dropperSide": "LEFT"
     }

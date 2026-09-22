@@ -255,6 +255,18 @@ expect_error(p, "trigger.unsorted", "trigger rows going backwards are rejected")
 # alternation at assembly time; the assertion was about Level 1's content, not
 # about runtime safety, and tests/test_species_order.py proves on the machine
 # that RRRRR, DDDDD and RDDRR all fire correctly with at most one live Dropper.
+# A HEADLESS GUARD AGAINST THE ASSERTION COMING BACK. There is an identical
+# check in test_v6_phase6a1_hotfixes.py, and it was useless for two phases:
+# that file needs real Tk, was being run under an interpreter without it, and
+# blocked before reaching the check -- so the engine kept the assertion while
+# the editor happily authored orders it rejected, and the build broke on the
+# author's machine instead of in a test. This copy needs nothing but a file
+# read, so it runs everywhere.
+_waves = (Path(__file__).resolve().parents[2] / "src" / "waves.asm").read_text()
+assert "two consecutive authored waves use the same enemy species" not in _waves, \
+    "src/waves.asm has regained the species-alternation assertion"
+ok("src/waves.asm does not assert the species alternation")
+
 p = build()
 p.triggers = [Trigger(10, "w", "RING", [0]), Trigger(20, "w", "RING", [0])]
 expect_clean(p, "two consecutive RING waves are accepted")

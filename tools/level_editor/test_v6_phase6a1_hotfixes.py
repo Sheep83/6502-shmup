@@ -21,7 +21,14 @@ built, and each names the cause rather than the symptom:
 NOTHING HERE TOUCHES THE CANONICAL PROJECT. Every destructive case works on a
 copy loaded into memory or written to a temporary directory.
 
-Run with an interpreter that has Tk:  python3 test_v6_phase6a1_hotfixes.py
+RUN IT WITH THE TK INTERPRETER, and the distinction is not pedantic on
+this machine: the Homebrew python3 has no working _tkinter, and this file
+does not skip when Tk is missing -- it BLOCKS in the widget section. That
+is how it came to be reported as "hanging" for two phases, and why the
+guard below -- that src/waves.asm no longer asserts the species
+alternation -- never actually ran while the assertion was still there.
+
+    /usr/local/bin/python3 test_v6_phase6a1_hotfixes.py
 """
 import json
 import sys

@@ -325,7 +325,12 @@ except ControllerError as e:
     check("deleting a referenced program is refused, naming the users",
           "wave definition(s)" in str(e), str(e)[:64])
 c.delete_movement_program(p)
-check("...but an unreferenced one deletes", len(c.project.movement_programs) == 4)
+# BACK TO WHAT THE PROJECT STARTED WITH, not to a remembered four. The
+# authored level has gained programs since this was written, and the claim
+# under test is that deleting the one just added removes exactly it.
+check("...but an unreferenced one deletes",
+      len(c.project.movement_programs) == len(_disk["movementPrograms"]),
+      f'{len(c.project.movement_programs)} vs {len(_disk["movementPrograms"])}')
 
 # ===========================================================================
 # 7. THE NO-OP PROOF, repeated for this phase

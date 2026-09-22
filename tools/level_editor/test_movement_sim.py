@@ -237,16 +237,26 @@ proj = migration_v6.load_any(CANON).project
 progs = {p.id: p for p in proj.movement_programs}
 waves = {w.id: w for w in proj.wave_definitions}
 
-check("the canonical project still has four movement programs",
-      len(proj.movement_programs) == 4)
-check("...13 stage records in 52 bytes",
-      sum(len(p.stages) for p in proj.movement_programs) == 13
-      and sum(len(p.stages) for p in proj.movement_programs) * C.WM_STAGE_SIZE == 52)
+# THE CONTRACT, NOT THE CONTENT. These used to read "four programs, 13
+# records, 52 bytes, offsets 0/12/24/40" -- a description of Level 1 on one
+# particular day, which went red the moment the level was authored further.
+# What is actually under test is that program offsets are the running sum of
+# the records before them, and that the pool stays inside the engine's limit.
+check("the canonical project has movement programs at all",
+      len(proj.movement_programs) >= 1, f"{len(proj.movement_programs)}")
+_records = sum(len(p.stages) for p in proj.movement_programs)
+check("...whose records fit the runtime pool",
+      _records <= C.MAX_MOVEMENT_RECORDS
+      and _records * C.WM_STAGE_SIZE <= C.LEVELPKG_MOVE_MAX,
+      f"{_records} records / {_records * C.WM_STAGE_SIZE} bytes")
 offs, n = [], 0
 for p in proj.movement_programs:
     offs.append(n)
     n += len(p.stages) * C.WM_STAGE_SIZE
-check("...at start offsets 0, 12, 24, 40", offs == [0, 12, 24, 40], str(offs))
+check("...and each starts at the running sum of the records before it",
+      offs == [sum(len(q.stages) for q in proj.movement_programs[:i])
+               * C.WM_STAGE_SIZE for i in range(len(proj.movement_programs))],
+      str(offs))
 
 s_stages = progs["s"].stages
 check("the canonical S-turn is ARC_MIRROR then an ARC that CONTinues",

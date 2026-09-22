@@ -106,13 +106,24 @@ back.movement_programs, back.wave_definitions, back.triggers = [], [], []
 I.import_encounters(back, SRC, level_dir=A)
 eq("re-imported movement programs", [p.id for p in back.movement_programs],
    [p.id for p in project.movement_programs])
-assert json.dumps(back.to_dict()["movementPrograms"]) == \
-       json.dumps(project.to_dict()["movementPrograms"])
+# THE ENGINE RECORDS ARE THE FIXED POINT, not the authored form. A level
+# package carries four-byte stage records and nothing else, so a semantic
+# program re-imported from generated ASM comes back RAW -- its `segments` are
+# editor-side authoring data that the C64 never sees. Comparing whole dicts
+# made this test fail the moment a program was authored semantically, for a
+# difference that is the design rather than a fault.
+assert ([p.id for p in back.movement_programs]
+        == [p.id for p in project.movement_programs])
+assert ([[s.to_dict() for s in p.stages] for p in back.movement_programs]
+        == [[s.to_dict() for s in p.stages] for p in project.movement_programs]), \
+    "the engine records did not survive export -> import"
+assert not any(p.is_semantic for p in back.movement_programs), \
+    "the importer invented authoring data the package does not carry"
 assert json.dumps(back.to_dict()["waveDefinitions"]) == \
        json.dumps(project.to_dict()["waveDefinitions"])
 assert json.dumps(back.to_dict()["triggers"]) == \
        json.dumps(project.to_dict()["triggers"])
-ok("generated ASM -> importer reproduces the model exactly (semantic fixed point)")
+ok("generated ASM -> importer reproduces every engine record exactly")
 
 export_v6.export_level(back, B, level_name="level1", carry_enemies_from=LEVEL)
 for name in export_v6.GENERATED_NAMES:

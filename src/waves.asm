@@ -359,19 +359,26 @@
     .error "STAGE_NO_SPAWN_ROW at row zero would suppress the entire stage"
 }
 
-// THE ALTERNATION ITSELF IS CHECKED. This is the assertion that makes "every
-// other wave is a Dropper" a property of the build rather than of someone
-// having counted carefully.
+// THE ALTERNATION IS NOT CHECKED, AND MUST NOT BE. There used to be an
+// assertion here that no two consecutive triggers shared a species, so that
+// "every other wave is a Dropper" was a property of the build. It described
+// LEVEL 1'S CONTENT, not a requirement of this engine, and the difference
+// only became visible when a level author wanted two Ring waves in a row and
+// the whole package refused to assemble.
 //
-// IT NO LONGER WRAPS. The list used to repeat for ever, so the last entry's
-// neighbour really was the first and the check had to close the circle. With
-// absolute rows the list ends, trigger 3 has no successor, and comparing it
-// against trigger 0 would be asserting about an adjacency that never happens.
-.for (var t = 1; t < WAVE_TRIGGERS; t++) {
-    .if (trigSpecies.get(t) == trigSpecies.get(t - 1)) {
-        .error "two consecutive authored waves use the same enemy species"
-    }
-}
+// NOTHING AT RUNTIME DEPENDS ON THE ORDER. A species is latched onto the wave
+// INSTANCE at waveStartNext and onto the OBJECT at waveSpawnMember, and is
+// read nowhere else relative to its neighbour. The one genuine constraint --
+// that only one Dropper may be alive, because a Dropper's death is what drops
+// the token -- is enforced where it belongs, at the single instruction that
+// commits a species to an object: a second Dropper arriving while one lives
+// is substituted with a Ring and still flies its authored path. See the "ONE
+// LIVE DROPPER, EVER" note in waveSpawnMember, and tkDropperLive's release in
+// src/enemy.asm.
+//
+// Proved on the machine by tests/test_species_order.py, which flies RRRRR,
+// DDDDD and a mixed order and checks that every trigger fires and that at no
+// sampled frame is more than one Dropper alive.
 
 // ===========================================================================
 // State. MAIN THREAD ONLY.

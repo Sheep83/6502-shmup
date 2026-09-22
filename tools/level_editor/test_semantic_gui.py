@@ -67,6 +67,9 @@ w.withdraw()
 app.update()
 
 CANON_JSON = app.controller.to_json()
+# Which programs the file on disk has as semantic, captured before any edit.
+_DISK_KINDS = {p.id: p.is_semantic
+               for p in app.controller.project.movement_programs}
 
 
 def progs():
@@ -460,8 +463,12 @@ try:
     app.update()
     check("the canonical project on disk is untouched by all of the above",
           app.controller.to_json() == CANON_JSON)
-    check("...and its programs are all still RAW",
-          not any(p.is_semantic for p in progs()))
+    # AS THE FILE ON DISK HAS THEM, not "all raw". The authored project now
+    # contains semantic programs of its own; what is being asserted is that
+    # nothing this test did changed which is which.
+    check("...and each program is still exactly as the file has it",
+          {p.id: p.is_semantic for p in progs()} == _DISK_KINDS,
+          str({p.id: p.is_semantic for p in progs()}))
     check("...and the document is clean", not app._is_dirty())
 
 finally:

@@ -50,10 +50,24 @@
     .add(List().add(WM_ARC, 76, 2, 8))
     .add(List().add(WM_EXIT, 0, 0, 0)))
 
+// --- 4: DIVE_BOMB -------------------------------------------------
+.eval progs.add(List()
+    .add(List().add(WM_STRAIGHT, 60, 0, 6))
+    .add(List().add(WM_ARC, 32, 4, 16))
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
+// --- 5: UP_N_OVER -------------------------------------------------
+.eval progs.add(List()
+    .add(List().add(WM_STRAIGHT, 125, 4, -4))
+    .add(List().add(WM_ARC, 16, 4, 56))
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
 .const PROG_SWEEP             = 0
 .const PROG_S                 = 1
 .const PROG_LINGER            = 2
 .const PROG_LOOP              = 3
+.const PROG_DIVE_BOMB         = 4
+.const PROG_UP_N_OVER         = 5
 
 // Byte offsets of each program's first record, computed rather than
 // authored: a hand-maintained offset is a number that is right until
