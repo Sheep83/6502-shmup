@@ -34,8 +34,8 @@ def ok(m):
     print(f"ok  - {m}")
 
 
-J1 = HERE / "levels" / "level1" / "level.json"
-J2 = HERE / "levels" / "level2" / "level.json"
+J1 = HERE / "fixtures" / "legacy_v5" / "level1" / "level.json"
+J2 = HERE / "fixtures" / "legacy_v5" / "level2" / "level.json"
 
 # 0. both level packages exist, and each exports into its OWN directory
 #

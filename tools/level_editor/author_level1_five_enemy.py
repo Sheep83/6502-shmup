@@ -153,7 +153,7 @@ def main():
     if a.dry_run:
         print("(dry run: level.json not written)")
         return 0
-    out = HERE / "levels" / "level1" / "level.json"
+    out = HERE / "fixtures" / "legacy_v5" / "level1" / "level.json"
     save_project(project, out)
     print(f"wrote {out.relative_to(REPO)}")
     return 0

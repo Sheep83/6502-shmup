@@ -40,7 +40,7 @@ from migration_v6 import load_any                                          # noq
 from project_v6 import ProjectV6                                           # noqa: E402
 
 PASS = []
-LEVEL1_JSON = HERE / "levels" / "level1" / "level.json"
+LEVEL1_JSON = HERE / "fixtures" / "legacy_v5" / "level1" / "level.json"
 CANONICAL = HERE / "levels" / "level1" / "level.v6.json"
 AUTH = REPO / "src" / "level1"
 

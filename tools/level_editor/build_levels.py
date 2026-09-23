@@ -22,7 +22,13 @@ from ka_export import export_level                             # noqa: E402
 from project import LevelProject, load_project, save_project   # noqa: E402
 import level2_tileset                                          # noqa: E402
 
-LEVELS_DIR = HERE / "levels"
+# THE RETIRED v5 PIPELINE, kept for the determinism regression in
+# test_level_packages.py and for nothing else. Its inputs are the FROZEN v5
+# fixtures, not live level data: levels/ now holds only authoritative v6
+# documents (level1/level.v6.json, level2/level.v6.json) and the current export
+# path is export_level.py. Pointing this at levels/ again would resurrect the
+# ambiguity of a v5 level.json sitting beside the v6 one.
+LEVELS_DIR = HERE / "fixtures" / "legacy_v5"
 GENERATED = REPO / "src" / "generated"
 
 # ---------------------------------------------------------------------------

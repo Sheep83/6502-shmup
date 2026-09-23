@@ -261,6 +261,24 @@ class EditorController:
         self.from_version = from_version
         self.adopt(project)
 
+    # ---- identity ------------------------------------------------------
+    # THE LEVEL'S NAME IS A REAL SCHEMA FIELD and the controller is what the
+    # GUI holds, so it needs a setter here. Without one `controller.name = x`
+    # silently binds a NEW attribute on the controller and the project keeps
+    # the old name -- which is precisely the Save-As bug this exposes: the file
+    # moves to levels/level2/ and the document still calls itself level2pcb,
+    # so Export goes on suggesting src/level2pcb/.
+    @property
+    def name(self):
+        return self.project.name
+
+    @name.setter
+    def name(self, value):
+        value = str(value).strip()
+        if not value:
+            raise ControllerError("a level name cannot be empty")
+        self.project.name = value
+
     # ---- the one place a project becomes THE document ------------------
     def adopt(self, project):
         """Install `project` as the live document, in the editor's own form.

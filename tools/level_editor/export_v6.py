@@ -51,12 +51,21 @@ MAP_NAME = "stage_map.asm"
 TURRETS_NAME = "stage_turrets.asm"
 PROGRAMS_NAME = "wave_programs.asm"
 ENCOUNTERS_NAME = "wave_encounters.asm"
-# Level-owned, but NOT editor-generated: it names the enemy sprite-window slots.
+# Level-owned: it names the enemy sprite-window slots. It USED to be purely
+# hand-authored, which meant a fresh level directory silently came out without
+# it and did not assemble -- src/main.asm imports it. It is now generated from
+# the canonical default packing when the destination does not already have one,
+# and never overwritten when it does, so a level that needs its own packing
+# keeps it by simply having the file.
 ENEMIES_NAME = "stage_enemies.asm"
 
 TERRAIN_NAMES = (CONFIG_NAME, CHARSET_NAME, MAP_NAME, TURRETS_NAME)
 ENCOUNTER_NAMES = (PROGRAMS_NAME, ENCOUNTERS_NAME)
 GENERATED_NAMES = TERRAIN_NAMES + ENCOUNTER_NAMES
+# EVERY file src/main.asm and src/level_package.asm need from a level directory.
+# A package missing any one of these does not assemble, so the export refuses
+# rather than leaving one behind.
+REQUIRED_PACKAGE_NAMES = GENERATED_NAMES + (ENEMIES_NAME,)
 
 
 class ExportRefused(RuntimeError):
@@ -67,6 +76,17 @@ class ExportRefused(RuntimeError):
     it moves the error a long way from the field that caused it.
     """
     def __init__(self, result):
+        """Carries either a validation result or a plain reason.
+
+        A refusal is not always about validation: the completeness gate at the
+        end of export_level() refuses a package that came out short, and that
+        has no ValidationResult to report. Both arrive at the same `except
+        ExportRefused` in the editor, which is the point.
+        """
+        if isinstance(result, str):
+            self.result = None
+            super().__init__(result)
+            return
         self.result = result
         super().__init__(f"export refused: {len(result.errors)} validation error(s)\n"
                          + "\n".join(f"  {i}" for i in result.errors))
@@ -555,6 +575,50 @@ def _list_decl(name, values):
 # ---------------------------------------------------------------------------
 # the export
 # ---------------------------------------------------------------------------
+def render_stage_enemies(project, level_name):
+    """The level's claim on the enemy sprite window.
+
+    ONE CANONICAL TEMPLATE, not a copy of Level 1's file. The slot numbers are
+    the default packing in contract_v2 (species in order, ENEMY_FRAMES blocks
+    each), which is what every level using the current two species wants; they
+    are NOT read out of src/level1/, so a fresh Level 2 export does not depend
+    on Level 1 existing at all.
+
+    The symbols are deliberately level-NEUTRAL. They were LVL_SLOT_* only after
+    this cleanup -- they used to be L1_SLOT_*, which meant a generated Level 2
+    had to define constants named after Level 1.
+    """
+    slots = C.DEFAULT_ENEMY_SLOTS
+    body = [
+        "// CONSTANTS-ONLY level include. Emits no bytes, no memory segment, no",
+        "// program-counter change. Imported very early, beside stage_config.asm,",
+        "// so every level-owned constant exists before the engine code that",
+        "// consumes them.",
+        "//",
+        "// Ownership: these values belong to the LEVEL PACKAGE, not to the engine.",
+        "// They say which slot of the engine's enemy sprite window each species'",
+        "// frames were loaded into. A slot is a block index counted from the start",
+        "// of the window, so nothing here knows or cares where the window actually",
+        "// is -- see the window constants in src/main.asm and the loader in",
+        "// src/level_assets.asm.",
+        "//",
+        "// A species' IDENTITY is engine-resident and never appears here; only its",
+        "// physical placement, which is exactly the thing that changes per level.",
+        "//",
+        "// THE BANNER ABOVE IS ONLY HALF TRUE FOR THIS FILE. It is written once,",
+        "// as a default, when a level directory does not yet have one -- and the",
+        "// exporter never overwrites an existing stage_enemies.asm. So a level",
+        "// that needs a different packing edits this file and keeps it; from",
+        "// then on it is hand-authored and every later export leaves it alone.",
+        "",
+    ]
+    for name in C.SPECIES_ORDER:
+        body.append(f".const LVL_SLOT_{name:<8} = {slots[name]:<3}"
+                    f"// {C.ENEMY_FRAMES} consecutive sprite blocks")
+    return _text(_banner(level_name,
+                         "the level's claim on the enemy sprite window") + [""] + body)
+
+
 def render_all(project, level_name):
     """All six generated files as {filename: text}. No I/O."""
     return {
@@ -617,11 +681,35 @@ def export_level(project, dest_dir, *, level_name=None, validate_first=True,
                 pass
         raise
 
+    # stage_enemies.asm: KEEP a hand-authored one, GENERATE one when there is
+    # none. The old code only ever copied, and both callers pass the destination
+    # itself as `carry_enemies_from` -- so on a fresh level directory the source
+    # did not exist, the copy was skipped without a word, and the export handed
+    # back a six-file package that src/main.asm cannot assemble.
+    target = dest / ENEMIES_NAME
+    carried = None
     if carry_enemies_from is not None:
-        src = Path(carry_enemies_from) / ENEMIES_NAME
-        if src.exists():
-            target = dest / ENEMIES_NAME
-            if src.resolve() != target.resolve():
-                shutil.copyfile(src, target)
-            written[ENEMIES_NAME] = target
+        candidate = Path(carry_enemies_from) / ENEMIES_NAME
+        if candidate.exists():
+            carried = candidate
+    if carried is not None:
+        if carried.resolve() != target.resolve():
+            shutil.copyfile(carried, target)
+    elif not target.exists():
+        tmp = dest / (ENEMIES_NAME + ".tmp")
+        tmp.write_text(render_stage_enemies(project, level_name),
+                       encoding="utf-8", newline="\n")
+        os.replace(tmp, target)
+    written[ENEMIES_NAME] = target
+
+    # AND THEN CHECK. An export that quietly produces an unbuildable directory
+    # is worse than one that fails, because the failure surfaces later as an
+    # assembler error in a file nobody edited.
+    missing = [n for n in REQUIRED_PACKAGE_NAMES if not (dest / n).is_file()]
+    if missing:
+        raise ExportRefused(
+            "export produced an incomplete level package -- missing "
+            + ", ".join(missing)
+            + f" in {dest}. The engine imports every one of "
+            f"{len(REQUIRED_PACKAGE_NAMES)} files and will not assemble without them.")
     return written

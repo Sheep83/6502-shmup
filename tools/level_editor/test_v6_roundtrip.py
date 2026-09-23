@@ -32,8 +32,8 @@ from project_v6 import ProjectV6, Trigger                           # noqa: E402
 from validation_v6 import validate                                  # noqa: E402
 
 PASS = []
-LEVEL1 = HERE / "levels" / "level1" / "level.json"
-LEVEL2 = HERE / "levels" / "level2" / "level.json"
+LEVEL1 = HERE / "fixtures" / "legacy_v5" / "level1" / "level.json"
+LEVEL2 = HERE / "fixtures" / "legacy_v5" / "level2" / "level.json"
 
 
 def ok(label, extra=""):

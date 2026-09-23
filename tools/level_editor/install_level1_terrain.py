@@ -33,7 +33,7 @@ from project import (                                               # noqa: E402
     save_project, validate_project,
 )
 
-L1_JSON = HERE / "levels" / "level1" / "level.json"
+L1_JSON = HERE / "fixtures" / "legacy_v5" / "level1" / "level.json"
 GEN = REPO / "src" / "generated" / "level1"
 
 NEW_NAMES = ntt.names()

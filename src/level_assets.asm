@@ -59,7 +59,7 @@
 }
 
 levelAssetDescs:
-    .byte L1_SLOT_RING, L1_SLOT_DROPPER     // LEVEL_PACKAGE_1
+    .byte LVL_SLOT_RING, LVL_SLOT_DROPPER     // LEVEL_PACKAGE_1
     .byte LB_SLOT_RING, LB_SLOT_DROPPER     // LEVEL_PACKAGE_B
 levelAssetDescsEnd:
 
@@ -70,16 +70,16 @@ levelAssetDescsEnd:
 // Every slot any package claims must hold a whole species inside the window.
 // Named one by one rather than looped: there are four, and a guard that names
 // the constant it is protecting is worth more than a clever loop.
-.if (L1_SLOT_RING    + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "level 1's Ring slot runs past the enemy sprite window" }
-.if (L1_SLOT_DROPPER + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "level 1's Dropper slot runs past the enemy sprite window" }
+.if (LVL_SLOT_RING    + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "the level's Ring slot runs past the enemy sprite window" }
+.if (LVL_SLOT_DROPPER + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "the level's Dropper slot runs past the enemy sprite window" }
 .if (LB_SLOT_RING    + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "level B's Ring slot runs past the enemy sprite window" }
 .if (LB_SLOT_DROPPER + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "level B's Dropper slot runs past the enemy sprite window" }
 
 // A package's two species must not be loaded on top of each other. This is the
 // check that would catch a hand-edited descriptor, which is how a level package
 // will be authored until there is a tool that emits one.
-.if (L1_SLOT_RING < L1_SLOT_DROPPER + ENEMY_FRAMES && L1_SLOT_DROPPER < L1_SLOT_RING + ENEMY_FRAMES) {
-    .error "level 1 loads two species into overlapping window slots"
+.if (LVL_SLOT_RING < LVL_SLOT_DROPPER + ENEMY_FRAMES && LVL_SLOT_DROPPER < LVL_SLOT_RING + ENEMY_FRAMES) {
+    .error "the level loads two species into overlapping window slots"
 }
 .if (LB_SLOT_RING < LB_SLOT_DROPPER + ENEMY_FRAMES && LB_SLOT_DROPPER < LB_SLOT_RING + ENEMY_FRAMES) {
     .error "level B loads two species into overlapping window slots"

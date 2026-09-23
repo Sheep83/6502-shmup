@@ -106,8 +106,8 @@
 .const ENEMY_FRAMES      = 4                        // north, east, south, west
 .const DROPPER_FRAMES    = 4                        // wide, f-right, f, f-left
 
-.const ENEMY_SPRITES     = levelSlotAddr(L1_SLOT_RING)
-.const DROPPER_SPRITES   = levelSlotAddr(L1_SLOT_DROPPER)
+.const ENEMY_SPRITES     = levelSlotAddr(LVL_SLOT_RING)
+.const DROPPER_SPRITES   = levelSlotAddr(LVL_SLOT_DROPPER)
 
 .if (ENEMY_FRAMES != DROPPER_FRAMES) {
     .error "a window slot holds ENEMY_FRAMES blocks: two species of different frame counts need the descriptor to carry the count"

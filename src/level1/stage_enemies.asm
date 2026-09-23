@@ -14,5 +14,5 @@
 // A species' IDENTITY is engine-resident and never appears here; only its
 // physical placement, which is exactly the thing that changes per level.
 // ============================================================================
-.const L1_SLOT_RING     = 0             // the Sonic Ring's four frames
-.const L1_SLOT_DROPPER  = 4             // the Orbital Dropper's four frames
+.const LVL_SLOT_RING     = 0             // the Sonic Ring's four frames
+.const LVL_SLOT_DROPPER  = 4             // the Orbital Dropper's four frames

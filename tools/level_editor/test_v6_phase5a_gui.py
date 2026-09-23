@@ -41,7 +41,7 @@ from controller_v6 import ControllerError, EditorController
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 CANON = HERE / "levels" / "level1" / "level.v6.json"
-V5_SOURCE = HERE / "levels" / "level1" / "level.json"
+V5_SOURCE = HERE / "fixtures" / "legacy_v5" / "level1" / "level.json"
 PRODUCTION_ASM = REPO / "src" / "level1"
 
 PASS, FAIL = [], []

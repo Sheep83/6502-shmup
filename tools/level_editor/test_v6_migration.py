@@ -28,7 +28,7 @@ from project_v6 import FORMAT_VERSION, ProjectV6                    # noqa: E402
 from validation_v6 import validate                                  # noqa: E402
 
 PASS = []
-LEVEL1 = HERE / "levels" / "level1" / "level.json"
+LEVEL1 = HERE / "fixtures" / "legacy_v5" / "level1" / "level.json"
 
 
 def ok(label):

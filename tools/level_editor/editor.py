@@ -220,6 +220,8 @@ class LevelEditor(tk.Tk):
         file_menu.add_command(label="Save", accelerator="Ctrl+S", command=self._save_project)
         file_menu.add_command(label="Save As…", accelerator="Ctrl+Shift+S", command=self._save_project_as)
         file_menu.add_separator()
+        file_menu.add_command(label="Rename Level…", command=self._rename_level)
+        file_menu.add_separator()
         file_menu.add_command(label="Export level package…", command=self._export_kickassembler)
         file_menu.add_separator()
         file_menu.add_command(label="Encounters…", accelerator="Ctrl+E",
@@ -1544,6 +1546,60 @@ class LevelEditor(tk.Tk):
     def _default_level_path(self):
         return self.levels_dir / self.project.name / "level.v6.json"
 
+    # ---- project identity ------------------------------------------------
+    # THE LEVEL'S NAME IS A SCHEMA FIELD, not something inferred from wherever
+    # the file happens to sit. It drives the default save path, the default
+    # export directory and the `Level:` line in every generated .asm, so a
+    # project called level2pcb living in levels/level2/ silently exports to
+    # src/level2pcb/ -- which is exactly the trap this pair of changes closes.
+    # The name is therefore changed only DELIBERATELY: by this command, or by
+    # answering the question Save As asks when the two disagree.
+    def _rename_level(self):
+        current = self.project.name
+        new = simpledialog.askstring(
+            "Rename Level",
+            "Level name (used for the default save path, the export directory\n"
+            "and the Level: header in every generated .asm):",
+            initialvalue=current, parent=self)
+        if not new or not new.strip() or new.strip() == current:
+            return "break"
+        self._push_undo(self._project_state())
+        self.controller.name = new.strip()
+        self._update_document_ui()
+        self._refresh_all()
+        return "break"
+
+    def _reconcile_name_with_path(self, path):
+        """After a Save As, offer to make the level's name match its directory.
+
+        Asked, never assumed. A level package lives at
+        levels/<name>/level.v6.json, so saving into levels/level2/ while still
+        called level2pcb leaves an inconsistency the author almost never wants
+        -- but renaming behind their back would be worse, and it must never
+        happen to Level 1 by accident.
+        """
+        path = Path(path)
+        if path.name != "level.v6.json":
+            return
+        folder = path.parent.name
+        try:
+            in_levels = path.parent.parent.resolve() == self.levels_dir.resolve()
+        except OSError:
+            return
+        if not in_levels or folder == self.project.name:
+            return
+        if messagebox.askyesno(
+                "Rename level?",
+                f"This package is now saved in levels/{folder}/ but the level is "
+                f"still named '{self.project.name}'.\n\n"
+                f"Rename it to '{folder}'?\n\n"
+                f"The name sets the default export directory "
+                f"(src/{self.project.name}/ → src/{folder}/).",
+                parent=self):
+            self.controller.name = folder
+            self._write_project(path, already_validated=True)
+            self._update_document_ui()
+
     def _save_project(self):
         if self.project_path is None:
             return self._write_project(self._default_level_path())
@@ -1558,7 +1614,10 @@ class LevelEditor(tk.Tk):
             filetypes=(("v6 level package", "*.json"), ("All files", "*.*")), parent=self)
         if not path:
             return False
-        return self._write_project(Path(path), already_validated=True)
+        if not self._write_project(Path(path), already_validated=True):
+            return False
+        self._reconcile_name_with_path(path)
+        return True
 
     def _write_project(self, path, already_validated=False):
         """Write deterministic v6 through the controller.

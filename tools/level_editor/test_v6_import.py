@@ -40,7 +40,7 @@ from validation_v6 import validate                                         # noq
 
 PASS = []
 SRC = REPO / "src"
-LEVEL1_JSON = HERE / "levels" / "level1" / "level.json"
+LEVEL1_JSON = HERE / "fixtures" / "legacy_v5" / "level1" / "level.json"
 PRG = REPO / "build" / "level1.prg"
 
 

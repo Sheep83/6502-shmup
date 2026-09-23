@@ -107,12 +107,18 @@ def main():
              f"provenance; reload is byte-identical (deterministic, no timestamps)")
 
         # -- work on a temp copy of the two committed level packages ---------
-        levels_src = HERE / "levels"
-        levels = d / "levels"
-        shutil.copytree(levels_src, levels)
+        # THE TWO v5 PACKAGES ARE FIXTURES NOW, not live levels. They used to
+        # sit in levels/level1/ and levels/level2/ beside the authoritative v6
+        # documents, where they were indistinguishable from current level data;
+        # they live under fixtures/legacy_v5/ so that this script -- and the
+        # migration tests -- keep a frozen v5 input without anything in
+        # levels/ being mistakable for it. Still copied to temp before use.
+        legacy_src = HERE / "fixtures" / "legacy_v5"
+        legacy = d / "legacy_v5"
+        shutil.copytree(legacy_src, legacy)
         engine = load_engine_data(REPO)
-        l1 = load_project(levels / "level1" / "level.json")
-        l2 = load_project(levels / "level2" / "level.json")
+        l1 = load_project(legacy / "level1" / "level.json")
+        l2 = load_project(legacy / "level2" / "level.json")
         ensure_level_metatile_set(l1)
         ensure_level_metatile_set(l2)
         l1_set_len_before = len(l1.level_metatile_set)
@@ -156,8 +162,8 @@ def main():
 
         # -- export both packages; confirm they differ and are consistent --
         out1, out2 = d / "gen" / "level1", d / "gen" / "level2"
-        save_project(l1, levels / "level1" / "level.json")
-        save_project(l2, levels / "level2" / "level.json")
+        save_project(l1, legacy / "level1" / "level.json")
+        save_project(l2, legacy / "level2" / "level.json")
         p1 = export_level(l1, out1, engine_data=engine)
         p2 = export_level(l2, out2, engine_data=engine)
         cfg1 = (out1 / "stage_config.asm").read_text()

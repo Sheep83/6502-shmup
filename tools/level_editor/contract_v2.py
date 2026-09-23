@@ -172,6 +172,23 @@ SPECIES = {
 }
 DROPPER_SIDES = {"LEFT": 0, "RIGHT": 1}
 
+# THE ENEMY SPRITE WINDOW, and the slot every level's species are loaded into.
+#
+# A slot is a block index counted from the start of the engine's enemy sprite
+# window (src/main.asm defines where the window is; src/level_assets.asm loads
+# into it). Each species occupies ENEMY_FRAMES consecutive blocks, so the
+# default packing is simply "species in order, four blocks each" -- which is
+# what src/level1/stage_enemies.asm has always said by hand.
+#
+# These live here because a level package is not buildable without them and a
+# freshly exported level directory has no hand-authored file to inherit them
+# from. A level that genuinely needs a different packing overrides it by keeping
+# its own stage_enemies.asm, which the exporter never overwrites.
+ENEMY_FRAMES = 4                       # src/enemy.asm
+SPECIES_ORDER = ("RING", "DROPPER")    # src/encounter_format.asm SPECIES_COUNT = 2
+DEFAULT_ENEMY_SLOTS = {name: i * ENEMY_FRAMES
+                       for i, name in enumerate(SPECIES_ORDER)}
+
 # ---------------------------------------------------------------------------
 # Triggers and the boss approach — src/waves.asm, src/levelpkg.asm
 # ---------------------------------------------------------------------------

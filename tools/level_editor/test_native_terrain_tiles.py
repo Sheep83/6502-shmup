@@ -122,7 +122,7 @@ ok("save / reload / export of the generated set are deterministic")
 # ever true of the committed fixture. What the file is actually for -- that a
 # level's native metatile set is complete, self-consistent and independent of
 # any other level's -- is asserted here against the real numbers.
-l1 = load_project(HERE / "levels" / "level1" / "level.json")
+l1 = load_project(HERE / "fixtures" / "legacy_v5" / "level1" / "level.json")
 l1_names = [e["name"] for e in l1.level_metatile_set]
 assert len(l1_names) == len(set(l1_names)), "Level 1 metatile names are not unique"
 assert len(l1.level_metatile_set) == len(l1.tileset["metatileDefs"]), \
@@ -141,7 +141,7 @@ ok(f"committed Level 1: {len(l1.level_metatile_set)} metatiles, "
    f"map uses ids {used[0]}..{used[-1]}")
 
 # 8. Level 2 is its own planet tileset, independent of both
-l2 = load_project(HERE / "levels" / "level2" / "level.json")
+l2 = load_project(HERE / "fixtures" / "legacy_v5" / "level2" / "level.json")
 l2_names = {e["name"] for e in l2.level_metatile_set}
 assert l2_names != seen_names
 assert l2_names != set(l1_names), "Level 2 shares Level 1's metatile set"

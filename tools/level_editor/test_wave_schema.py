@@ -49,7 +49,7 @@ def ok(m):
     print(f"ok  - {m}")
 
 
-LEVEL1_JSON = HERE / "levels" / "level1" / "level.json"
+LEVEL1_JSON = HERE / "fixtures" / "legacy_v5" / "level1" / "level.json"
 project = load_any(LEVEL1_JSON).project
 
 # ---------------------------------------------------------------------------
@@ -65,14 +65,21 @@ assert "stage_waves.asm" not in export_v6.GENERATED_NAMES
 with tempfile.TemporaryDirectory() as td:
     written = export_v6.export_level(project, td, level_name="level1")
     names = sorted(p.name for p in written.values())
-    assert names == ["stage_charset.asm", "stage_config.asm", "stage_map.asm",
-                     "stage_turrets.asm", "wave_encounters.asm",
-                     "wave_programs.asm"], names
+    # SEVEN FILES, NOT SIX. stage_enemies.asm joined the export when the
+    # multi-level cleanup landed: it is level-owned and src/main.asm imports
+    # it, but it used only ever to be COPIED from the destination, so a fresh
+    # level directory came out one file short and did not assemble. It is now
+    # generated from the canonical default packing when the destination has
+    # none, and left alone when it does. The set is asserted exactly, so a
+    # file appearing or vanishing is still a failure.
+    assert names == sorted(export_v6.REQUIRED_PACKAGE_NAMES), names
+    assert "stage_enemies.asm" in names
     assert not (Path(td) / "stage_waves.asm").exists()
     config = (Path(td) / "stage_config.asm").read_text()
 assert "SCROLL_FRAME_DIVIDER" not in config, \
     "the retired scroll divider is being emitted again"
-ok("the v6 exporter emits six files and never a waves file or a scroll divider")
+ok("the v6 exporter emits the seven package files and never a waves file "
+   "or a scroll divider")
 
 # EXACTLY ONE PRODUCTION COPY OF THE ENCOUNTER SOURCE, and it is level-owned.
 # KickAssembler resolves an #import against the importing file's own directory
