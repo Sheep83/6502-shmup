@@ -169,8 +169,27 @@ ENEMY_ANIM_STEPS = 8
 SPECIES = {
     "RING": 0 * ENEMY_ANIM_STEPS,       # 0
     "DROPPER": 1 * ENEMY_ANIM_STEPS,    # 8
+    "SQUARE": 2 * ENEMY_ANIM_STEPS,     # 16
 }
+# Human-facing labels. The editor shows these; the package carries SPECIES.
+SPECIES_LABELS = {"RING": "Ring", "DROPPER": "Dropper", "SQUARE": "Square"}
 DROPPER_SIDES = {"LEFT": 0, "RIGHT": 1}
+
+# --- how a wave's enemies shoot, src/enemy.asm + src/waves.asm ---------------
+# DOWN is what every wave did before aimed fire existed and is the default, so
+# no authored level changes meaning by being loaded. AIMED samples the ship's
+# position at the instant of firing and never looks again -- the shot can be
+# dodged.
+#
+# The value is packed into bits 4-5 of the definition's COLOUR byte rather than
+# given a byte of its own: a definition is ten bytes and src/waves.asm forms
+# def * 10 in a single byte, so an eleventh would cap a level at 24 definitions
+# instead of 26. A colour is 0..15 and the high nibble was free. Mode 0 is
+# "however the species fires", which is what every previously exported package
+# already says.
+FIRE_MODES = {"DOWN": 0, "AIMED": 1}
+FIRE_MODE_LABELS = {"DOWN": "Straight down", "AIMED": "Aimed at player"}
+WAVEDEF_FIRE_SHIFT = 4
 
 # THE ENEMY SPRITE WINDOW, and the slot every level's species are loaded into.
 #
@@ -185,7 +204,10 @@ DROPPER_SIDES = {"LEFT": 0, "RIGHT": 1}
 # from. A level that genuinely needs a different packing overrides it by keeping
 # its own stage_enemies.asm, which the exporter never overwrites.
 ENEMY_FRAMES = 4                       # src/enemy.asm
-SPECIES_ORDER = ("RING", "DROPPER")    # src/encounter_format.asm SPECIES_COUNT = 2
+# THE ORDER IS THE WINDOW ORDER, not the species numbering. Slots are packed in
+# this order, ENEMY_FRAMES blocks each, so appending a species appends a slot
+# and never moves an existing one.
+SPECIES_ORDER = ("RING", "DROPPER", "SQUARE")   # src/encounter_format.asm
 DEFAULT_ENEMY_SLOTS = {name: i * ENEMY_FRAMES
                        for i, name in enumerate(SPECIES_ORDER)}
 

@@ -88,6 +88,39 @@
 // pacing and the reason this costs nothing: there is no barrage to schedule.
 .const TURRET_FIRE_INTERVAL = 100
 .const TURRET_FIRE_MIN_Y    = 88        // below this it has only just arrived
+
+// --- WHEN THE FIRST SHOT BECOMES POSSIBLE, and why it is not the interval ---
+//
+// THE PROBLEM THIS FIXES. turretAimTick arms the clock on the frame a turret's
+// whole body first fits inside the aperture, which is logY 54. Loading the full
+// interval there meant the first opportunity arrived 100 frames later, and the
+// stage scrolls one pixel a frame, so the turret was at logY 154 -- the middle
+// of the screen. The player's natural response to a turret appearing is to move
+// up and engage it, so by frame 100 the ship was usually just below the turret
+// and the first shot went off point-blank at a position the player had only
+// just taken. It read as the turret waiting for the player rather than the
+// player walking into a turret.
+//
+// THREE SEPARATE THINGS, kept separate:
+//
+//   ARMING       the fire clock starts     turretAimTick, at logY 54
+//   TARGETABLE   it can be hit             turretVisible, unchanged
+//   MAY FIRE     a bolt may leave          the Y window and lead below
+//
+// Only the first moves. The turret is not targetable any earlier, no shot
+// originates off-screen, and TURRET_FIRE_MIN_Y still refuses a bolt from a
+// turret that has only just arrived.
+//
+// DERIVED, NOT PICKED. The first opportunity should land as the turret reaches
+// the top of its legal firing window, not 66 pixels past it, so the delay is
+// exactly the distance from arming to that window. Tune by moving
+// TURRET_FIRE_MIN_Y (where shots become legal) or this delay (how much of the
+// approach is spent counting); the two stay consistent by construction.
+.const TURRET_ARM_Y = APERTURE_TOP_RASTER - 1       // 54: turretAimTick's test
+.const TURRET_FIRST_FIRE_DELAY = TURRET_FIRE_MIN_Y - TURRET_ARM_Y   // 34
+.if (TURRET_FIRST_FIRE_DELAY <= 0 || TURRET_FIRST_FIRE_DELAY > TURRET_FIRE_INTERVAL) {
+    .error "the first-fire delay must be positive and no longer than the interval"
+}
 .const TURRET_FIRE_MAX_Y    = 201       // exclusive
 .const TURRET_FIRE_LEAD     = 24        // the ship must be this far below
 .const TURRET_MUZZLE_X      = 4         // centre an 8-pixel bolt on a 16-pixel
@@ -117,9 +150,35 @@
 // publication step, no dirty flag and no per-frame charset work at all. A
 // turret's STATE is carried entirely by its colour RAM, never by its glyphs.
 //
-// They are 2-bit multicolour bitmaps against the stage palette: the dome is
-// mostly bit pair 11 (colour RAM), the shading is 01 ($d022) and the barrel
-// stub at the bottom centre is 10 ($d023).
+// They are 2-bit multicolour bitmaps against the stage palette:
+//
+//     bit pair 00  $d021  TERRAIN_BACKGROUND_COLOUR  12  medium grey
+//     bit pair 01  $d022  TERRAIN_MC_COLOUR_1        15  light grey
+//     bit pair 10  $d023  TERRAIN_MC_COLOUR_2        11  dark grey
+//     bit pair 11  colour RAM, LOW THREE BITS -- the only thing that pulses
+//
+// THREE GREYS, WHICH IS WHY THIS CAN BE A SHADED DOME. 11/12/15 is an evenly
+// spaced dark/medium/light ramp, so the body is drawn as a lit hemisphere:
+// light grey on the lit side, a one-pixel medium-grey terminator, dark grey for
+// the shadow crescent and the rim.
+//
+// THE MEDIUM TONE IS ALSO THE STAGE BACKGROUND, so it only works enclosed. Every
+// pixel on the body's outline is light or dark grey and never medium -- medium
+// on the boundary is the ground showing through, not a shade of the metal. The
+// previous body ignored this and had no closed outline at all.
+//
+// BIT PAIR 11 CAN NEVER BE GREY: it takes the low three bits of colour RAM, so
+// only colours 0..7 are reachable and none of them is a grey but black and
+// white. It is therefore spent on ONE small central lamp -- 4 of the body's 128
+// pixels -- rather than on the body. The previous body spent 66 pixels on it,
+// which is why it could only ever be a coloured blob and never metal.
+//
+// The lamp sits exactly where the four character cells meet. That is free:
+// turretPaintTick writes the same colour RAM value to all four cells, so the
+// lamp is seamless across the boundary.
+//
+// See tools/turret_art/turret_candidates.py, which generates this body from a
+// shading model and reproduces the bytes below exactly.
 .const TURRET_GLYPHS = TERRAIN_CHARSET + TURRET_GLYPH_BASE * 8
 
 .if (TURRET_GLYPHS + TURRET_GLYPH_SPAN * 8 > TERRAIN_CHARSET + $800) {
@@ -129,12 +188,34 @@
     .error "the turret glyphs overlap the terrain glyph bitmaps"
 }
 
+// A lit dome on a shadowed octagonal mounting plate, with a central lamp.
+// Written out as the 8 x 16 logical pixels it is, because four columns of hex
+// is not something anyone can proofread:
+//
+//         . = 00 ground/mid    d = 01 lit     D = 10 shadow/rim    C = 11 lamp
+//
+//      ..DDDD..     the plate's chamfered top edge
+//      .DDddDD.
+//      .DddddD.     the dome, lit from the upper left
+//      DDddddDD
+//      Dddddd.D     the medium-grey terminator starts
+//      DddDDd.D     the lamp housing -- static metal, not animation
+//      DdDddD.D
+//      DdDCCDDD     THE LAMP. The only pixels that ever change colour.
+//      DdDCCDDD
+//      DdDddDDD
+//      DddDDDDD
+//      D....DDD
+//      DD..DDDD
+//      .DDDDDD.     the plate again, below the dome
+//      .DDDDDD.
+//      ..DDDD..
 * = TURRET_GLYPHS "turret glyphs"
 turretGlyphs:
-    .byte $00,$00,$0f,$3f,$ff,$ff,$ff,$ff   // 226  TL
-    .byte $00,$00,$f0,$fc,$ff,$ff,$ff,$ff   // 227  TR
-    .byte $ff,$ff,$ff,$55,$55,$15,$02,$02   // 228  BL
-    .byte $ff,$ff,$ff,$55,$55,$54,$80,$80   // 229  BR
+    .byte $0a,$29,$25,$a5,$95,$96,$99,$9b   // 226  TL
+    .byte $a0,$68,$58,$5a,$52,$92,$62,$ea   // 227  TR
+    .byte $9b,$99,$96,$80,$a0,$2a,$2a,$0a   // 228  BL
+    .byte $ea,$6a,$aa,$2a,$aa,$a8,$a8,$a0   // 229  BR
 turretGlyphsEnd:
 
 .if (turretGlyphsEnd - turretGlyphs != TURRET_GLYPH_SPAN * 8) {
@@ -947,8 +1028,11 @@ turretAimTick:
     // moves re-arms each time it returns, so "consecutive" really is.
     ldy turretVisible,x
     bne !stillVisible+
-    lda #TURRET_FIRE_INTERVAL
-    sta turretFireTimer,x
+    lda #TURRET_FIRST_FIRE_DELAY        // NOT the full interval: see the note
+    sta turretFireTimer,x               // beside the constant. The first
+                                        // opportunity lands as the turret
+                                        // reaches TURRET_FIRE_MIN_Y, not 66
+                                        // pixels further down the screen
 !stillVisible:
     lda #1
     sta turretVisible,x

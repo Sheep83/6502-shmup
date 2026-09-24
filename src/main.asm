@@ -383,7 +383,7 @@ BasicUpstart2(entry)
                                         // (MAX_OBJECTS, TYPE_PICKUP) and sfx
                                         // (SFX_TOKEN). BEFORE waves.asm, which
                                         // authors the tokens and needs PICKUP_P.
-#import "player_boom_art.asm"           // AFTER player.asm and pickup.asm: it
+#import "generated_sprites/player_boom_art.asm"           // AFTER player.asm and pickup.asm: it
                                         // pins itself between the token bitmap
                                         // and screen page B
 #import "boss.asm"                      // AFTER objects.asm (TYPE_BOSS,
@@ -393,7 +393,7 @@ BasicUpstart2(entry)
                                         // terrain.asm (TERRAIN_COLOUR_RAM) and
                                         // sfx.asm (SFX_LAUNCH). The end of a
                                         // level: see reports/end-level-boss-placeholder.md
-#import "boss_art.asm"                  // AFTER boss.asm, whose BOSS_SPRITES it
+#import "generated_sprites/boss_art.asm"                  // AFTER boss.asm, whose BOSS_SPRITES it
                                         // fills, and hud.asm, which it pins
                                         // itself above
 #import "gamestate.asm"                 // AFTER hud.asm (HUD_LIVES_MAX,

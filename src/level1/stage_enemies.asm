@@ -16,3 +16,4 @@
 // ============================================================================
 .const LVL_SLOT_RING     = 0             // the Sonic Ring's four frames
 .const LVL_SLOT_DROPPER  = 4             // the Orbital Dropper's four frames
+.const LVL_SLOT_SQUARE   = 8             // the Square's four frames

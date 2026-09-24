@@ -29,6 +29,9 @@ except Exception as exc:                                        # noqa: BLE001
     print(f"SKIP - Tk unavailable ({exc})")
     sys.exit(0)
 
+import atexit
+import shutil
+import encounter_library
 import editor as ed                                             # noqa: E402
 import movement_semantic as sem                                 # noqa: E402
 
@@ -60,6 +63,23 @@ def check(m, c, x=""):
 
 
 app = ed.LevelEditor(ed.find_repo_root())
+
+# THE SHARED ENCOUNTER LIBRARY IS PRODUCTION DATA, and this file drives the
+# real editor: adding a movement program here and saving would write
+# tools/level_editor/encounter_library.v6.json for real -- which is how a test
+# run once added `demo6b` to the vocabulary every level shares. The app gets a
+# disposable copy instead, the same way it is already given disposable level
+# paths. Nothing about what is being tested changes: it is still the real
+# library object, still saved, still reloaded.
+_LIB_TMP = tempfile.mkdtemp(prefix="semantic-gui-lib-")
+_LIB_COPY = Path(_LIB_TMP) / "encounter_library.v6.json"
+if encounter_library.LIBRARY_PATH.is_file():
+    shutil.copy(encounter_library.LIBRARY_PATH, _LIB_COPY)
+app.library_path = _LIB_COPY
+if app.controller.library is not None:
+    app.controller.library_path = _LIB_COPY
+atexit.register(shutil.rmtree, _LIB_TMP, True)
+
 app.withdraw()
 app._open_encounters()
 w = app._encounters
@@ -67,6 +87,11 @@ w.withdraw()
 app.update()
 
 CANON_JSON = app.controller.to_json()
+# THE LEVEL HALF, separately. Movement programs are shared assets now: this
+# file deliberately adds one (`demo6b`) and saves it, so after that the
+# in-memory document legitimately differs from where it started. What must
+# still be untouched is the LEVEL document -- its triggers, terrain and stage.
+CANON_LEVEL_JSON = app.controller.to_level_json()
 # Which programs the file on disk has as semantic, captured before any edit.
 _DISK_KINDS = {p.id: p.is_semantic
                for p in app.controller.project.movement_programs}
@@ -461,14 +486,27 @@ try:
         Path(ed.__file__).parent / "levels/level1/level.v6.json")
     app._open_level()
     app.update()
-    check("the canonical project on disk is untouched by all of the above",
-          app.controller.to_json() == CANON_JSON)
+    check("the canonical LEVEL on disk is untouched by all of the above",
+          app.controller.to_level_json() == CANON_LEVEL_JSON)
     # AS THE FILE ON DISK HAS THEM, not "all raw". The authored project now
     # contains semantic programs of its own; what is being asserted is that
     # nothing this test did changed which is which.
-    check("...and each program is still exactly as the file has it",
-          {p.id: p.is_semantic for p in progs()} == _DISK_KINDS,
-          str({p.id: p.is_semantic for p in progs()}))
+    # WHAT REOPENING SHOWS IS WHAT THE SHARED LIBRARY HOLDS, and that is the
+    # point of the library rather than a hole in this check. Movement programs
+    # are shared assets: this test lifts some to semantic and authors `demo6b`,
+    # saves, and those edits belong to every level from then on. Comparing
+    # against _DISK_KINDS -- how the programs looked before any of that -- would
+    # be asserting that shared edits do NOT persist, which is the opposite of
+    # the contract. So the comparison is against the library on disk now.
+    _now = {p.id: p.is_semantic for p in progs()}
+    _lib_now = {p.id: p.is_semantic for p in
+                encounter_library.EncounterLibrary.load(_LIB_COPY)
+                .movement_programs}
+    check("...and every program matches the shared library it was resolved from",
+          _now == _lib_now, f"{_now} vs {_lib_now}")
+    check("...and the programs the file started with were not silently dropped",
+          set(_DISK_KINDS) <= set(_now),
+          str(sorted(set(_DISK_KINDS) - set(_now))))
     check("...and the document is clean", not app._is_dirty())
 
 finally:

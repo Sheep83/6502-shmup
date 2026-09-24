@@ -163,28 +163,7 @@
 
 * = TOKEN_SPRITE "token bitmap"
 tokenBitmap:
-    .byte $15,$55,$54               //  ssssssssss
-    .byte $55,$55,$55               // ssssssssssss
-    .byte $55,$55,$55               // ssssssssssss
-    .byte $5a,$aa,$95               // ssPPPPPPPsss
-    .byte $5a,$aa,$a5               // ssPPPPPPPPss
-    .byte $5a,$55,$a5               // ssPPssssPPss
-    .byte $5a,$55,$a5               // ssPPssssPPss
-    .byte $5a,$55,$a5               // ssPPssssPPss
-    .byte $5a,$55,$a5               // ssPPssssPPss
-    .byte $5a,$aa,$a5               // ssPPPPPPPPss
-    .byte $5a,$aa,$95               // ssPPPPPPPsss
-    .byte $5a,$55,$55               // ssPPssssssss
-    .byte $5a,$55,$55               // ssPPssssssss
-    .byte $5a,$55,$55               // ssPPssssssss
-    .byte $5a,$55,$55               // ssPPssssssss
-    .byte $5a,$55,$55               // ssPPssssssss
-    .byte $5a,$55,$55               // ssPPssssssss
-    .byte $5a,$55,$55               // ssPPssssssss
-    .byte $55,$55,$55               // ssssssssssss
-    .byte $55,$55,$55               // ssssssssssss
-    .byte $15,$55,$54               //  ssssssssss
-    .byte $00                       // the 64th byte the VIC never fetches
+#import "generated_sprites/token_art.asm"
 tokenBitmapEnd:
 
 .if (tokenBitmapEnd - tokenBitmap != 64) {

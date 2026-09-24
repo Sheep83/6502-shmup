@@ -27,6 +27,15 @@
 // projectiles on top of a live enemy population is most of the headroom.
 .const EBULLET_MAX      = 3
 .const EBULLET_VY       = 3             // whole pixels a frame, downward
+// SPEED IS HELD ROUGHLY CONSTANT ACROSS THE ARC, and it is the vertical step
+// that gives way. The horizontal velocity is quantised to 0, 1 or 2 (see
+// ebulletSlope), and with a fixed vertical 3 that made the steepest shot
+// sqrt(2*2 + 3*3) = 3.61 pixels a frame against 3.00 straight down -- twenty
+// per cent faster on the diagonal, which reads as the angled shots lunging.
+// Dropping the vertical step to 2 on the steepest slope gives 2.83, so the
+// three available speeds are 3.00, 3.16 and 2.83: a spread of about five per
+// cent instead of twenty, for one table lookup at launch and nothing per frame.
+.const EBULLET_VY_STEEP = 2             // vertical step on the steepest slope
 .const EBULLET_COL      = 7             // yellow
 .const EBULLET_VX_MAX   = 2             // the steepest quantised slope
 
@@ -118,16 +127,7 @@
 
 * = EBULLET_SPRITE "projectile bitmap"
 ebulletBitmap:
-    .byte $14,$00,$00               // ..KK..
-    .byte $69,$00,$00               // KKYYKK
-    .byte $7d,$00,$00               // KKWWKK
-    .byte $7d,$00,$00               // KKWWKK
-    .byte $7d,$00,$00               // KKWWKK
-    .byte $69,$00,$00               // KKYYKK
-    .byte $14,$00,$00               // ..KK..
-    .byte $00,$00,$00
-    .fill 39, $00
-    .byte $00                           // the 64th byte the VIC never fetches
+#import "generated_sprites/ebullet_art.asm"
 ebulletBitmapEnd:
 
 .if (ebulletBitmapEnd - ebulletBitmap != 64) {
@@ -188,8 +188,9 @@ ebulletInit:
 // horizontal velocity is shared, so the difference between the two firing
 // sources is one byte set before a common body rather than two spawn routines:
 //
-//     ebulletSpawn      the turrets' shot, AIMED at the player
-//     ebulletSpawnDown  a moving enemy's shot, STRAIGHT DOWN
+//     ebulletSpawn      AIMED at the player -- every turret, and any wave whose
+//                       definition asks for it
+//     ebulletSpawnDown  STRAIGHT DOWN -- the default for every wave
 //
 // The cap, the pool allocation, the presentation, the lifecycle and the
 // player collision are identical and are written once. A third firing mode
@@ -198,14 +199,18 @@ ebulletInit:
 // ---------------------------------------------------------------------------
 // ebulletSpawnDown — one projectile at ebSpawnX/Y, falling straight.
 //
-// THE ENEMY SHOT IS NOT AIMED, and that is a gameplay decision rather than a
-// simplification to be fixed later. A moving enemy is already a harder target
-// to read than a fixed turret: it arrives from off-screen, it is on a curve,
-// and there may be three of it. An aimed shot from something moving that fast
-// cannot be dodged by reading the enemy, only by reading the bolt after it is
-// already in flight. Straight down means the enemy's own position TELLS the
-// player where the danger will be, which is what makes the formation itself
-// the threat rather than the projectile.
+// STRAIGHT DOWN IS STILL THE DEFAULT FOR A MOVING ENEMY, and the reason is
+// worth keeping even now that a wave can ask for the other one. A moving enemy
+// is already a harder target to read than a fixed turret: it arrives from
+// off-screen, it is on a curve, and there may be three of it. An aimed shot
+// from something moving that fast cannot be dodged by reading the enemy, only
+// by reading the bolt after it is already in flight. Straight down means the
+// enemy's own position TELLS the player where the danger will be, which is what
+// makes the formation itself the threat rather than the projectile.
+//
+// So aimed enemy fire is an AUTHORING CHOICE, per wave definition, and it is
+// opt-in: see WAVEDEF_FIRE_BITS in src/waves.asm. A wave that does not ask for
+// it fires exactly as it always did.
 // ---------------------------------------------------------------------------
 ebulletSpawnDown:
     lda #0
@@ -273,6 +278,17 @@ ebulletSpawnBody:
     lda ebSpawnAim
     beq !straight+
     jsr ebulletAim                      // -> objVX,x
+    // The vertical step that keeps this slope's speed near the others. |VX| is
+    // 0, 1 or 2 and indexes the table directly.
+    lda objVX,x
+    bpl !mag+
+    eor #$ff
+    clc
+    adc #1
+!mag:
+    tay
+    lda ebulletAimVY,y
+    sta objVY,x
     jmp !launch+
 !straight:
     lda #0
@@ -337,6 +353,15 @@ ebulletAim:
 !store:
     sta objVX,x
     rts
+
+// One vertical step per quantised slope, indexed by |VX|. Kept next to
+// ebulletSlope because the two together ARE the trajectory table: change one
+// and the speeds stop matching.
+ebulletAimVY:
+    .byte EBULLET_VY, EBULLET_VY, EBULLET_VY_STEEP
+.if (* - ebulletAimVY != EBULLET_VX_MAX + 1) {
+    .error "the aimed vertical table is not one entry per quantised slope"
+}
 
 // A = |horizontal distance|. Returns A = 0, 1 or 2.
 ebulletSlope:

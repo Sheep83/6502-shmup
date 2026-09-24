@@ -98,6 +98,20 @@
 // wide and 21 tall and the bolt is 8 wide, so (24-8)/2 centres it and 18 puts
 // it at the bottom edge -- the shot leaves the belly of the thing that fired
 // it, which is what makes it read as having come FROM the enemy.
+// --- the firing mode, packed into the definition's colour byte --------------
+// A WAVE DEFINITION IS TEN BYTES AND waveDefBase FORMS def * 10 IN ONE BYTE, so
+// an eleventh byte would cap the level at 24 definitions instead of 26 and turn
+// the shift-and-add into a multiply. The colour field is a C64 colour, 0..15,
+// and has four bits doing nothing -- so the mode lives there.
+//
+// THIS IS ALSO WHY OLD PACKAGES STILL MEAN WHAT THEY MEANT. Every colour byte
+// ever exported has a zero high nibble, and mode 0 is "fire the way the species
+// always did". A level built before aimed fire existed cannot accidentally
+// acquire it.
+.const WAVEDEF_COLOUR_MASK = $0f        // the authored colour
+.const WAVEDEF_FIRE_BITS   = $30        // bits 4-5: 0 = species default, 1 = aimed
+.const WAVEDEF_FIRE_AIMED  = $10
+
 .const ENEMY_MUZZLE_X    = 8
 .const ENEMY_MUZZLE_Y    = 18
 
@@ -332,7 +346,8 @@
     .if (trigDef.get(t) >= WAVE_DEFS) { .error "a trigger names a wave definition that does not exist" }
     // Membership, not a range: a species value is its animation ROW OFFSET
     // rather than a 0..n-1 index, so "less than the count" would be wrong.
-    .if (trigSpecies.get(t) != SPECIES_RING && trigSpecies.get(t) != SPECIES_DROPPER) {
+    .if (trigSpecies.get(t) != SPECIES_RING && trigSpecies.get(t) != SPECIES_DROPPER
+         && trigSpecies.get(t) != SPECIES_SQUARE) {
         .error "a trigger names a species that does not exist"
     }
     // A FIRE BIT THAT NAMES A MEMBER THE WAVE NEVER SENDS is an authoring
@@ -864,16 +879,30 @@ waveFireShot:
     adc #ENEMY_MUZZLE_Y
     sta ebSpawnY
 
+    // THE MODE IS READ BEFORE THE CURSOR MOVES, and it has to be: the next
+    // three instructions advance X past this enemy, so `enyFire,x` after them
+    // is the mode of whoever happens to be in the NEXT pool slot. Y survives
+    // the advance untouched, which is why it carries the answer across.
+    ldy enyFire,x
+
     inx                                 // advance the round-robin past this
     txa                                 // enemy before anything can fail
     and #MAX_OBJECTS - 1
     sta wvFireCursor
 
-    jsr ebulletSpawnDown                // THE SHARED PROJECTILE SYSTEM: the
-                                        // same pool, the same cap of three, the
-                                        // same flight and the same collision
-                                        // the turrets have always used. Carry
-                                        // set = the cap or the pool refused
+    // THE SHARED PROJECTILE SYSTEM: the same pool, the same cap of three, the
+    // same flight and the same collision the turrets have always used. The two
+    // entry points differ only in whether a horizontal velocity is derived --
+    // see src/ebullet.asm, which anticipated exactly this ("a third firing mode
+    // later is another entry point and another arm of the branch"). Carry set =
+    // the cap or the pool refused.
+    cpy #ENEMY_FIRE_AIMED
+    beq !aimed+
+    jsr ebulletSpawnDown
+    jmp !fired+
+!aimed:
+    jsr ebulletSpawn
+!fired:
     bcs !blocked+
 
     lda #SFX_ESHOT                      // THE SOUND FOLLOWS THE PROJECTILE, not
@@ -1032,8 +1061,23 @@ waveSpawnMember:
     beq !noFire+                        // a species that cannot fire, in a
                                         // wave authored to: the species wins
     sta enyFire,x                       // the MODE, not a bare flag: a later
-    jmp !mayFire+                       // species fires differently by storing
-!noFire:                                // a different value here
+                                        // species fires differently by storing
+                                        // a different value here
+
+    // THE SPECIES SAYS WHETHER, THE DEFINITION SAYS HOW. A species with no
+    // firing capability at all was already refused above and stays refused; one
+    // that can fire uses its own mode unless the wave definition asks for
+    // aimed, which any of them can do. Kept in this order so that adding a
+    // species with some third capability does not have to know about this.
+    ldy wvDefBase
+    lda waveDefTable + 7,y
+    and #WAVEDEF_FIRE_BITS
+    cmp #WAVEDEF_FIRE_AIMED
+    bne !mayFire+
+    lda #ENEMY_FIRE_AIMED
+    sta enyFire,x
+    jmp !mayFire+
+!noFire:
     lda #0
     sta enyFire,x
 !mayFire:
@@ -1048,6 +1092,7 @@ waveSpawnMember:
     ldy wvDefBase                       // enemyAnimPtr clobbers Y, so the wave
                                         // definition index is reloaded here
     lda waveDefTable + 7,y
+    and #WAVEDEF_COLOUR_MASK            // bits 4-5 are the firing mode
     sta logCol,x
     sta wmBaseCol,x                     // what a hit flash returns to
 

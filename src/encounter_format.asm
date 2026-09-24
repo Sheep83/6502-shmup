@@ -38,7 +38,13 @@
 // count" would be wrong.
 .const SPECIES_RING      = 0 * ENEMY_ANIM_STEPS     // the Sonic Ring
 .const SPECIES_DROPPER   = 1 * ENEMY_ANIM_STEPS     // the Orbital Dropper
-.const SPECIES_COUNT     = 2
+.const SPECIES_SQUARE    = 2 * ENEMY_ANIM_STEPS     // the Square
+.const SPECIES_COUNT     = 3
+
+// SQUARE IS 16 FOR THE SAME REASON DROPPER IS 8, and its value was not free to
+// choose. A species value IS its row offset in the animation table, so the row
+// index times ENEMY_ANIM_STEPS is the only arithmetic `species ORA step` can
+// survive. Ring and Dropper keep 0 and 8; the third row begins at 16.
 
 // --- which side a Dropper flies in from -------------------------------------
 // AUTHORED, NOT RANDOM, and carried on the trigger list beside the species it

@@ -56,6 +56,8 @@ from pathlib import Path
 import dataclasses
 
 import contract_v2 as C
+from dataclasses import dataclass
+import encounter_library
 import export_v6
 import migration_v6
 import movement_semantic
@@ -252,13 +254,35 @@ class V5View:
 # ===========================================================================
 # The controller
 # ===========================================================================
+@dataclass(frozen=True)
+class _LibraryNotice:
+    """A migration notice from folding embedded assets into the library.
+
+    Shaped like migration_v6's notices so the GUI's existing "what could not be
+    carried" dialog can show them without learning a second type.
+    """
+    message: str
+    code: str = "library.absorbed"
+    lost: bool = False
+
+
 class EditorController:
     """One live v6 project plus the operations the GUI performs on it."""
 
-    def __init__(self, project, path=None, notices=(), from_version=project_v6.FORMAT_VERSION):
+    def __init__(self, project, path=None, notices=(),
+                 from_version=project_v6.FORMAT_VERSION, library=None,
+                 library_path=None):
         self.path = Path(path) if path else None
         self.notices = list(notices)
         self.from_version = from_version
+        # THE SHARED VOCABULARY, or None. A controller built straight from a
+        # project -- which is what most tests and the New Level seed do -- has
+        # no library unless it is given one, and then save() writes only the
+        # level document. That is deliberate: a synthetic project in a
+        # temporary directory must not be able to write the production library.
+        self.library = library
+        self.library_path = Path(library_path) if library_path else (
+            library.path if library is not None else None)
         self.adopt(project)
 
     # ---- identity ------------------------------------------------------
@@ -305,25 +329,59 @@ class EditorController:
 
     # ---- construction ---------------------------------------------------
     @classmethod
-    def load(cls, path):
-        """Open any supported version through the Phase 1 migration path.
+    def load(cls, path, library_path=None, library=None):
+        """Open any supported version, and give it the shared vocabulary.
 
         v6 loads directly; v1..v5 migrate deterministically and their notices
         are kept so the GUI can tell the user what was discarded.
+
+        A document that still carries EMBEDDED movement programs or wave
+        definitions -- every level written before the library existed -- is
+        reconciled into the library rather than trusted or thrown away:
+        anything new is added, anything identical is accepted, and an id that
+        means two different things raises rather than guessing.
         """
         path = Path(path)
-        result = migration_v6.load_any(path)
-        return cls(result.project, path=path, notices=result.notices,
-                   from_version=result.from_version)
+        # attach=False: this controller has its own library and installs it a
+        # few lines down. Letting the loader attach a DIFFERENT one first would
+        # make the document look as though it carried embedded assets, and the
+        # reconcile below would then compare the two libraries against each
+        # other and report every difference as an authoring conflict.
+        result = migration_v6.load_any(
+            path, library_path=library_path,
+            attach=(library is None and library_path is None))
+        project = result.project
+        notices = list(result.notices)
+
+        if library is None and library_path is not None:
+            library = encounter_library.EncounterLibrary.load_or_empty(library_path)
+        if library is not None:
+            for note in library.reconcile(project, path.name):
+                notices.append(_LibraryNotice(note))
+            library.install_into(project)
+
+        return cls(project, path=path, notices=notices,
+                   from_version=result.from_version,
+                   library=library, library_path=library_path)
 
     @classmethod
     def canonical_path(cls, editor_dir):
         return Path(editor_dir).joinpath(*CANONICAL_LEVEL)
 
     @classmethod
-    def canonical(cls, editor_dir):
-        """The canonical Level 1 v6 project -- the GUI's default document."""
-        return cls.load(cls.canonical_path(editor_dir))
+    def canonical(cls, editor_dir, library_path=None):
+        """The canonical Level 1 v6 project -- the GUI's default document.
+
+        library_path IS NOT DEFAULTED, and that is a safety property rather
+        than an omission. A controller holding a library path can WRITE it, and
+        this classmethod is what a dozen tests reach for when they want a
+        realistic document. Defaulting it here handed every one of them a
+        writable handle on the production encounter library -- which is exactly
+        how a test run came to add `demo6b`, `prog` and `prog2` to it. The GUI
+        passes the path explicitly; everybody else still gets the shared
+        vocabulary, read-only, through the loader's attach.
+        """
+        return cls.load(cls.canonical_path(editor_dir), library_path=library_path)
 
     @property
     def migrated(self):
@@ -363,21 +421,90 @@ class EditorController:
         return data
 
     def to_json(self):
-        """Deterministic v6 text: stable order, 2-space indent, LF, one newline."""
+        """Deterministic v6 text: stable order, 2-space indent, LF, one newline.
+
+        THE WHOLE IN-MEMORY DOCUMENT, shared vocabulary included. Undo and the
+        dirty marker are taken from this, so a movement-program edit is
+        undoable and does mark the level dirty. to_level_json() is what gets
+        written to the level file.
+        """
         import json
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False) + "\n"
+
+    def to_level_dict(self):
+        data = self.to_dict()
+        for key in project_v6.ProjectV6.SHARED_KEYS:
+            data.pop(key, None)
+        return data
+
+    def to_level_json(self):
+        import json
+        return json.dumps(self.to_level_dict(), indent=2,
+                          ensure_ascii=False) + "\n"
 
     def restore_json(self, text):
         """Rebuild the document from a to_json() snapshot (undo/redo)."""
         return self.adopt(project_v6.ProjectV6.from_json(text))
 
+    def save_library(self):
+        """Persist the shared vocabulary as the live document now has it.
+
+        Called by save(), so switching or closing a level cannot lose a
+        movement-program edit. A controller with no library is a no-op.
+        """
+        if self.library is None or self.library_path is None:
+            return None
+        self.library.harvest_from(self.project)
+        return self.library.save(self.library_path)
+
     def save(self, path=None):
-        """Write deterministic v6. Unexposed fields ride along untouched."""
+        """Write the LEVEL document, then the shared library.
+
+        The level file no longer carries movementPrograms or waveDefinitions --
+        see ProjectV6.to_level_dict. Everything else, including fields the GUI
+        cannot edit, rides along untouched.
+        """
         target = Path(path) if path else self.path
         if target is None:
             raise ControllerError("no path to save to")
         target.parent.mkdir(parents=True, exist_ok=True)
-        Path(target).write_text(self.to_json(), encoding="utf-8", newline="\n")
+        # NEVER DROP THE VOCABULARY UNLESS IT IS SAFELY SOMEWHERE ELSE.
+        # A controller with a library writes the level half and lets the
+        # library own the shared half. A controller WITHOUT one -- a synthetic
+        # project, a fixture, anything constructed straight from a ProjectV6 --
+        # keeps writing the whole document the way it always did, because
+        # stripping keys whose only copy is in this file would be deleting
+        # somebody's data to satisfy a layout rule.
+        # WHEN IS IT SAFE TO LEAVE THE VOCABULARY OUT OF THE LEVEL FILE?
+        #
+        #   * there is a writable library to harvest it into -- the GUI's case;
+        #   * or it was attached read-only and has not been touched, so there
+        #     is literally nothing to lose.
+        #
+        # Anything else means this save would drop edits that exist nowhere
+        # else, so it refuses instead. Silently writing them back into the
+        # level file would re-create the duplicate ownership this whole change
+        # exists to remove, and silently discarding them would lose work.
+        writable = self.library is not None and self.library_path is not None
+        attached = getattr(self.project, "shared_vocabulary", False)
+        if writable:
+            shared_is_safe = True
+        elif attached:
+            before = getattr(self.project, "attached_vocabulary", None)
+            now = encounter_library.vocabulary_digest(self.project)
+            if before is not None and before != now:
+                raise ControllerError(
+                    "this document was given the shared movement programs and "
+                    "wave definitions read-only, and they have been edited. "
+                    "Saving would lose those edits, because a level file no "
+                    "longer stores them. Open the level with a library path so "
+                    "the edits can be written to the shared library.")
+            shared_is_safe = True
+        else:
+            shared_is_safe = False
+        text = self.to_level_json() if shared_is_safe else self.to_json()
+        Path(target).write_text(text, encoding="utf-8", newline="\n")
+        self.save_library()
         self.path = target
         # A saved project is a v6 project whatever it arrived as, so the
         # migration notices no longer describe the file on disk.
@@ -760,7 +887,12 @@ class EditorController:
                 raise ControllerError("use rename_wave_definition to change an id")
             if not hasattr(d, key):
                 raise ControllerError(f"a wave definition has no field {key!r}")
-            setattr(d, key, str(value) if key == "movement_program" else int(value))
+            # TWO STRING FIELDS NOW, not one. fire_mode is a symbolic name like
+            # the movement program it sits beside -- coercing it with int()
+            # would turn "AIMED" into a ValueError at the point of typing it.
+            setattr(d, key,
+                    str(value) if key in ("movement_program", "fire_mode")
+                    else int(value))
         self.resync_semantic_programs()
         return index
 

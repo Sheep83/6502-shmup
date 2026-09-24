@@ -87,7 +87,18 @@ c = EditorController.canonical(HERE)
 # authoring the level failed the file that exists to protect it. What matters is
 # that the controller loads what is ON DISK without losing any of it, so the
 # expectation is read from the same JSON.
-_on_disk = json.loads(CANON.read_text(encoding="utf-8"))
+# THE DOCUMENT THE EDITOR LOADS IS THE LEVEL PLUS THE SHARED LIBRARY.
+# Movement programs and wave definitions were lifted out of every level file
+# into encounter_library.v6.json, so a test that wants "what the editor has"
+# has to read both. Merging them here keeps every assertion below meaning what
+# it always meant, rather than scattering the change over twenty index sites.
+def _with_shared(_doc):
+    import json as _j
+    _lib = _j.loads((HERE / "encounter_library.v6.json").read_text(encoding="utf-8"))
+    return {**_doc, "movementPrograms": _lib["movementPrograms"],
+            "waveDefinitions": _lib["waveDefinitions"]}
+
+_on_disk = _with_shared(json.loads(CANON.read_text(encoding="utf-8")))
 check("the canonical v6 project loads through the GUI's controller",
       (c.project.stage.metatile_rows == _on_disk["stage"]["metatileRows"]
        and len(c.project.turrets) == len(_on_disk["turrets"])),
@@ -96,13 +107,16 @@ check("...as formatVersion 6, with no migration",
       not c.migrated and c.from_version == project_v6.FORMAT_VERSION)
 check("...and the live model is a ProjectV6, not a v5 LevelProject",
       isinstance(c.project, project_v6.ProjectV6))
+_LIB = json.loads((HERE / "encounter_library.v6.json")
+                  .read_text(encoding="utf-8"))
 check("...with every part of the document the file holds",
       (len(c.project.glyphs) == _on_disk["glyphs"]["count"]
        and len(c.project.metatile_defs) == len(_on_disk["metatileDefs"])
        and c.metatile_cols == 10
        and c.no_spawn_row == _on_disk["stage"]["noSpawnRow"]
-       and len(c.project.movement_programs) == len(_on_disk["movementPrograms"])
-       and len(c.project.wave_definitions) == len(_on_disk["waveDefinitions"])
+       # shared vocabulary: counted from the library, not the level document
+       and len(c.project.movement_programs) == len(_LIB["movementPrograms"])
+       and len(c.project.wave_definitions) == len(_LIB["waveDefinitions"])
        and len(c.project.triggers) == len(_on_disk["triggers"])),
       f"{len(c.project.glyphs)} glyphs, {len(c.project.metatile_defs)} defs, "
       f"noSpawn {c.no_spawn_row}")

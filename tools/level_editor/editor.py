@@ -41,6 +41,7 @@ from engine_data import (
 import contract_v2 as C
 import project_v6
 import export_v6
+import encounter_library
 from controller_v6 import ControllerError, EditorController, GENERATED_NAMES
 from encounters_ui import EncounterWorkspace
 from native_metatile import GlyphBudgetExceeded, blank_pixels
@@ -111,7 +112,13 @@ class LevelEditor(tk.Tk):
         # DERIVED files the source of truth and could not represent encounters
         # at all. levels/level1/level.v6.json is now authoritative and the ASM
         # is what the exporter writes out of it.
-        self.controller = EditorController.canonical(self.editor_dir)
+        # THE SHARED ENCOUNTER LIBRARY, opened once and kept across every
+        # level switch. Movement Programs and Wave Definitions live in it;
+        # triggers and noSpawnRow live in the level. Opening another level
+        # replaces the level half and leaves this alone.
+        self.library_path = encounter_library.LIBRARY_PATH
+        self.controller = EditorController.canonical(
+            self.editor_dir, library_path=self.library_path)
         self.project = self.controller.view
         self.repo_path = default_repo_path(self.editor_dir)
         try:
@@ -164,13 +171,26 @@ class LevelEditor(tk.Tk):
 
     # ---- project construction ------------------------------------------
     def _seed_v6_project(self, name, rows):
-        """A new, empty v6 level that carries the current graphics.
+        """A new, empty v6 level that carries the current graphics AND the
+        shared encounter vocabulary.
 
-        The map is blank and there are no turrets and no encounters, but the
-        charset, the metatile definitions and the native metatile set are copied
-        from the document that is open, because a level with no tiles to paint
-        with cannot be edited. noSpawnRow is derived the way migration derives
-        it, so a new project validates immediately rather than starting broken.
+        The map is blank, there are no turrets and -- crucially -- there are NO
+        TRIGGERS: where a wave happens is the one thing a new level must decide
+        for itself. But the Movement Programs and Wave Definitions come across,
+        because they are shared assets and a new level is expected to reach for
+        them immediately. This used to leave all three lists empty, which meant
+        a new level had no reusable wave tools at all and the only way to get
+        any was to copy an existing level -- which is how two levels came to
+        own two copies of the same vocabulary in the first place.
+
+        They are NOT copied into the new level's file: ProjectV6.to_level_dict
+        drops the shared keys, so saving a new level writes triggers and
+        terrain and leaves the library where it is.
+
+        The charset, metatile definitions and native metatile set are copied
+        from the open document, because a level with no tiles to paint with
+        cannot be edited. noSpawnRow is derived the way migration derives it,
+        so a new project validates immediately rather than starting broken.
         """
         source = self.controller.project
         rows = max(MIN_STAGE_ROWS, min(MAX_STAGE_ROWS, int(rows)))
@@ -184,7 +204,13 @@ class LevelEditor(tk.Tk):
             level_metatile_set=json.loads(json.dumps(source.level_metatile_set))
             if source.level_metatile_set is not None else None,
             map_rows=[[0] * METATILES_PER_ROW for _ in range(rows)],
-            turrets=[], movement_programs=[], wave_definitions=[], triggers=[],
+            turrets=[], triggers=[],
+            movement_programs=[
+                project_v6.MovementProgram.from_dict(p.to_dict(), "library")
+                for p in source.movement_programs],
+            wave_definitions=[
+                project_v6.WaveDefinition.from_dict(d.to_dict(), "library")
+                for d in source.wave_definitions],
         )
 
     @property
@@ -1484,7 +1510,9 @@ class LevelEditor(tk.Tk):
                                        minvalue=MIN_STAGE_ROWS, maxvalue=MAX_STAGE_ROWS, parent=self)
         if rows is None:
             return "break"
-        controller = EditorController(self._seed_v6_project(name, rows))
+        controller = EditorController(
+            self._seed_v6_project(name, rows),
+            library=self.controller.library, library_path=self.library_path)
         self._adopt_project(controller, None)   # unsaved; Save writes level.v6.json
         return "break"
 
@@ -1504,7 +1532,7 @@ class LevelEditor(tk.Tk):
             # ONE LOADER FOR EVERY VERSION. v6 opens directly; v1..v5 go through
             # the Phase 1 migration and keep their notices, so an author is told
             # what could not be carried rather than discovering it later.
-            controller = EditorController.load(path)
+            controller = EditorController.load(path, library_path=self.library_path)
         except Exception as exc:                          # noqa: BLE001
             messagebox.showerror("Open Level", str(exc), parent=self)
             return "break"

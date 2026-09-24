@@ -512,7 +512,19 @@ def render_wave_encounters(project, level_name):
              f"startX = {d.start_x}, nine bits split low/high"),
             (f"{d.start_y},", "startY"),
             (f"{d.x_step}, {d.y_step},", "xStep, yStep -- signed, per member"),
-            (f"{d.colour},", "colour"),
+            # THE COLOUR BYTE CARRIES THE FIRING MODE IN BITS 4-5. A wave
+            # definition is ten bytes and src/waves.asm forms def * 10 in one
+            # byte, so an eleventh byte would cap a level at 24 definitions.
+            # Mode 0 (DOWN) leaves the byte exactly as it has always been
+            # exported, which is what makes old packages still correct.
+            # THE COMMENT ONLY MENTIONS THE MODE WHEN THERE IS ONE TO MENTION.
+            # A DOWN definition packs to exactly the byte it always packed to,
+            # so saying nothing keeps previously generated files byte-identical
+            # and keeps the diff of a real change down to the lines that
+            # actually changed.
+            (f"{d.colour | (C.FIRE_MODES[d.fire_mode] << C.WAVEDEF_FIRE_SHIFT)},",
+             "colour" if d.fire_mode == "DOWN"
+             else f"colour (low nibble) + firing mode {d.fire_mode}"),
             (f"{d.heading},", "launch heading"),
             (f"{prog_const(d.movement_program)})", "movement program INDEX"),
         ]

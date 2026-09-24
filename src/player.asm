@@ -482,7 +482,7 @@ playerStateEnd:
 // runtime dependency on one.
 * = PLAYER_SPRITES "player bitmaps"
 playerBitmaps:
-#import "player_art.asm"
+#import "generated_sprites/player_art.asm"
 
 // The blank sixteenth of the allocation: HW1's bitmap, and the block a real
 // muzzle-flash overlay would occupy if one is ever drawn for this ship.
@@ -507,7 +507,7 @@ playerBitmapsEnd:
 // ---------------------------------------------------------------------------
 * = PLAYER_FLASH_SPRITES "player muzzle flash"
 playerFlashBitmaps:
-#import "player_muzzle_flash.asm"
+#import "generated_sprites/player_muzzle_flash.asm"
 playerFlashBitmapsEnd:
 .if (playerFlashBitmapsEnd - playerFlashBitmaps != PLAYER_FLASH_FRAMES * 64) {
     .error "the muzzle flash must be exactly PLAYER_FLASH_FRAMES x 64 bytes"

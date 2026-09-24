@@ -78,6 +78,18 @@
 // redesign -- the mode is a value, not a flag.
 .const ENEMY_FIRE_NONE   = 0                        // this species never fires
 .const ENEMY_FIRE_DOWN   = 1                        // one bolt, straight down
+.const ENEMY_FIRE_AIMED  = 2                        // one bolt, aimed at where
+                                                    // the ship WAS when it was
+                                                    // fired. Not homing: the
+                                                    // trajectory is fixed at
+                                                    // launch, so the shot can
+                                                    // always be dodged. Same
+                                                    // pool, cap, flight and
+                                                    // collision as every other
+                                                    // projectile -- the only
+                                                    // difference is which
+                                                    // ebullet entry point
+                                                    // src/waves.asm calls
 
 // The table itself is enemyFireModeTab, in the enemy CODE segment below --
 // data belongs in a segment, and a .byte out here would be emitted at whatever
@@ -105,12 +117,14 @@
 // rather than a scrambled animation.
 .const ENEMY_FRAMES      = 4                        // north, east, south, west
 .const DROPPER_FRAMES    = 4                        // wide, f-right, f, f-left
+.const SQUARE_FRAMES     = 4                        // full, turn, narrow, edge
 
 .const ENEMY_SPRITES     = levelSlotAddr(LVL_SLOT_RING)
 .const DROPPER_SPRITES   = levelSlotAddr(LVL_SLOT_DROPPER)
+.const SQUARE_SPRITES    = levelSlotAddr(LVL_SLOT_SQUARE)
 
-.if (ENEMY_FRAMES != DROPPER_FRAMES) {
-    .error "a window slot holds ENEMY_FRAMES blocks: two species of different frame counts need the descriptor to carry the count"
+.if (ENEMY_FRAMES != DROPPER_FRAMES || ENEMY_FRAMES != SQUARE_FRAMES) {
+    .error "a window slot holds ENEMY_FRAMES blocks: species of different frame counts need the descriptor to carry the count"
 }
 // The window guards in main.asm already prove the run is aligned, inside the
 // bank and clear of screen page B and the clip scratch; level_assets.asm proves
@@ -149,8 +163,8 @@
 .if ((ENEMY_ANIM_STEPS & (ENEMY_ANIM_STEPS - 1)) != 0) {
     .error "ENEMY_ANIM_STEPS must be a power of two: the phase is masked, not compared"
 }
-.if (SPECIES_COUNT != 2) {
-    .error "the species values are animation row offsets: adding a third means extending the table and this check"
+.if (SPECIES_COUNT != 3) {
+    .error "the species values are animation row offsets: adding another means extending enemyAnimShape, enemyFireModeTab, the level descriptor rows and this check"
 }
 
 // levelAssetsLoad divides an entry index by ENEMY_ANIM_STEPS to recover the
@@ -273,10 +287,13 @@
 // carries them, which is why the window's contents and the window's claims are
 // asserted against each other rather than assumed to agree.
 * = ENEMY_SPRITES "level1 ring frames"
-#import "enemy_art.asm"                 // sonicRingFrames, four 64-byte frames
+#import "generated_sprites/enemy_art.asm"                 // sonicRingFrames, four 64-byte frames
 
 * = DROPPER_SPRITES "level1 dropper frames"
-#import "enemy_dropper_art.asm"         // orbitalDropperFrames, four frames
+#import "generated_sprites/enemy_dropper_art.asm"         // orbitalDropperFrames, four frames
+
+* = SQUARE_SPRITES "level1 square frames"
+#import "generated_sprites/enemy_square_art.asm"          // squareFrames, four frames
 
 // The names the rest of the engine knew the Ring's art by, kept pointing at the
 // same things they always meant: the first frame's bytes, and the address that
@@ -302,6 +319,13 @@
 .if (orbitalDropper_1_front_right != DROPPER_SPRITES + 1 * 64) { .error "Dropper frame 1 is not front-right" }
 .if (orbitalDropper_2_front       != DROPPER_SPRITES + 2 * 64) { .error "Dropper frame 2 is not front" }
 .if (orbitalDropper_3_front_left  != DROPPER_SPRITES + 3 * 64) { .error "Dropper frame 3 is not front-left" }
+.if (squareFramesEnd - squareFrames != SQUARE_FRAMES * 64) {
+    .error "the Square art is not SQUARE_FRAMES blocks of 64 bytes"
+}
+.if (square_0_full   != SQUARE_SPRITES + 0 * 64) { .error "Square frame 0 is not full" }
+.if (square_1_turn   != SQUARE_SPRITES + 1 * 64) { .error "Square frame 1 is not turn" }
+.if (square_2_narrow != SQUARE_SPRITES + 2 * 64) { .error "Square frame 2 is not narrow" }
+.if (square_3_edge   != SQUARE_SPRITES + 3 * 64) { .error "Square frame 3 is not edge" }
 
 // ===========================================================================
 // PER-OBJECT SPECIES. MAIN THREAD ONLY.
@@ -334,11 +358,18 @@
 //
 // Read once per live enemy per frame by enemyAnimPtrBody, as an absolute,Y --
 // exactly as it read the old constant table, so the hot path did not change.
-* = $c4f0 "enemy animation table"
+// IT MOVED FOR THE THIRD SPECIES, and the segment guard is what made that a
+// build failure rather than a silent overwrite. The table is one row of
+// ENEMY_ANIM_STEPS per species, so a third species took it from 16 bytes to 24
+// and its old home at $c4f0 had exactly 16 before the species array at $c500.
+// It now lives in the hole between the level asset state ($c400, two bytes) and
+// the token encounter state ($c43f), which is the right neighbourhood anyway:
+// levelAssetsLoad is what fills it. $c4f0-$c4ff is now free.
+* = $c410 "enemy animation table"
 enemyAnimSeq:  .fill SPECIES_COUNT * ENEMY_ANIM_STEPS, 0
 enemyAnimSeqEnd:
-.if (enemyAnimSeqEnd > $c500) {
-    .error "the resolved animation table has grown into the enemy species array at $c500"
+.if (enemyAnimSeqEnd > $c43f) {
+    .error "the resolved animation table has grown into the token encounter state at $c43f"
 }
 
 * = $c4e0 "enemy firing"
@@ -369,7 +400,7 @@ enyFireEnd:
 }
 
 * = $c500 "enemy species"
-enySpecies:    .fill MAX_OBJECTS, 0     // SPECIES_RING or SPECIES_DROPPER
+enySpecies:    .fill MAX_OBJECTS, 0     // one of the SPECIES_* row offsets
 enySpeciesEnd:
 .if (enySpeciesEnd > $c517) {
     .error "the enemy species array has grown into the enemy state at $c517"
@@ -399,6 +430,11 @@ enyStateEnd:
 enemyFireModeTab:
     .byte ENEMY_FIRE_DOWN                           // SPECIES_RING
     .byte ENEMY_FIRE_DOWN                           // SPECIES_DROPPER
+    .byte ENEMY_FIRE_DOWN                           // SPECIES_SQUARE: the Ring's
+                                                    // baseline, deliberately --
+                                                    // Square is an ordinary
+                                                    // species with no special
+                                                    // capability of its own
 .if (* - enemyFireModeTab != SPECIES_COUNT) {
     .error "the species firing table does not have one entry per species"
 }
@@ -456,6 +492,10 @@ enemyInit:
 // the end of that species' slot and into whatever the level loaded next to it.
 .var RING_SHAPE    = List().add(0, 1, 2, 3,  0, 1, 2, 3)   // rotate, twice
 .var DROPPER_SHAPE = List().add(0, 1, 2, 3,  3, 2, 1, 0)   // out and back
+// THE SQUARE SPINS, and a spin reverses: frames 0..3 narrow the silhouette from
+// a full face to an edge-on bar, so running them out and back is one complete
+// revolution rather than a jump from edge-on straight back to full face.
+.var SQUARE_SHAPE  = List().add(0, 1, 2, 3,  3, 2, 1, 0)   // out and back
 
 .for (var i = 0; i < RING_SHAPE.size(); i++) {
     .if (RING_SHAPE.get(i) >= ENEMY_FRAMES) {
@@ -467,13 +507,20 @@ enemyInit:
         .error "a Dropper animation step names a frame the Dropper does not have"
     }
 }
-.if (RING_SHAPE.size() != ENEMY_ANIM_STEPS || DROPPER_SHAPE.size() != ENEMY_ANIM_STEPS) {
+.for (var i = 0; i < SQUARE_SHAPE.size(); i++) {
+    .if (SQUARE_SHAPE.get(i) >= SQUARE_FRAMES) {
+        .error "a Square animation step names a frame the Square does not have"
+    }
+}
+.if (RING_SHAPE.size() != ENEMY_ANIM_STEPS || DROPPER_SHAPE.size() != ENEMY_ANIM_STEPS
+     || SQUARE_SHAPE.size() != ENEMY_ANIM_STEPS) {
     .error "an animation shape row is not ENEMY_ANIM_STEPS steps long"
 }
 
 enemyAnimShape:
     .fill RING_SHAPE.size(), RING_SHAPE.get(i)          // SPECIES_RING
     .fill DROPPER_SHAPE.size(), DROPPER_SHAPE.get(i)    // SPECIES_DROPPER
+    .fill SQUARE_SHAPE.size(), SQUARE_SHAPE.get(i)      // SPECIES_SQUARE
 enemyAnimShapeEnd:
 .if (enemyAnimShapeEnd - enemyAnimShape != SPECIES_COUNT * ENEMY_ANIM_STEPS) {
     .error "the animation shape is not one row of ENEMY_ANIM_STEPS per species"

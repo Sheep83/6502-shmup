@@ -188,13 +188,18 @@ class WaveDefinition:
     colour: int = 1
     heading: int = 0
     movement_program: str = ""
+    # HOW this wave's enemies shoot. "DOWN" is the historical behaviour and the
+    # default, so a definition written before aimed fire existed keeps meaning
+    # exactly what it meant. See contract_v2.FIRE_MODES.
+    fire_mode: str = "DOWN"
 
     def to_dict(self):
         return {"id": self.id, "count": self.count, "interval": self.interval,
                 "startX": self.start_x, "startY": self.start_y,
                 "xStep": self.x_step, "yStep": self.y_step,
                 "colour": self.colour, "heading": self.heading,
-                "movementProgram": self.movement_program}
+                "movementProgram": self.movement_program,
+                "fireMode": self.fire_mode}
 
     @staticmethod
     def from_dict(raw, path):
@@ -211,6 +216,10 @@ class WaveDefinition:
             colour=_int_or_zero(raw.get("colour")),
             heading=_int_or_zero(raw.get("heading")),
             movement_program=str(raw.get("movementProgram", "")),
+            # ABSENT MEANS DOWN. Every definition authored before aimed fire
+            # existed omits the key, and must go on firing the way it always
+            # did rather than silently acquiring a new behaviour.
+            fire_mode=str(raw.get("fireMode", "DOWN")),
         )
 
 
@@ -369,6 +378,15 @@ class ProjectV6:
     metatile_defs: list = field(default_factory=list)   # list of 16-code lists
     level_metatile_set: object = None                   # opaque native source
     map_rows: list = field(default_factory=list)        # rows x 10 metatile IDs
+    # TRUE once the shared library has been installed onto this project. It is
+    # what stops a save writing the vocabulary back into the level file: a
+    # document that was given the shared set has no business persisting a
+    # second copy of it. Not serialised -- it describes where the in-memory
+    # lists came from, not anything about the document on disk.
+    shared_vocabulary: bool = field(default=False, compare=False, repr=False)
+    # The vocabulary exactly as the library handed it over, or None. save()
+    # compares against it to tell "nothing to lose" from "about to lose work".
+    attached_vocabulary: object = field(default=None, compare=False, repr=False)
     turrets: list = field(default_factory=list)
     movement_programs: list = field(default_factory=list)
     wave_definitions: list = field(default_factory=list)
@@ -423,12 +441,39 @@ class ProjectV6:
             data["levelMetatileSet"] = self.level_metatile_set
         return data
 
+    # THE TWO SHARED KEYS. A level document no longer persists these: they
+    # belong to tools/level_editor/encounter_library.v6.json, which is the one
+    # authoritative copy. They stay in to_dict() because that is the IN-MEMORY
+    # document -- undo snapshots and the dirty marker are taken from it, and a
+    # movement-program edit has to be undoable and has to mark the document
+    # dirty like any other.
+    SHARED_KEYS = ("movementPrograms", "waveDefinitions")
+
+    def to_level_dict(self):
+        """What actually goes in levels/<name>/level.v6.json."""
+        data = self.to_dict()
+        for key in self.SHARED_KEYS:
+            data.pop(key, None)
+        return data
+
     def to_json(self):
         """Deterministic text: stable order, 2-space indent, LF, trailing newline."""
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False) + "\n"
 
+    def to_level_json(self):
+        return json.dumps(self.to_level_dict(), indent=2, ensure_ascii=False) + "\n"
+
     def save(self, path):
-        Path(path).write_text(self.to_json(), encoding="utf-8", newline="\n")
+        """Write the level document.
+
+        SYMMETRICAL WITH load(). If this project was handed the shared
+        vocabulary it does not write it back -- otherwise load/save would put
+        the library's contents into the level file, and a second load/save
+        would then treat them as the document's own. That asymmetry showed up
+        immediately as save() no longer being idempotent on disk.
+        """
+        text = self.to_level_json() if self.shared_vocabulary else self.to_json()
+        Path(path).write_text(text, encoding="utf-8", newline="\n")
 
     @staticmethod
     def from_dict(data):
@@ -499,8 +544,18 @@ class ProjectV6:
         return ProjectV6.from_dict(json.loads(text))
 
     @staticmethod
-    def load(path):
-        return ProjectV6.from_json(Path(path).read_text(encoding="utf-8"))
+    def load(path, library_path=None):
+        """A level document plus the shared vocabulary its triggers name.
+
+        See encounter_library.attach_if_absent: a document carrying its own
+        programs and definitions is left alone, and one that has none -- which
+        is every level since the library migration -- is given the shared set.
+        The import is late because encounter_library imports this module.
+        """
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        project = ProjectV6.from_dict(raw)
+        import encounter_library
+        return encounter_library.attach_if_absent(project, raw, library_path)
 
     def copy(self):
         return ProjectV6.from_dict(json.loads(json.dumps(self.to_dict())))

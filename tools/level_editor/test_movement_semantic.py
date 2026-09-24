@@ -836,8 +836,12 @@ check("...and a raw program writes no segments key at all",
 check("...while every semantic one does",
       all("segments" in p.to_dict()
           for p in proj.movement_programs if p.is_semantic))
+# to_level_json(): raw_bytes is the LEVEL file, which carries triggers and
+# terrain. The shared vocabulary this section is exercising lives in the
+# encounter library and is attached in memory, so it is deliberately not part
+# of what the level file has to reproduce.
 check("opening and saving the canonical project changes nothing",
-      c.to_json().encode() == raw_bytes)
+      c.to_level_json().encode() == raw_bytes)
 
 # ---- lifting ---------------------------------------------------------
 lifted = {}
@@ -1050,8 +1054,12 @@ check("...so its records do not change when the launch heading does",
 # 14. canonical preservation, end to end
 # =======================================================================
 fresh = EditorController(migration_v6.load_any(CANON).project)
+# to_level_json(), NOT to_json(). The in-memory document holds the shared
+# movement programs and wave definitions -- load_any attaches them from
+# encounter_library.v6.json -- while the LEVEL FILE holds triggers and terrain
+# and no vocabulary at all. The fixed point being asserted is the level file's.
 check("no-op open/save of the canonical project is byte-identical",
-      fresh.to_json().encode() == raw_bytes)
+      fresh.to_level_json().encode() == raw_bytes)
 import export_v6                                            # noqa: E402
 REF = HERE.parent.parent / "src/level1"
 with tempfile.TemporaryDirectory() as d:

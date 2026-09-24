@@ -50,21 +50,35 @@
 
 .const LB_SLOT_RING         = 12            // $2f00, pointer $bc
 .const LB_SLOT_DROPPER      = 8             // $2e00, pointer $b8
+// Package B disagrees about the Square too, which is the point of it: the
+// level packs Ring/Dropper/Square at 0/4/8 and this package puts them at
+// 12/8/16, so no species keeps its address and the loader cannot pass by
+// accident. Slot 16 holds no art -- package B has never carried any -- and it
+// does not need to: what is being proved is the pointer arithmetic.
+.const LB_SLOT_SQUARE       = 16            // $3000, pointer $c0
 
-// SPECIES_COUNT entries per row, and the loop below turns a package index into
-// a row with a shift rather than a multiply.
-.const LEVEL_DESC_ROW_SHIFT = 1
-.if ((1 << LEVEL_DESC_ROW_SHIFT) != SPECIES_COUNT) {
-    .error "LEVEL_DESC_ROW_SHIFT no longer matches SPECIES_COUNT"
+// THE ROW IS PADDED TO A POWER OF TWO so the loop below can still turn a
+// package index into a row base with a shift rather than a multiply. It used to
+// be exactly SPECIES_COUNT wide, which worked only while that was 2; a third
+// species made the count odd, and padding the stride is a great deal cheaper
+// than a multiply on the path that builds the table.
+.const LEVEL_DESC_ROW_STRIDE = 4
+.const LEVEL_DESC_ROW_SHIFT = 2
+.if ((1 << LEVEL_DESC_ROW_SHIFT) != LEVEL_DESC_ROW_STRIDE) {
+    .error "LEVEL_DESC_ROW_SHIFT no longer matches LEVEL_DESC_ROW_STRIDE"
+}
+.if (LEVEL_DESC_ROW_STRIDE < SPECIES_COUNT) {
+    .error "the descriptor row is narrower than the number of species"
 }
 
 levelAssetDescs:
-    .byte LVL_SLOT_RING, LVL_SLOT_DROPPER     // LEVEL_PACKAGE_1
-    .byte LB_SLOT_RING, LB_SLOT_DROPPER     // LEVEL_PACKAGE_B
+    // one row per package, LEVEL_DESC_ROW_STRIDE wide, SPECIES_COUNT used
+    .byte LVL_SLOT_RING, LVL_SLOT_DROPPER, LVL_SLOT_SQUARE, 0   // LEVEL_PACKAGE_1
+    .byte LB_SLOT_RING,  LB_SLOT_DROPPER,  LB_SLOT_SQUARE,  0   // LEVEL_PACKAGE_B
 levelAssetDescsEnd:
 
-.if (levelAssetDescsEnd - levelAssetDescs != LEVEL_PACKAGE_COUNT * SPECIES_COUNT) {
-    .error "the descriptor table is not one row of SPECIES_COUNT slots per package"
+.if (levelAssetDescsEnd - levelAssetDescs != LEVEL_PACKAGE_COUNT * LEVEL_DESC_ROW_STRIDE) {
+    .error "the descriptor table is not one row of LEVEL_DESC_ROW_STRIDE slots per package"
 }
 
 // Every slot any package claims must hold a whole species inside the window.
@@ -74,12 +88,20 @@ levelAssetDescsEnd:
 .if (LVL_SLOT_DROPPER + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "the level's Dropper slot runs past the enemy sprite window" }
 .if (LB_SLOT_RING    + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "level B's Ring slot runs past the enemy sprite window" }
 .if (LB_SLOT_DROPPER + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "level B's Dropper slot runs past the enemy sprite window" }
+.if (LVL_SLOT_SQUARE + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "the level's Square slot runs past the enemy sprite window" }
+.if (LB_SLOT_SQUARE  + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "level B's Square slot runs past the enemy sprite window" }
 
 // A package's two species must not be loaded on top of each other. This is the
 // check that would catch a hand-edited descriptor, which is how a level package
 // will be authored until there is a tool that emits one.
 .if (LVL_SLOT_RING < LVL_SLOT_DROPPER + ENEMY_FRAMES && LVL_SLOT_DROPPER < LVL_SLOT_RING + ENEMY_FRAMES) {
     .error "the level loads two species into overlapping window slots"
+}
+.if (LVL_SLOT_RING < LVL_SLOT_SQUARE + ENEMY_FRAMES && LVL_SLOT_SQUARE < LVL_SLOT_RING + ENEMY_FRAMES) {
+    .error "the level loads the Ring and the Square into overlapping window slots"
+}
+.if (LVL_SLOT_DROPPER < LVL_SLOT_SQUARE + ENEMY_FRAMES && LVL_SLOT_SQUARE < LVL_SLOT_DROPPER + ENEMY_FRAMES) {
+    .error "the level loads the Dropper and the Square into overlapping window slots"
 }
 .if (LB_SLOT_RING < LB_SLOT_DROPPER + ENEMY_FRAMES && LB_SLOT_DROPPER < LB_SLOT_RING + ENEMY_FRAMES) {
     .error "level B loads two species into overlapping window slots"

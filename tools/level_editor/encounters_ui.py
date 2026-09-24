@@ -46,13 +46,15 @@ COL_AXIS = "#7a7a7a"
 COL_TICK = "#555555"
 COL_RING = "#38d0ff"
 COL_DROPPER = "#ffd000"
+COL_SQUARE = "#a060ff"      # the Square, violet: distinct from both at a glance
 COL_SELECT = "#ffffff"
 COL_NOSPAWN = "#ff40c0"
 COL_QUIET = "#2a2a2a"
 COL_ERROR = "#ff6060"
 COL_WARN = "#e0a000"
 
-SPECIES_COLOUR = {"RING": COL_RING, "DROPPER": COL_DROPPER}
+SPECIES_COLOUR = {"RING": COL_RING, "DROPPER": COL_DROPPER,
+                  "SQUARE": COL_SQUARE}
 HEADINGS = ["CONT"] + [str(i) for i in range(C.WM_HEAD_LEN)]
 
 # THE NAMED PIECES FIRST, because they are the vocabulary a designer reaches
@@ -260,7 +262,7 @@ class EncounterWorkspace(tk.Toplevel):
     # ------------------------------------------------------------------ waves
     def _build_waves(self, nb):
         f = ttk.Frame(nb, padding=6)
-        nb.add(f, text="Wave definitions")
+        nb.add(f, text="Wave definitions (shared)")
         f.columnconfigure(1, weight=1)
         f.rowconfigure(0, weight=1)
 
@@ -317,13 +319,29 @@ class EncounterWorkspace(tk.Toplevel):
         self.w_prog = ttk.Combobox(d, state="readonly", width=18)
         self.w_prog.grid(row=r, column=1, columnspan=2, sticky="w")
         self.w_prog.bind("<<ComboboxSelected>>", self._wave_apply)
+        # HOW THIS WAVE'S ENEMIES SHOOT. On the definition rather than the
+        # trigger because it is a property of the wave's design, and because a
+        # shared definition is exactly the unit an author wants to opt into
+        # aimed fire. The default is the behaviour every existing wave already
+        # has, so nothing changes by being opened.
+        ttk.Label(d, text="firing").grid(row=r + 1, column=0, sticky="w")
+        self.w_fire = ttk.Combobox(d, state="readonly", width=18,
+                                   values=[C.FIRE_MODE_LABELS[m]
+                                           for m in ("DOWN", "AIMED")])
+        self.w_fire.grid(row=r + 1, column=1, columnspan=2, sticky="w")
+        self.w_fire.bind("<<ComboboxSelected>>", self._wave_apply)
+        ttk.Label(d, text="aimed shots sample the ship's position when they are "
+                          "fired and do not follow it",
+                  font=("TkDefaultFont", 9), wraplength=PROG_TEXT_WRAP,
+                  justify="left").grid(row=r + 1, column=3, sticky="w",
+                                       padx=(8, 0))
         self.w_used = ttk.Label(d, text="", font=("TkDefaultFont", 9))
-        self.w_used.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.w_used.grid(row=r + 2, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
     # --------------------------------------------------------------- programs
     def _build_programs(self, nb):
         f = ttk.Frame(nb, padding=6)
-        nb.add(f, text="Movement programs")
+        nb.add(f, text="Movement programs (shared)")
         f.columnconfigure(1, weight=1)
         f.rowconfigure(0, weight=1)
 
@@ -813,6 +831,7 @@ class EncounterWorkspace(tk.Toplevel):
         self.w_compass.set_heading(d.heading)
         self.w_head_text.set(self._describe_heading(d.heading))
         self.w_prog.set(d.movement_program)
+        self.w_fire.set(C.FIRE_MODE_LABELS.get(d.fire_mode, d.fire_mode))
         users = self.controller.triggers_using_definition(d.id)
         rows = ", ".join(str(self.controller.project.triggers[i].world_progress)
                          for i in users)
@@ -1555,6 +1574,11 @@ class EncounterWorkspace(tk.Toplevel):
                   for k, e in self.w_fields.items()}
         if self.w_prog.get():
             fields["movement_program"] = self.w_prog.get()
+        label = self.w_fire.get()
+        for key, text in C.FIRE_MODE_LABELS.items():
+            if text == label:
+                fields["fire_mode"] = key
+                break
         self._edit(self.controller.update_wave_definition, self.sel_wave, **fields)
 
     # ---- program / stage ---------------------------------------------------

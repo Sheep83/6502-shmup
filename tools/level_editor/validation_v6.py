@@ -567,6 +567,11 @@ def _validate_wave_definitions(p, r):
                 r.error("wavedef.y_step",
                         f"member {d.count - 1} spawns at Y {last_y}, outside the "
                         f"eight bits logY carries", f"{path}.yStep")
+        if d.fire_mode not in C.FIRE_MODES:
+            r.error("wavedef.fire_mode",
+                    f"firing mode {d.fire_mode!r} is not one of "
+                    f"{', '.join(sorted(C.FIRE_MODES))}",
+                    f"waveDefinitions[{i}].fireMode")
         if not (0 <= d.colour <= C.MAX_COLOUR):
             r.error("wavedef.colour",
                     f"colour must be 0..{C.MAX_COLOUR}; got {d.colour}",

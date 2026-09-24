@@ -78,11 +78,26 @@ def asm_matches(controller):
 
 
 def roundtrip(controller):
-    """save -> load -> the bytes that were written."""
+    """save -> load -> the bytes that were written.
+
+    THROUGH A DISPOSABLE SHARED LIBRARY. Movement programs and wave definitions
+    are shared assets now: they are not written into the level file, so a round
+    trip that expects an edit to one of them to survive has to give the
+    controller somewhere to put it. A temporary library is that somewhere --
+    the production one must never be written by a test.
+    """
+    import shutil
+    import encounter_library
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "level.v6.json"
+        lib = Path(d) / "encounter_library.v6.json"
+        if encounter_library.LIBRARY_PATH.is_file():
+            shutil.copy(encounter_library.LIBRARY_PATH, lib)
+        controller.library = encounter_library.EncounterLibrary.load_or_empty(lib)
+        controller.library_path = lib
         controller.save(p)
-        return p.read_bytes(), EditorController.load(p)
+        return (p.read_bytes(), EditorController.load(p, library_path=lib),
+                lib.read_bytes() if lib.is_file() else b"")
 
 
 # ===========================================================================
@@ -93,7 +108,18 @@ def roundtrip(controller):
 # level failed the file that exists to protect editing it. The controller's job
 # is to surface what the FILE holds, so the expectation is read from the file.
 c = fresh()
-_disk = json.loads(CANON.read_text(encoding="utf-8"))
+# THE DOCUMENT THE EDITOR LOADS IS THE LEVEL PLUS THE SHARED LIBRARY.
+# Movement programs and wave definitions were lifted out of every level file
+# into encounter_library.v6.json, so a test that wants "what the editor has"
+# has to read both. Merging them here keeps every assertion below meaning what
+# it always meant, rather than scattering the change over twenty index sites.
+def _with_shared(_doc):
+    import json as _j
+    _lib = _j.loads((HERE / "encounter_library.v6.json").read_text(encoding="utf-8"))
+    return {**_doc, "movementPrograms": _lib["movementPrograms"],
+            "waveDefinitions": _lib["waveDefinitions"]}
+
+_disk = _with_shared(json.loads(CANON.read_text(encoding="utf-8")))
 _dt = _disk["triggers"]
 check("the controller surfaces the canonical triggers exactly as stored",
       [t.world_progress for t in c.project.triggers] == [d["worldProgress"] for d in _dt],
@@ -106,7 +132,10 @@ check("...and their Dropper sides",
       [t.dropper_side for t in c.project.triggers] == [d["dropperSide"] for d in _dt])
 check("capacity reports triggers, waves, records and bytes against the caps",
       c.capacity() == {"triggers": (len(_dt), 180),
-                       "waveDefinitions": (len(_disk["waveDefinitions"]), 26),
+                       # shared now: counted from the library, not the level
+                       "waveDefinitions": (
+                           len(json.loads((HERE / "encounter_library.v6.json")
+                                          .read_text())["waveDefinitions"]), 26),
                        "movementRecords": (c.project.movement_records, 64),
                        "movementBytes": (c.project.movement_bytes, 256)},
       str(c.capacity()))
@@ -168,7 +197,17 @@ check("duplicate_trigger copies the whole trigger one row later",
 # 3. Species, side and the fire mask
 # ===========================================================================
 c = fresh()
-check("species are symbolic", set(C.SPECIES) == {"RING", "DROPPER"}, str(set(C.SPECIES)))
+# SYMBOLIC IS THE CLAIM, not the census. This asserted the exact set
+# {"RING", "DROPPER"} and so failed the moment a third species was authored --
+# which is a fact about the game's content, not about the contract this file
+# tests. What matters is that a species is a NAME the project stores, that the
+# two established ones are still there, and that each maps to a whole animation
+# row. tools/sprite_export/test_spd_pipeline.py owns the roll-call.
+check("species are symbolic", all(isinstance(k, str) for k in C.SPECIES)
+      and {"RING", "DROPPER"} <= set(C.SPECIES), str(sorted(C.SPECIES)))
+check("...and every species value is a whole animation row",
+      all(v % C.ENEMY_ANIM_STEPS == 0 for v in C.SPECIES.values()),
+      str(C.SPECIES))
 check("sides are symbolic", set(C.DROPPER_SIDES) == {"LEFT", "RIGHT"})
 c.update_trigger(3, species="RING")
 check("switching a DROPPER to RING returns the side to the canonical neutral",
@@ -182,7 +221,7 @@ c = fresh()
 c.update_trigger(0, fire_mask=[1, 3])
 check("a fire mask is edited as member indices",
       c.project.triggers[0].fire_mask == [1, 3])
-raw, back = roundtrip(c)
+raw, back, _lib = roundtrip(c)
 check("...and survives save/reload exactly",
       back.project.triggers[0].fire_mask == [1, 3])
 
@@ -292,7 +331,7 @@ check("...with a real entry heading, never None (the stale-wmPhase bug)",
 c.update_stage(p, 0, entry_heading="CONT")
 check("CONT is an authored value, not the magic 255",
       c.project.movement_programs[p].stages[0].entry_heading == "CONT")
-raw, back = roundtrip(c)
+raw, back, _lib = roundtrip(c)
 check("...and survives save/reload as the string CONT",
       back.project.movement_programs[p].stages[0].entry_heading == "CONT")
 check("...and 255 appears nowhere in the saved JSON for it",
@@ -336,7 +375,7 @@ check("...but an unreferenced one deletes",
 # 7. THE NO-OP PROOF, repeated for this phase
 # ===========================================================================
 c = fresh()
-raw, _ = roundtrip(c)
+raw, _, _ = roundtrip(c)
 check("open + save with NO encounter edits is byte-identical JSON",
       raw == CANON_BYTES, f"{len(raw)} vs {len(CANON_BYTES)} bytes")
 check("...and the six generated files are byte-identical",
@@ -346,15 +385,28 @@ check("...and the six generated files are byte-identical",
 # ===========================================================================
 # 8. Controlled encounter edits: change, save, reload, verify, restore
 # ===========================================================================
+import encounter_library as _EL
+LIB_BYTES = (_EL.LIBRARY_PATH.read_bytes()
+             if _EL.LIBRARY_PATH.is_file() else b"")
+
+
 def edit_cycle(name, mutate, verify, restore):
     """One controlled edit, proved to persist and then to reverse exactly."""
     c = fresh()
     mutate(c)
-    raw, back = roundtrip(c)
+    raw, back, lib_after = roundtrip(c)
     check(f"{name}: the edit survives save/reload", verify(back), "")
-    check(f"{name}: the JSON really changed", raw != CANON_BYTES)
+    # AN EDIT PERSISTS SOMEWHERE, and which file depends on what was edited.
+    # Triggers and the no-spawn row are level-specific and change the level
+    # JSON; movement programs and wave definitions are SHARED and change the
+    # encounter library instead, leaving the level file untouched. Asserting
+    # only "the level JSON changed" would now fail for exactly the edits the
+    # sharing was introduced for.
+    check(f"{name}: the edit really reached a persisted file",
+          raw != CANON_BYTES or lib_after != LIB_BYTES,
+          "level JSON" if raw != CANON_BYTES else "encounter library")
     restore(back)
-    raw2, _ = roundtrip(back)
+    raw2, _, _ = roundtrip(back)
     check(f"{name}: restoring returns byte-identical canonical JSON",
           raw2 == CANON_BYTES)
     check(f"{name}: ...and byte-identical generated ASM",

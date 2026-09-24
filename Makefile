@@ -135,7 +135,7 @@ KEYSET    := -keyset
 VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 
 
-.PHONY: all build d64 proof420 test
+.PHONY: all build d64 proof420 test sprites sprites-check
 .PHONY: test-boot test-production test-movement-pool test-no-spawn-row test-turret-regression
 .PHONY: test-encounter-director test-player-ship test-flight-paths test-ingress-egress test-clip-scratch
 .PHONY: test-sfx test-enemy-fire test-pickup test-lifecycle test-player-death test-boss
@@ -149,7 +149,23 @@ all: build
 # THE DISK IMAGE IS NOW PART OF THE BUILD, not an optional extra. The engine
 # loads its level from disk at boot, so a bare PRG is no longer a runnable
 # artefact and every test launches the d64.
-build:
+# SPRITE ART IS GENERATED FROM THE .spd, AND THIS IS THE GATE.
+#
+# assets/sprites/19656-sprites.spd is the source of truth for every editable
+# gameplay sprite. The build does NOT regenerate from it -- tools/level_editor/
+# export_level.py states the principle for level data and it holds for artwork:
+# "regenerating source on every build would make `make` able to change the
+# program's content, so the generation step is explicit and its output is
+# reviewable in the diff". Instead each generated file records the .spd's hash
+# and this check fails the build loudly when they diverge, so editing sprites
+# and forgetting to regenerate can never quietly ship the previous artwork.
+sprites:
+	@python3 tools/sprite_export/import_spd.py
+
+sprites-check:
+	@python3 tools/sprite_export/import_spd.py --check
+
+build: sprites-check
 	@mkdir -p build
 	@awk '/^metatileDefs:/,/^METATILE_DEFS_END:/' "$(MAPSRC)" > "$(MAPDEFS)"
 	@awk '/^stageMetatileRows:/,/^STAGE_METATILE_ROWS_END:/' "$(MAPSRC)" > "$(MAPROWS)"

@@ -70,8 +70,19 @@ progs, defs, trigs = r.movement_programs, r.wave_definitions, r.triggers
 # when this file was written. Importing the ASM and comparing it against the JSON
 # is a REAL cross-check -- the exporter wrote one from the other, and if either
 # side drifted they would stop agreeing -- and it lets the level be authored.
-CANON = json.loads((HERE / "levels" / "level1" / "level.v6.json")
-                   .read_text(encoding="utf-8"))
+# THE DOCUMENT THE EDITOR LOADS IS THE LEVEL PLUS THE SHARED LIBRARY.
+# Movement programs and wave definitions were lifted out of every level file
+# into encounter_library.v6.json, so a test that wants "what the editor has"
+# has to read both. Merging them here keeps every assertion below meaning what
+# it always meant, rather than scattering the change over twenty index sites.
+def _with_shared(_doc):
+    import json as _j
+    _lib = _j.loads((HERE / "encounter_library.v6.json").read_text(encoding="utf-8"))
+    return {**_doc, "movementPrograms": _lib["movementPrograms"],
+            "waveDefinitions": _lib["waveDefinitions"]}
+
+CANON = _with_shared(json.loads((HERE / "levels" / "level1" / "level.v6.json")
+                   .read_text(encoding="utf-8")))
 
 eq("movement programs", len(progs), len(CANON["movementPrograms"]))
 eq("movement program ids (from the engine's PROG_* symbols)",

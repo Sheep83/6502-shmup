@@ -78,9 +78,25 @@ ok("levels/level1/level.v6.json validates with no errors",
 for _w in result.warnings:
     print(f"       note: {_w}")
 
-doc = json.loads(CANONICAL.read_text(encoding="utf-8"))
-eq("movement programs", len(project.movement_programs), len(doc["movementPrograms"]))
-eq("wave definitions", len(project.wave_definitions), len(doc["waveDefinitions"]))
+# THE DOCUMENT THE EDITOR LOADS IS THE LEVEL PLUS THE SHARED LIBRARY.
+# Movement programs and wave definitions were lifted out of every level file
+# into encounter_library.v6.json, so a test that wants "what the editor has"
+# has to read both. Merging them here keeps every assertion below meaning what
+# it always meant, rather than scattering the change over twenty index sites.
+def _with_shared(_doc):
+    import json as _j
+    _lib = _j.loads((HERE / "encounter_library.v6.json").read_text(encoding="utf-8"))
+    return {**_doc, "movementPrograms": _lib["movementPrograms"],
+            "waveDefinitions": _lib["waveDefinitions"]}
+
+doc = _with_shared(json.loads(CANONICAL.read_text(encoding="utf-8")))
+# THE VOCABULARY IS NO LONGER IN THE LEVEL FILE. Movement programs and wave
+# definitions are shared and live in encounter_library.v6.json; the level
+# document keeps its triggers. Counting them from the right file is the whole
+# of the change here.
+_lib = json.loads((HERE / "encounter_library.v6.json").read_text(encoding="utf-8"))
+eq("movement programs", len(project.movement_programs), len(_lib["movementPrograms"]))
+eq("wave definitions", len(project.wave_definitions), len(_lib["waveDefinitions"]))
 eq("triggers", len(project.triggers), len(doc["triggers"]))
 eq("trigger rows", [t.world_progress for t in project.triggers],
    [d["worldProgress"] for d in doc["triggers"]])
@@ -138,8 +154,12 @@ for name in export_v6.GENERATED_NAMES:
 ok("the committed src/level1/ files ARE the exporter's output, byte for byte")
 
 # JSON fixed point
+# A LEVEL FILE'S FIXED POINT IS to_level_json(). from_json() gives a project
+# with an empty vocabulary (the shared one is attached by load(), not by
+# from_json), and to_json() would then write two empty lists into a file
+# that correctly has neither key. to_level_json() is what a level file is.
 text = CANONICAL.read_text(encoding="utf-8")
-assert ProjectV6.from_json(text).to_json() == text
+assert ProjectV6.from_json(text).to_level_json() == text
 ok("v6 JSON save -> load -> save is a fixed point", f"{len(text)} bytes")
 
 # ---------------------------------------------------------------------------

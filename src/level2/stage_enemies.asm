@@ -28,3 +28,4 @@
 
 .const LVL_SLOT_RING     = 0  // 4 consecutive sprite blocks
 .const LVL_SLOT_DROPPER  = 4  // 4 consecutive sprite blocks
+.const LVL_SLOT_SQUARE   = 8  // 4 consecutive sprite blocks

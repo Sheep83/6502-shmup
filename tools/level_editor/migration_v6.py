@@ -219,6 +219,19 @@ def migrate_to_v6(data):
     return result
 
 
-def load_any(path):
-    """Load a project of any supported version, migrating if necessary."""
-    return migrate_to_v6(json.loads(Path(path).read_text(encoding="utf-8")))
+def load_any(path, library_path=None, attach=True):
+    """Load a project of any supported version, migrating if necessary.
+
+    A MIGRATED LEVEL DOCUMENT NO LONGER CARRIES ITS OWN MOVEMENT PROGRAMS OR
+    WAVE DEFINITIONS -- they are shared, and live in the encounter library. So
+    a document that has none of its own is given the shared ones here, which is
+    what lets every consumer downstream (exporter, validator, simulator,
+    preview) keep reading project.movement_programs without knowing anything
+    changed. A document that still carries its own is left exactly as it is.
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    result = migrate_to_v6(raw)
+    if attach:
+        import encounter_library
+        encounter_library.attach_if_absent(result.project, raw, library_path)
+    return result
