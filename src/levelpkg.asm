@@ -32,6 +32,24 @@
 // IMPORTED MORE THAN ONCE PER BUILD -- both the engine and the package build import it.
 #importonce
 .const LEVELPKG_BASE     = $e000
+
+// THE ENGINE'S ONE STAGE CAPACITY, in metatile rows. Every package emits a map
+// of EXACTLY this many rows whatever its authored length, because the scroller's
+// wrap, its start row and its completion boundary are all assembly-time
+// immediates derived from it -- see the note beside LEVELPKG_CHARS. A level
+// authored shorter is padded up by its own package build.
+//
+// THE PADDING GOES AT THE LOW INDICES, and that is not arbitrary. stageTopRow
+// starts at STAGE_START_ROW and walks DOWN to zero, so index 199 is what the
+// player sees FIRST and index 0 is where the stage ends. Padding the low end
+// therefore puts the filler AFTER the authored content, as a run-in to the boss,
+// and -- because authored row m moves to index m + pad and worldProgress is
+// measured down from the top -- every authored trigger row still fires exactly
+// where it was authored to. Padding the high end would have delayed the whole
+// level by the pad and forced every trigger to be rewritten.
+.const LEVELPKG_STAGE_ROWS = 200
+
+
 .const LEVELPKG_TOP      = $fff9        // last byte the package may occupy
 
 // --- the three components, at the audited addresses -------------------------
@@ -41,7 +59,56 @@
 //          emits here yet; the reservation exists so that terrain growth cannot
 //          quietly eat the space the wave contract is going to need.
 .const LEVELPKG_MAP      = $e000
-.const LEVELPKG_MAP_MAX  = 440 * 10     // 4400
+// THE MAP RESERVATION IS THE ENGINE'S CAPACITY, NOT 440 ROWS ANY MORE. It was
+// sized for a 440-metatile-row stage when a stage's height could vary; the
+// campaign fixed the engine at one height (LEVELPKG_STAGE_ROWS, below) and every
+// package now emits exactly that, so 2,400 bytes of the old reservation were
+// never going to be written by anybody.
+//
+// THE RECLAIMED RUN IS WHERE THE SPRITES WENT, and carving it out of the map's
+// own tail is what let the level's artwork into the file WITHOUT moving one
+// address above it: the metatile definitions, the encounters, the triggers and
+// the signature are all exactly where they were.
+.const LEVELPKG_MAP_MAX  = LEVELPKG_STAGE_ROWS * 10     // 2000
+
+// --- THE LEVEL'S SPRITE PAYLOAD, in the map's reclaimed tail ----------------
+// THE SPECIES ROLES AND THE BOSS, AND NOTHING ELSE. A level brings the artwork
+// for the enemy sprite window and the boss cells; the player, the muzzle flash,
+// the death fireball, the collectible token and the hostile bolt stay compiled
+// into the ENGINE, because they are the game's own furniture rather than the
+// level's and every level draws them identically.
+//
+// IT IS A RAW WINDOW IMAGE, not a per-species record. The engine already has a
+// slot model -- LEVEL_SPRITES is twenty contiguous 64-byte blocks and a level's
+// stage_enemies.asm says which slot each species occupies -- so the package
+// carries the window's BYTES in window order and levelApplySprites copies them
+// straight in. Nothing about species IDs, the slot claims, the sprite pointers
+// or the animation tables changes; the blocks simply arrive from disk now
+// instead of from the engine binary.
+//
+// A LEVEL MAY REUSE ANOTHER'S ARTWORK BYTE FOR BYTE, and level 2 does: its
+// stage_sprites.asm imports the same generated files level 1's does. SpritePad
+// remains the authority -- these are the same generated blocks, emitted into a
+// different file.
+.const LEVELPKG_SPR       = LEVELPKG_MAP + LEVELPKG_MAP_MAX     // $e7d0
+.const LEVELPKG_SPR_MAX   = 20 * 64                             // LEVEL_SPRITE_BLOCKS
+.const LEVELPKG_BOSS      = LEVELPKG_SPR + LEVELPKG_SPR_MAX     // $ecd0
+.const LEVELPKG_BOSS_MAX  = 4 * 64                              // BOSS_CELLS
+.const LEVELPKG_SPR_END   = LEVELPKG_BOSS + LEVELPKG_BOSS_MAX   // $edd0
+
+
+// --- geometry BOTH BUILDS need, and therefore neither may restate -----------
+// The package build checks the authored turret list against the engine's
+// geometry, so the few numbers that check needs have to be visible to it. They
+// live here, in the file whose entire job is to stop the two builds disagreeing,
+// and the engine derives its own constants from them rather than declaring
+// rival copies -- see METATILE_H in src/terrain.asm and TURRET_BODY_W in
+// src/turrets.asm.
+.const LEVELPKG_METATILE_H    = 4       // stage rows per metatile row
+.const LEVELPKG_SCREEN_COLS   = 40
+.const LEVELPKG_TRT_BODY_W    = 2       // characters
+.const LEVELPKG_TRT_BODY_H    = 2
+.const LEVELPKG_TRT_ROW_PHASE = 1       // authored rows are 1 (mod METATILE_H)
 .const LEVELPKG_DEFS     = $f130
 .const LEVELPKG_DEFS_MAX = 64 * 16      // 1024
 .const LEVELPKG_ENC      = $f530
@@ -129,14 +196,72 @@
 .const LEVELPKG_SIG_3    = $70
 
 // ===========================================================================
+// THE LEVEL'S RENDER IDENTITY — charset, palette and turret placement
+// ===========================================================================
+// WHY THESE ARE HERE AT ALL. Until the campaign existed there was one level, so
+// its glyphs, its colours and its turret list were compiled into the ENGINE
+// from src/level1/ and nobody could tell the difference. The moment a second
+// level is loaded at run time that stops being true: level 2 authors 128 glyphs
+// against level 1's 80, a green palette against a grey one, and no turrets at
+// all against level 1's five. Loading only the map and the encounters would
+// have given level 2 level 1's glyph set, level 1's colours and five of level
+// 1's turrets standing in its terrain.
+//
+// So the parts of a level that the RENDERER needs move into the file beside the
+// parts the DIRECTOR needs. They live in the spare run above the signature,
+// which had 1,158 bytes free and needs 1,057.
+//
+// WHAT DELIBERATELY DID NOT MOVE: STAGE_METATILE_ROWS. The stage height is an
+// assembly-time immediate in eighteen places in src/scroll.asm -- including the
+// per-regenerated-row reduction in the hot path -- and twelve more in
+// src/turrets.asm. Making it a runtime value is a scroller change, and the
+// scroller is explicitly out of scope. The engine therefore keeps ONE stage
+// capacity (200 metatile rows) and a shorter level is padded up to it by its own
+// package build; see src/level_package.asm. A level's AUTHORED length in the
+// editor is untouched. Runtime-variable stage height is the follow-up.
+.const LEVELPKG_CHARS     = $fb74               // the terrain glyph bitmaps
+.const LEVELPKG_CHARS_MAX = 128 * 8             // 1024, the engine's ceiling
+.const LEVELPKG_PAL       = LEVELPKG_CHARS + LEVELPKG_CHARS_MAX     // $ff74
+.const LEVELPKG_PAL_MAX   = 4                   // $d021, $d022, $d023, colour RAM
+.const LEVELPKG_GLYPHN    = LEVELPKG_PAL + LEVELPKG_PAL_MAX         // $ff78
+.const LEVELPKG_TRTN      = LEVELPKG_GLYPHN + 1                     // $ff79
+// Parallel columns, as the trigger list is and for the same reason: one cursor
+// indexes all three.
+.const LEVELPKG_TRT_MAX   = 8                   // the engine's turret capacity
+.const LEVELPKG_TRTCOL    = LEVELPKG_TRTN + 1                       // $ff7a
+.const LEVELPKG_TRTROWLO  = LEVELPKG_TRTCOL   + LEVELPKG_TRT_MAX    // $ff82
+.const LEVELPKG_TRTROWHI  = LEVELPKG_TRTROWLO + LEVELPKG_TRT_MAX    // $ff8a
+// HOW MANY TRIGGERS THIS LEVEL AUTHORED. The trigger DATA has always been
+// package data; the COUNT was a compile-time constant, which meant the engine
+// knew level 1's twelve while reading level 2's seven -- and the five entries
+// past the end are the zero padding, so a transitioned level 2 would have
+// fired five phantom waves at world row 0.
+//
+// IT IS HERE AND NOT IN THE STAGE HEADER because the header is two bytes wedged
+// between the encounter components, and widening it would shift the movement
+// pool, the wave definitions and the trigger list. This run is spare.
+.const LEVELPKG_TRIGN     = LEVELPKG_TRTROWHI + LEVELPKG_TRT_MAX    // $ff92
+.const LEVELPKG_ASSETS_END = LEVELPKG_TRIGN + 1                     // $ff93
+
+.if (LEVELPKG_CHARS != LEVELPKG_SIG + 4) {
+    .error "the render identity must follow the signature with no gap"
+}
+.if (LEVELPKG_ASSETS_END > LEVELPKG_TOP + 1) {
+    .error "the level's render identity runs past the top of the package"
+}
+
+// ===========================================================================
 // THE LAYOUT GUARDS. Everything below is an assembly-time proof that the
 // components fit, do not overlap, and cannot reach the hardware vectors.
 // ===========================================================================
 .if (LEVELPKG_MAP != LEVELPKG_BASE) {
     .error "the stage map must start at the base of the level package"
 }
-.if (LEVELPKG_MAP + LEVELPKG_MAP_MAX > LEVELPKG_DEFS) {
-    .error "the 440-row map budget overlaps the metatile definition reservation"
+.if (LEVELPKG_MAP + LEVELPKG_MAP_MAX > LEVELPKG_SPR) {
+    .error "the stage map overlaps the sprite payload"
+}
+.if (LEVELPKG_SPR_END > LEVELPKG_DEFS) {
+    .error "the sprite payload overlaps the metatile definition reservation"
 }
 .if (LEVELPKG_DEFS + LEVELPKG_DEFS_MAX > LEVELPKG_ENC) {
     .error "the metatile definition budget overlaps the encounter reservation"

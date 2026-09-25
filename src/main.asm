@@ -224,13 +224,19 @@
 // already switch $d018, from the same frame record's phase. Two stores a
 // frame, eight cycles, no main-thread involvement and no new phase.
 //
-//     raster  55   exTop      $d021 = APERTURE_D021   (the level's colour)
+//     raster  55   exTop      $d021 = trnBgColour     (the level's colour)
 //     raster 248   exBottom   $d021 = BORDER_D021     (black)
 //
-// APERTURE_D021 is DERIVED from the level package rather than restated, for
-// the same reason STAGE_ROWS is: a level that authors a different background
-// must not be able to disagree with the raster that displays it.
-.const APERTURE_D021  = TERRAIN_BACKGROUND_COLOUR
+// THE APERTURE COLOUR IS A VARIABLE, NOT A CONSTANT, and it became one when the
+// campaign made the resident level changeable mid-run. It used to be
+// `.const APERTURE_D021 = TERRAIN_BACKGROUND_COLOUR`, compiled in from
+// src/level1/ -- which was exactly right while level 1 was the only level and
+// would have painted level 2's green stage in level 1's grey. The value now
+// arrives in the level package and terrainApplyPackage stores it in
+// trnBgColour; see src/terrain.asm.
+//
+// IT COSTS FOUR CYCLES A FRAME. Two `ldx #imm` became two `ldx abs`, at rasters
+// 55 and 248, and nothing else about the splits changed.
 .const BORDER_D021    = 0               // the open top/bottom border. BLACK.
 
 // ---------------------------------------------------------------------------
@@ -338,6 +344,12 @@ BasicUpstart2(entry)
 #import "hud.asm"                       // AFTER renderer.asm, which defines
                                         // spriteByte(); BEFORE renderer.asm,
                                         // whose exHud phase uses its constants
+// THE CAMPAIGN, BEFORE EVERY MODULE THAT READS IT. src/player.asm reads
+// cmpSpeedBoost on the movement path and src/gamestate.asm spends the currency,
+// so the constants and the state have to exist first. It emits its own segments
+// and depends on nothing above it.
+#import "campaign.asm"
+
 #import "player.asm"                    // AFTER hud.asm, whose bitmap pool it
                                         // sits on top of; BEFORE renderer.asm,
                                         // whose exHud phase programs HW0/HW1
@@ -393,9 +405,19 @@ BasicUpstart2(entry)
                                         // terrain.asm (TERRAIN_COLOUR_RAM) and
                                         // sfx.asm (SFX_LAUNCH). The end of a
                                         // level: see reports/end-level-boss-placeholder.md
-#import "generated_sprites/boss_art.asm"                  // AFTER boss.asm, whose BOSS_SPRITES it
-                                        // fills, and hud.asm, which it pins
-                                        // itself above
+// THE BOSS ARTWORK TRAVELS IN THE LEVEL PACKAGE NOW, like the enemies': see
+// LEVELPKG_BOSS in src/levelpkg.asm. levelApplySprites copies it into
+// BOSS_SPRITES at level init, so a level can bring its own boss without the
+// engine being rebuilt. Nothing about the boss's cells, pointers or behaviour
+// changed -- only where the bytes come from.
+// THE CAMPAIGN'S COPY OF THE STICK BITS IS THE SAME AS THE PLAYER'S. campaign.asm
+// is parsed before player.asm and cannot name JOY_LEFT, so cmpFracNeg/Pos state
+// the bits literally; this is where the two can finally be compared.
+.if (CMP_JOY_LEFT != JOY_LEFT || CMP_JOY_RIGHT != JOY_RIGHT ||
+     CMP_JOY_UP   != JOY_UP   || CMP_JOY_DOWN  != JOY_DOWN) {
+    .error "src/campaign.asm's stick-bit copy disagrees with src/player.asm"
+}
+
 #import "gamestate.asm"                 // AFTER hud.asm (HUD_LIVES_MAX,
                                         // HUD_DIRTY_*), renderer.asm
                                         // (FRAME_IRQ_LINE, PH_FRAME) and
@@ -447,6 +469,50 @@ BasicUpstart2(entry)
 // of entry. Kept out of main's own segment so that the boot-only code and the
 // per-frame code cannot quietly grow into each other.
 #import "levelload.asm"
+
+// ---------------------------------------------------------------------------
+// AFTER EVERY MODULE, because it names both ends of the copy: LEVEL_SPRITES is
+// declared at the top of this file and BOSS_SPRITES in src/boss.asm, which is
+// parsed later. It lived in src/terrain.asm beside terrainApplyPackage until
+// that ordering made it a build error.
+// ---------------------------------------------------------------------------
+* = $6b50 "level sprite adopt"
+
+// ---------------------------------------------------------------------------
+// levelApplySprites — copy the resident package's ARTWORK into the sprite RAM.
+//
+// CALLED BESIDE terrainApplyPackage, at boot and on every level load, and like
+// it this reads above $e000 and so needs the KERNAL banked out.
+//
+// TWO FIXED-SIZE BLOCKS, unconditionally: the twenty-block enemy window and the
+// four boss cells. The package always emits both at full size -- a level that
+// claims fewer enemy slots has the rest zero-filled by its own build -- so the
+// copy needs no count and cannot leave the previous level's artwork behind.
+//
+// 1,536 BYTES, ONCE PER LEVEL. About 12,000 cycles, which is well under a frame
+// and is paid while the display is a static non-game page. Nothing about the
+// slot model, the sprite pointers, the species IDs or the animation tables is
+// involved: this moves bytes into the window those systems already read.
+// ---------------------------------------------------------------------------
+levelApplySprites:
+    ldx #0
+!copy:
+    .for (var p = 0; p < LEVELPKG_SPR_MAX / 256; p++) {
+        lda LEVELPKG_SPR + p * 256,x
+        sta LEVEL_SPRITES + p * 256,x
+    }
+    .for (var p = 0; p < LEVELPKG_BOSS_MAX / 256; p++) {
+        lda LEVELPKG_BOSS + p * 256,x
+        sta BOSS_SPRITES + p * 256,x
+    }
+    inx
+    bne !copy-
+    rts
+
+.if (mod(LEVELPKG_SPR_MAX, 256) != 0 || mod(LEVELPKG_BOSS_MAX, 256) != 0) {
+    .error "levelApplySprites copies whole pages: both payloads must be page multiples"
+}
+
 
 // OUTSIDE VIC BANK 0, with the player, the scroller, the weapon, the object
 // pool, the enemy and collision. Every byte in this file is main-thread code or
@@ -524,6 +590,14 @@ entry:
                                         // selecting it -- see src/vicbank.asm.
     jsr clearCharset                    // MUST precede any display: it is both
                                         // the aperture mask and the idle byte
+    // THE LEVEL'S OWN LOOK, BEFORE ANYTHING READS IT. terrainApplyPackage
+    // copies the resident package's charset into the glyph window and takes its
+    // palette; terrainInit's colour-RAM fill and the renderer's aperture splits
+    // both read what it stores. Needs the KERNAL banked out, which happened at
+    // the top of entry.
+    jsr terrainApplyPackage
+    jsr levelApplySprites               // the level's enemies and boss, from
+                                        // its package into the sprite window
     jsr terrainInit                     // colour RAM, $d022/$d023, the
                                         // multicolour bit, and the transposed
                                         // metatile tables. Terrain owns the
@@ -541,6 +615,10 @@ entry:
                                         // decision for the day there IS one.
                                         // See src/pickup.asm.
     jsr ebulletInit                     // no hostile projectiles at boot
+    jsr turretBuildTables               // the authored turret list is package
+                                        // data now, so every placement table is
+                                        // derived from it before turretInit
+                                        // marks the slots alive
     jsr turretInit                      // mark the authored turrets alive.
                                         // BEFORE scrollInit: that builds both
                                         // pages through renderRow, and a turret

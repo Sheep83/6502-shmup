@@ -19,6 +19,12 @@ D64   := $(ROOT)/build/shmup.d64
 # which is also the shape a multi-level game and the level editor's export
 # workflow both want. See reports/definitive-440-row-memory-audit.md.
 LEVELPRG := $(ROOT)/build/level1.prg
+# THE CAMPAIGN'S SECOND LEVEL. A runnable disk carries every level the sequence
+# can reach, so that Continue on the upgrade screen loads from the same disk the
+# engine booted from rather than needing one swapped in. See CAMPAIGN_SEQUENCE
+# in src/campaign.asm.
+LEVEL2PRG := $(ROOT)/build/level2.prg
+LEVEL2DIR := $(ROOT)/src/level2
 
 # WHICH LEVEL DIRECTORY THE BUILD COMPILES AGAINST.
 #
@@ -167,8 +173,7 @@ sprites-check:
 
 build: sprites-check
 	@mkdir -p build
-	@awk '/^metatileDefs:/,/^METATILE_DEFS_END:/' "$(MAPSRC)" > "$(MAPDEFS)"
-	@awk '/^stageMetatileRows:/,/^STAGE_METATILE_ROWS_END:/' "$(MAPSRC)" > "$(MAPROWS)"
+	@python3 tools/pad_stage_map.py "$(LEVELDIR)" "$(ROOT)/build"
 # THE SECOND -libdir IS WHAT LETS A LEVEL OWN ITS ENCOUNTER SOURCE. The level's
 # wave_programs.asm / wave_encounters.asm live in $(LEVELDIR) and import the
 # ENGINE-owned vocabulary -- movement_format.asm, encounter_format.asm -- which
@@ -186,6 +191,15 @@ build: sprites-check
 	@$(C1541) -format "6502engine,01" d64 "$(D64)" >/dev/null
 	@$(C1541) "$(D64)" -write "$(PRG)" engine >/dev/null
 	@$(C1541) "$(D64)" -write "$(LEVELPRG)" level1 >/dev/null
+# LEVEL 2'S PACKAGE, built with ITS OWN directory on the libdir path so it picks
+# up level 2's map, encounters, charset, palette and turret list. The ENGINE is
+# still built against $(LEVELDIR) -- it needs one level's constants to size
+# nothing at all now, but stage_enemies.asm still claims the sprite window.
+	@python3 tools/pad_stage_map.py "$(LEVEL2DIR)" "$(ROOT)/build/level2"
+	java -jar "$(KA)" src/level_package.asm -libdir "$(ROOT)/build/level2" \
+	      -libdir "$(LEVEL2DIR)" -libdir "$(ROOT)/src" \
+	      -odir "$(ROOT)/build/level2" -o "$(LEVEL2PRG)"
+	@$(C1541) "$(D64)" -write "$(LEVEL2PRG)" level2 >/dev/null
 
 # The disk image is built by `build` above; this target remains so that
 # `make d64` still means something to anyone who types it.

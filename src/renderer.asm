@@ -1873,7 +1873,9 @@ exTop:
     sty topTarget
     lda frameD018,x                     // REAL charset, the page exFrame chose.
                                         // Loaded BEFORE the poll: see exBottom.
-    ldx #APERTURE_D021                  // the playfield background, likewise
+    ldx trnBgColour                     // the playfield background, likewise
+                                        // -- a VARIABLE since the campaign made
+                                        // the resident level changeable
     cpy $d012                           // already there, or already past it?
     beq !split+
     bcc !split+
@@ -1903,7 +1905,7 @@ exTopPhase7:
                                         // nothing it selects is displayed here
     lda $d012                           // record the landing NOW, before the
     sta topLanded                       // second poll moves the beam to 55
-    ldx #APERTURE_D021
+    ldx trnBgColour                     // the resident level's background
     ldy #TOP_SPLIT_LINE
     cpy $d012                           // NEVER SPIN A WHOLE FRAME WITH I SET:
     beq !at55+                          // if 55 has already gone, store at once

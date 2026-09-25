@@ -539,6 +539,8 @@ playerFlashBitmapsEnd:
 // playerInit — the ship at its start position, visible, and dirty.
 // ---------------------------------------------------------------------------
 playerInit:
+    jsr cmpSpeedReset                   // no part-earned pixel survives a death,
+                                        // a respawn or a new level
     lda #0
     sta plyFatal                        // a new game never starts mid-death
     sta plyDead                         // ...nor mid-explosion
@@ -831,6 +833,41 @@ playerInvulnTick:
     sta plyVisible
     rts
 
+playerStepX:
+    lda joyState
+    and #JOY_LEFT
+    bne !notLeft+
+    lda plyX                            // 9-bit decrement; the clamp the caller
+    bne !decLo+                         // runs is what catches a borrow past
+    dec plyXHi                          // zero
+!decLo:
+    dec plyX
+    rts
+!notLeft:
+    lda joyState
+    and #JOY_RIGHT
+    bne !stillX+
+    inc plyX
+    bne !noCarry+
+    inc plyXHi
+!noCarry:
+!stillX:
+    rts
+
+playerStepY:
+    lda joyState
+    and #JOY_UP
+    bne !notUp+
+    dec plyY
+    rts
+!notUp:
+    lda joyState
+    and #JOY_DOWN
+    bne !stillY+
+    inc plyY
+!stillY:
+    rts
+
 // ---------------------------------------------------------------------------
 // playerTick — one frame of movement. joyState in, plyX/plyXHi/plyY out, and
 // plyDirty raised if the ship actually moved.
@@ -941,36 +978,30 @@ playerTick:
     lda plyY
     sta pt_y
 
-    lda joyState
-    and #JOY_UP
-    bne !notUp+
-    dec plyY
-!notUp:
-    lda joyState
-    and #JOY_DOWN
-    bne !notDown+
-    inc plyY
-!notDown:
+    // ---- ONE PIXEL PER HELD AXIS, THEN THE SUB-PIXEL REMAINDER ------------
+    // The base step is untouched and unconditional: a stock ship moves exactly
+    // one pixel a frame per axis, which is the movement model the engine has
+    // always had and which tests/test_production.py asserts to the pixel.
+    //
+    // An upgraded ship accumulates a FRACTION per axis and takes a second step
+    // on that axis when the fraction carries. See playerFracStep for why this
+    // replaced a global frame-counter mask, and for what it can and cannot fix.
+    jsr playerStepX
+    ldx #0
+    jsr cmpSpeedFracStep
+    bcc !noExtraX+
+    jsr playerStepX                     // the earned pixel, this axis only
+!noExtraX:
 
-    lda joyState
-    and #JOY_LEFT
-    bne !notLeft+
-    lda plyX                            // 9-bit decrement; the clamp below is
-    bne !decLo+                         // what catches a borrow past zero
-    dec plyXHi
-!decLo:
-    dec plyX
-!notLeft:
-    lda joyState
-    and #JOY_RIGHT
-    bne !notRight+
-    inc plyX
-    bne !notRight+
-    inc plyXHi
-!notRight:
+    jsr playerStepY
+    ldx #1
+    jsr cmpSpeedFracStep
+    bcc !noExtraY+
+    jsr playerStepY
+!noExtraY:
 
-    jsr playerClampX
-    jsr playerClampY
+    jsr playerClampX                    // AFTER BOTH STEPS, so a boosted frame
+    jsr playerClampY                    // cannot walk through the clamp
 
     lda plyX                            // did anything actually move?
     cmp pt_x

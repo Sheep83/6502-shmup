@@ -4066,6 +4066,27 @@
       "dropperSide": "LEFT"
     },
     {
+      "worldProgress": 350,
+      "waveDefinition": "loop",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT"
+    },
+    {
+      "worldProgress": 450,
+      "waveDefinition": "loop",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT"
+    },
+    {
+      "worldProgress": 550,
+      "waveDefinition": "loop",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT"
+    },
+    {
       "worldProgress": 665,
       "waveDefinition": "up_n_over",
       "species": "RING",

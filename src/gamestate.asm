@@ -68,6 +68,11 @@
 // is still alive -- score, lives and the P currency are all intact and waiting
 // for the upgrade screen that will replace this screen's FIRE destination.
 .const GS_LEVELDONE = 4
+// THE CAMPAIGN IS OVER, all levels cleared. A terminal state with a safe way
+// out: it holds a completion page and FIRE returns to attract. It exists so that
+// the last level's Continue has somewhere legitimate to go -- never LEVEL3,
+// which is not on the disk, and never back round to LEVEL1.
+.const GS_CAMPAIGN_DONE = 5
 
 // --- the old timers, unchanged ----------------------------------------------
 .const GS_ATTRACT_CYCLE = 250       // ~5 PAL seconds per attract page
@@ -97,9 +102,39 @@
 .const GS_HEAD_AT     = SCREEN + 4 * 40 + 14        // "HIGH SCORES"
 .const GS_ROW0_AT     = SCREEN + 7 * 40 + 15        // rows 7,9,11..21, column 15
 .const GS_OVER_AT     = SCREEN + 12 * 40 + 15       // "GAME OVER"
-.const GS_DONE_AT     = SCREEN + 8 * 40 + 13        // "LEVEL COMPLETE"
-.const GS_TOKENS_AT   = SCREEN + 12 * 40 + 14      // "P TOKENS: nn"
+.const GS_DONE_AT     = SCREEN + 2 * 40 + 16        // "UPGRADES"
+.const GS_TOKENS_AT   = SCREEN + 4 * 40 + 14       // "P TOKENS: nn"
 .const GS_DFIRE_AT    = SCREEN + 18 * 40 + 13      // "PRESS FIRE"
+
+// --- the upgrade shop's geometry --------------------------------------------
+// One row per catalogue entry, then a blank line, then CONTINUE. The cursor is
+// a character in the left margin of whichever row is selected, so moving it
+// costs two screen writes rather than a redraw.
+// ONE ROW IS A FIXED LAYOUT AT FIXED OFFSETS, so drawing it is a handful of
+// stores at constant Y rather than a cursor walked along a string.
+//
+//     col  0   the selection cursor, ">" or " "
+//     col  2   the name, GS_UPG_NAME_W wide
+//     col 14   "LV n/m"
+//     col 22   "COST n", or "MAX   " when there is nothing left to buy
+.const GS_UPG_ROW0    = SCREEN + 8 * 40 + 6        // the CURSOR column of row 0
+.const GS_UPG_STRIDE  = 2 * 40                     // a blank line between rows
+.const GS_UPG_NAME_AT = 2
+.const GS_UPG_NAME_W  = 10                         // "SPEED     "
+.const GS_UPG_LVL_AT  = 14                         // "LV n/m", six wide
+.const GS_UPG_COST_AT = 22                         // "COST n", six wide
+.const GS_UPG_W       = GS_UPG_COST_AT + 6         // the whole row
+.const GS_UPG_CURSOR  = 62                         // screen code for ">"
+.const GS_UPG_ROWS    = UPG_COUNT + 1              // the catalogue, plus CONTINUE
+.const GS_UPG_CONT    = UPG_COUNT                  // the CONTINUE row's index
+.const GS_CAMP_AT     = SCREEN + 8 * 40 + 11       // "CAMPAIGN COMPLETE"
+.const GS_MSG_AT      = SCREEN + 20 * 40 + 10      // refusals and confirmations
+.const GS_MSG_W       = 20
+.const GS_MSG_HOLD    = 90                         // frames a message stays up
+
+// Joystick, active low, port 2 -- the same bits src/player.asm reads.
+.const GS_UP    = %00000001
+.const GS_DOWN  = %00000010
 .const GS_IPROMPT_AT  = SCREEN + 10 * 40 + 10      // "ENTER YOUR INITIALS"
 .const GS_ISLOTS_AT   = SCREEN + 14 * 40 + 18       // three letters, cols 18/20/22
 
@@ -163,6 +198,12 @@ gsInitSlot:     .byte 0
 gsInitPrev:     .byte 0             // last frame's stick, for edge detection
 gsInitEdge:     .byte 0
 
+// --- the upgrade shop -------------------------------------------------------
+gsUpgSel:       .byte 0             // which row the cursor is on, 0..GS_UPG_ROWS-1
+gsUpgPrev:      .byte 0             // last frame's stick, for edge detection
+gsUpgMsg:       .byte 0             // frames the message line has left
+gsUpgTmp:       .byte 0
+
 gsRank:         .byte 0             // insertion index from gsScoreQualifies
 gsSeed:         .byte 0
 gsTmp:          .byte 0
@@ -222,6 +263,11 @@ gsRouter:
     jsr gsLevelDoneLoop
     jmp gsRouter
 !notDone:
+    cmp #GS_CAMPAIGN_DONE
+    bne !notCamp+
+    jsr gsCampaignDoneLoop
+    jmp gsRouter
+!notCamp:
     cmp #GS_INITIALS
     bne !attract+
     jsr gsInitialsLoop
@@ -454,53 +500,398 @@ gsMul3:
 // LEVEL COMPLETE
 // ===========================================================================
 // ---------------------------------------------------------------------------
-// gsEnterLevelDone — called by src/boss.asm when the ship has left the top of
-// the screen. THE RUN SURVIVES: this routine resets nothing at all. Score,
-// lives and the P currency are exactly as the level left them, which is the
-// whole point of the state -- the upgrade screen that replaces this one spends
-// that currency.
+// gsEnterLevelDone — the boss is dead and the ship has left the screen.
+//
+// THE RUN SURVIVES: this routine resets nothing at all. Score, lives, the P
+// currency and every purchased upgrade are exactly as the level left them,
+// which is the whole point of the state -- the shop below spends that currency
+// and the next level inherits what it bought.
+//
+// IT IS ENTERED FROM src/boss.asm's EXIT PHASE, not from an interrupt and not
+// from the boss's damage path. By the time this runs lvlPhase is LP_DONE, the
+// scroller is frozen, the arena is empty and the ship has flown off the top --
+// so there is no gameplay left to quiesce beyond taking the executor off the
+// display, which gsBeginNonGame does.
 // ---------------------------------------------------------------------------
 gsEnterLevelDone:
     lda #GS_LEVELDONE
     sta gsState
+    lda #0
+    sta gsUpgSel                        // the cursor starts on the first ITEM,
+    sta gsUpgMsg                        // never on CONTINUE
+    lda #$ff
+    sta gsUpgPrev                       // $ff is "nothing held": active-low, so
+                                        // no edge can fire on the first frame
     jsr gsBeginNonGame
-    jmp gsDrawLevelDone
+    jsr gsClearScreen
+    jmp gsDrawUpgrades
 
 // ---------------------------------------------------------------------------
-// gsLevelDoneLoop — hold the screen until FIRE, then go back to attract.
+// gsLevelDoneLoop — the shop. Stick moves, fire acts, CONTINUE leaves.
 //
-// THE DESTINATION IS TEMPORARY AND SAYS SO. Starting level 2 would mean level
-// loading and a level-scoped reset that do not exist yet, so pressing FIRE
-// returns to the attract loop -- an existing, harmless endpoint. The NEXT task
-// replaces this with the upgrade screen and then the next level.
+// ONE PRESS CANNOT BOTH BUY AND LEAVE, which is the failure this is shaped to
+// avoid and which the brief calls out by name. Two things guarantee it: FIRE is
+// read as a PRESS EDGE, so the button being still held after a purchase does
+// nothing whatever; and CONTINUE is a row that has to be selected deliberately,
+// never the row a purchase leaves the cursor on.
 // ---------------------------------------------------------------------------
 gsLevelDoneLoop:
     jsr gsWaitFrame
     jsr readInput
-    jsr gsDrawLevelDone                 // re-stamped every frame, as every
-                                        // other non-game page is
+
+    // ---- the message line decays -----------------------------------------
+    lda gsUpgMsg
+    beq !noMsg+
+    dec gsUpgMsg
+    bne !noMsg+
+    jsr gsClearMessage
+!noMsg:
+
+    // ---- the stick, as PRESS EDGES ---------------------------------------
+    // joyState is ACTIVE LOW. A press is a bit that is 0 now and was 1 last
+    // frame: (NOT now) AND (last). Anything else is a hold or a release.
+    lda joyState
+    eor #$ff
+    and gsUpgPrev
+    sta gsUpgTmp
+    lda joyState
+    sta gsUpgPrev
+
+    lda gsUpgTmp
+    and #GS_UP
+    beq !noUp+
+    lda gsUpgSel
+    beq !noUp+                          // NO WRAP at either end, deliberately:
+    dec gsUpgSel                        // wrapping from the top item to
+    jsr gsDrawUpgrades                  // CONTINUE is exactly how a cursor ends
+!noUp:                                  // up on it without being aimed there
+    lda gsUpgTmp
+    and #GS_DOWN
+    beq !noDown+
+    lda gsUpgSel
+    cmp #GS_UPG_ROWS - 1
+    bcs !noDown+
+    inc gsUpgSel
+    jsr gsDrawUpgrades
+!noDown:
+
+    lda gsUpgTmp
+    and #GS_FIRE
+    beq !idle+
+    lda gsUpgSel
+    cmp #GS_UPG_CONT
+    bne !buy+
+    jmp gsUpgradeContinue               // its rts is ours. A jmp because the
+!buy:                                   // routine drifted out of branch range
+    jsr gsUpgradeBuy
+    jsr gsDrawUpgrades
+!idle:
+    jmp gsLevelDoneLoop
+
+// ---------------------------------------------------------------------------
+// gsUpgradeBuy — spend on the selected catalogue row, or refuse and say why.
+// ---------------------------------------------------------------------------
+gsUpgradeBuy:
+    ldx gsUpgSel                        // on a catalogue row the selection IS
+    lda cmpUpgrade,x                    // the catalogue index
+    cmp #UPG_MAX_LEVEL
+    bcc !notMax+
+    gsText(gsMsgMaxLine, GS_MSG_AT, GS_MSG_W)
+    jmp !message+
+!notMax:
+    // THE COST OF THE LEVEL BEING BOUGHT. At level n the next one costs entry n.
+    tay
+    lda gsUpgCost,y
+    sta gsUpgTmp
+    lda pkTokensP
+    cmp gsUpgTmp
+    bcs !afford+
+    gsText(gsMsgPoorLine, GS_MSG_AT, GS_MSG_W)
+    jmp !message+
+!afford:
+    sec
+    sbc gsUpgTmp
+    sta pkTokensP                       // the currency lives in src/pickup.asm
+                                        // and what is left carries forward
+    ldx gsUpgSel
+    inc cmpUpgrade,x
+    jsr cmpApplyUpgrades                // the purchase reaches gameplay HERE,
+    jsr cmpSpeedReset                 // not at the next level load. The
+                                        // accumulators restart so the new rate
+                                        // begins from a clean phase
+    gsText(gsMsgBuyLine, GS_MSG_AT, GS_MSG_W)
+!message:
+    lda #GS_MSG_HOLD
+    sta gsUpgMsg
+    rts
+
+// ---------------------------------------------------------------------------
+// gsUpgradeContinue — leave the shop and start the next level, or end the run.
+//
+// THE LOAD HAPPENS HERE AND NOWHERE ELSE. Not in the boss's death path and not
+// in an interrupt: by the time this runs the game has been a non-game state for
+// as long as the player took to shop, the executor is off the display and the
+// only thing running is this loop.
+// ---------------------------------------------------------------------------
+gsUpgradeContinue:
+    jsr gsWaitFireRelease               // one press cannot also act on the page
+                                        // it arrives at
+    jsr cmpHasNextLevel
+    bcs !another+
+    jmp gsEnterCampaignDone             // the last level: END. Never LEVEL3,
+                                        // which is not on the disk, and never
+                                        // round to LEVEL1
+!another:
+    inc cmpLevel                        // the sequence advances BEFORE the load,
+                                        // because cmpLevelName reads cmpLevel
+
+    jsr gsDrawLoading                   // the drive takes about half a second
+    jsr levelLoadRuntime                // src/levelload.asm: the boot loader's
+    bcc !loaded+                        // own code, in a mid-game safe wrapper
+
+    // ---- the load failed, and the run must not continue blind -------------
+    // A BOOT failure halts on a red border because there is nothing to fall
+    // back to. Here there is: the player keeps the run they played and the
+    // campaign ends cleanly, rather than playing a level made of whatever
+    // happens to be in RAM.
+    dec cmpLevel                        // the RESIDENT package is still the old
+    jmp gsEnterCampaignDone             // one, so the index must say so
+!loaded:
+    jsr gsEnterNextLevel
+    lda #GS_PLAYING
+    sta gsState
+    jsr gsEnterGame                     // the executor owns the display again
+    rts
+
+// ---------------------------------------------------------------------------
+// gsEnterNextLevel — adopt the package that has just been loaded.
+//
+// THE RESET BOUNDARY, and the most dangerous few lines in the campaign. Every
+// routine called here is one the BOOT path already calls, in the boot path's
+// order: nothing bespoke, and nothing a level entry needs is invented for it.
+//
+//   terrainApplyPackage   the new level's charset and palette
+//   levelApplySprites     the new level's enemy and boss artwork
+//   terrainInit           colour RAM, $d022/$d023, the transposed sub-rows
+//   turretBuildTables     the new level's turret placement, from its package
+//   ebulletInit           no hostile projectile survives a level
+//   turretInit            every authored turret standing, none visible
+//   gameInit              objects, sorter, player, weapon, collision, sfx,
+//                         level assets, enemies, clip, WAVES (and with them the
+//                         trigger cursor), boss, dropper, token
+//   scrollInit            both pages rebuilt, stageTopRow back to the start
+//
+// WHAT IS DELIBERATELY NOT HERE: pickupInit, which would zero the P currency,
+// and gsResetRun, which would zero the score, the lives and every purchase.
+// Those are RUN state and this is a LEVEL boundary. cmpApplyUpgrades runs last
+// so that a level-local reset cannot quietly undo a purchase.
+// ---------------------------------------------------------------------------
+gsEnterNextLevel:
+    jsr terrainApplyPackage
+    jsr levelApplySprites
+    jsr terrainInit
+    jsr turretBuildTables
+    jsr ebulletInit
+    jsr turretInit
+    jsr gameInit
+    jsr scrollInit
+    jsr cmpApplyUpgrades
+    jsr cmpSpeedReset
+    rts
+
+// ---------------------------------------------------------------------------
+// THE CAMPAIGN IS OVER — a terminal state with one safe way out.
+// ---------------------------------------------------------------------------
+gsEnterCampaignDone:
+    lda #GS_CAMPAIGN_DONE
+    sta gsState
+    jsr gsBeginNonGame
+    jsr gsClearScreen
+    jmp gsDrawCampaignDone
+
+gsCampaignDoneLoop:
+    jsr gsWaitFrame
+    jsr readInput
+    jsr gsDrawCampaignDone
     lda joyState
     and #GS_FIRE
     bne !wait+
-    jsr gsWaitFireRelease               // the old gate: one press cannot also
-                                        // start the game it returns to
+    jsr gsWaitFireRelease
     lda #GS_ATTRACT
     sta gsState
     jsr gsEnterAttract
     rts
 !wait:
-    jmp gsLevelDoneLoop
+    jmp gsCampaignDoneLoop
 
-// ---------------------------------------------------------------------------
-// gsDrawLevelDone — the functional placeholder: what happened, what you are
-// carrying, and what to press.
-// ---------------------------------------------------------------------------
-gsDrawLevelDone:
-    gsText(gsDoneLine, GS_DONE_AT, 14)
-    gsText(gsTokensLine, GS_TOKENS_AT, 10)
+gsDrawCampaignDone:
+    gsText(gsCampLine,  GS_CAMP_AT, 17)
     gsText(gsPressLine, GS_DFIRE_AT, 10)
+    rts
 
-    // the P count, as two digits, straight from the run's own counter
+// ---------------------------------------------------------------------------
+// gsDrawUpgrades — the whole page, re-stamped whenever something changes.
+//
+// NOT EVERY FRAME, unlike the other non-game pages: the shop is static between
+// inputs, and re-stamping it sixty times a second would fight the message
+// line's own timer. It is drawn on entry and after every action instead.
+// ---------------------------------------------------------------------------
+gsDrawUpgrades:
+    gsText(gsUpgHeadLine, GS_DONE_AT, 8)
+    gsText(gsTokensLine, GS_TOKENS_AT, 10)
+    jsr gsDrawTokenCount
+
+    ldx #0
+!row:
+    stx gsUpgTmp
+    jsr gsUpgRowAddr
+    jsr gsDrawUpgradeRow
+    ldx gsUpgTmp
+    inx
+    cpx #UPG_COUNT
+    bne !row-
+
+    ldx #GS_UPG_CONT                    // ...and the CONTINUE row below them
+    stx gsUpgTmp
+    jsr gsUpgRowAddr
+    ldy #GS_UPG_NAME_AT
+    ldx #0
+!cont:
+    lda gsContLine,x
+    sta (gsDst),y
+    iny
+    inx
+    cpx #8
+    bne !cont-
+
+    jsr gsDrawCursor
+    rts
+
+// gsUpgTmp = the row index -> gsDst = GS_UPG_ROW0 + index * GS_UPG_STRIDE.
+gsUpgRowAddr:
+    lda #<GS_UPG_ROW0
+    sta gsDst
+    lda #>GS_UPG_ROW0
+    sta gsDst + 1
+    ldx gsUpgTmp
+    beq !done+
+!add:
+    lda gsDst
+    clc
+    adc #<GS_UPG_STRIDE
+    sta gsDst
+    lda gsDst + 1
+    adc #>GS_UPG_STRIDE
+    sta gsDst + 1
+    dex
+    bne !add-
+!done:
+    rts
+
+// One catalogue row at gsDst, for the entry in gsUpgTmp.
+gsDrawUpgradeRow:
+    // ---- the name ---------------------------------------------------------
+    // One fixed-width name per entry, so entry n starts at n * GS_UPG_NAME_W.
+    lda #0                              // offset = index * GS_UPG_NAME_W
+    ldx gsUpgTmp
+    beq !nameBase+
+!mul:
+    clc
+    adc #GS_UPG_NAME_W
+    dex
+    bne !mul-
+!nameBase:
+    tax                                 // X = the offset into gsUpgNames
+    ldy #GS_UPG_NAME_AT
+!name:
+    lda gsUpgNames,x
+    sta (gsDst),y
+    inx
+    iny
+    cpy #GS_UPG_NAME_AT + GS_UPG_NAME_W
+    bne !name-
+
+    // ---- "LV n/m" ---------------------------------------------------------
+    ldy #GS_UPG_LVL_AT
+    ldx #0
+!lv:
+    lda gsLvLine,x
+    sta (gsDst),y
+    iny
+    inx
+    cpx #3
+    bne !lv-
+    ldx gsUpgTmp
+    lda cmpUpgrade,x
+    clc
+    adc #GS_DIGIT0
+    sta (gsDst),y
+    iny
+    lda #47                             // "/"
+    sta (gsDst),y
+    iny
+    lda #UPG_MAX_LEVEL + GS_DIGIT0
+    sta (gsDst),y
+
+    // ---- "COST n", or "MAX   " -------------------------------------------
+    ldx gsUpgTmp
+    lda cmpUpgrade,x
+    cmp #UPG_MAX_LEVEL
+    bcc !cost+
+    ldy #GS_UPG_COST_AT
+    ldx #0
+!maxed:
+    lda gsMaxLine,x
+    sta (gsDst),y
+    iny
+    inx
+    cpx #6
+    bne !maxed-
+    rts
+!cost:
+    tay                                 // level n -> the cost of level n + 1
+    lda gsUpgCost,y
+    pha
+    ldy #GS_UPG_COST_AT
+    ldx #0
+!costText:
+    lda gsCostLine,x
+    sta (gsDst),y
+    iny
+    inx
+    cpx #5
+    bne !costText-
+    pla
+    clc
+    adc #GS_DIGIT0                      // a cost is one digit; the guard beside
+    sta (gsDst),y                       // gsUpgCost is what keeps that true
+    rts
+
+// The cursor: ">" on the selected row, a space on every other.
+gsDrawCursor:
+    ldx #0
+!row:
+    stx gsUpgTmp
+    jsr gsUpgRowAddr
+    lda gsUpgTmp
+    cmp gsUpgSel
+    bne !blank+
+    lda #GS_UPG_CURSOR
+    jmp !put+
+!blank:
+    lda #GS_SPACE
+!put:
+    ldy #0                              // column 0 of the row IS the cursor
+    sta (gsDst),y                       // column, so no negative offset is
+                                        // needed -- an earlier version used
+                                        // (gsDst),y with y = $ff and added 255
+    ldx gsUpgTmp
+    inx
+    cpx #GS_UPG_ROWS
+    bne !row-
+    rts
+
+gsDrawTokenCount:
     lda pkTokensP
     ldx #0
 !tens:
@@ -521,6 +912,32 @@ gsDrawLevelDone:
     adc #GS_DIGIT0
     sta GS_TOKENS_AT + 11
     rts
+
+gsClearMessage:
+    lda #GS_SPACE
+    ldy #GS_MSG_W - 1
+!clr:
+    sta GS_MSG_AT,y
+    dey
+    bpl !clr-
+    rts
+
+gsDrawLoading:
+    gsText(gsLoadLine, GS_MSG_AT, GS_MSG_W)
+    rts
+
+// --- the catalogue's numbers ------------------------------------------------
+// PRICED IN COMPLETED P TOKENS, WHICH ARE NOT PICKUPS. pkTokensP counts banked
+// UNITS and PICKUP_P_PER_UNIT pickups charge one of them, so a cost here is
+// multiplied by three before the player ever sees it in the arena. The first
+// prices were 3 and 5, which quietly asked for nine and fifteen pickups.
+gsUpgCost:
+    .byte 1                             // level 0 -> 1: one completed P token
+    .byte 2                             // level 1 -> 2: two
+.if (* - gsUpgCost != UPG_MAX_LEVEL) {
+    .error "one cost per purchasable upgrade level"
+}
+
 
 // ===========================================================================
 // INITIALS
@@ -860,6 +1277,10 @@ gsResetRun:
                                         // through somebody else's set.
     jsr hudPReset                       // and the HUD shows that, rather than
                                         // the last run's boxes
+    jsr cmpResetRun                     // back to LEVEL1 with a stock ship: the
+                                        // campaign index and every purchased
+                                        // upgrade are RUN state, exactly like
+                                        // the score and the currency above
     lda hudDirty
     ora #HUD_DIRTY_LIVES | HUD_DIRTY_SCORE
     sta hudDirty
@@ -1124,12 +1545,20 @@ gsClearScreen:
     // amount of bank or page discipline could have fixed this; the page simply
     // had no colour owner. It has one now.
     //
-    // THE VALUE IS TERRAIN_COLOUR_RAM, not a text colour, and that is
-    // deliberate: bit 3 selects multicolour for the cell and the low nibble is
-    // white, so with $d016's MCM bit off -- which gsBeginNonGame guarantees --
-    // every cell reads as plain white text, and the value gameplay expects to
-    // find is restored at the same time. One fill satisfies both readers.
-    lda #TERRAIN_COLOUR_RAM
+    // THE VALUE IS THE RESIDENT LEVEL'S COLOUR-RAM FILL, not a text colour, and
+    // that is deliberate: bit 3 selects multicolour for the cell and the low
+    // nibble is its colour, so with $d016's MCM bit off -- which gsBeginNonGame
+    // guarantees -- every cell reads as plain text in that colour, and the
+    // value gameplay expects to find is restored at the same time. One fill
+    // satisfies both readers.
+    //
+    // IT IS trnCramValue AND NOT THE COMPILE-TIME CONSTANT, and that is what
+    // the title screen's colour was telling us. It used to load
+    // TERRAIN_COLOUR_RAM -- the value of whatever level the ENGINE was built
+    // against -- so a LEVELDIR=src/level2 build drew its title text in level
+    // 2's light grey (15) instead of level 1's brown (9). The title screen is
+    // not level content; the leak was this fill.
+    lda trnCramValue
     ldx #0
 !col:
     sta COLOUR_RAM + $000,x
@@ -1149,7 +1578,17 @@ gsInfOnLine:   .text "INFINITE LIVES: ON "        // 19, so one covers the other
 gsHeadLine:    .text "HIGH SCORES"                // 11
 gsOverLine:    .text "GAME OVER"                  // 9
 gsIPromptLine: .text "ENTER YOUR INITIALS"        // 19
-gsDoneLine:    .text "LEVEL COMPLETE"              // 14
+gsUpgHeadLine: .text "UPGRADES"                    // 8
+gsCampLine:    .text "CAMPAIGN COMPLETE"           // 17
+gsContLine:    .text "CONTINUE"                    // 8
+gsLvLine:      .text "LV "                         // 3, then "n/m"
+gsCostLine:    .text "COST "                       // 5, then one digit
+gsMaxLine:     .text "MAX   "                      // 6, the same width as COST
+gsMsgBuyLine:  .text "UPGRADE INSTALLED   "        // GS_MSG_W
+gsMsgPoorLine: .text "NOT ENOUGH P TOKENS "        // GS_MSG_W
+gsMsgMaxLine:  .text "ALREADY AT MAXIMUM  "        // GS_MSG_W
+gsLoadLine:    .text "LOADING NEXT LEVEL  "        // GS_MSG_W
+gsUpgNames:    .text "SPEED     "                  // GS_UPG_NAME_W per entry
 gsTokensLine:  .text "P TOKENS: "                  // 10, then two digits
 gsPressLine:   .text "PRESS FIRE"                  // 10
 .encoding "petscii_upper"

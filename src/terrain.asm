@@ -53,25 +53,43 @@
 // here.
 
 .const METATILE_W        = 4
-.const METATILE_H        = 4
+.const METATILE_H        = LEVELPKG_METATILE_H   // the shared contract
 .const METATILES_PER_ROW = 10
 
 .if (METATILES_PER_ROW * METATILE_W != SCREEN_COLS) {
     .error "METATILES_PER_ROW * METATILE_W must tile the screen exactly"
 }
 
-// The engine DERIVES the stage height from the level package. STAGE_ROWS in
-// src/scroll.asm is checked against this rather than being restated, so a
-// level with a different number of metatile rows cannot silently disagree with
-// the scroller that walks them.
-.const TERRAIN_STAGE_ROWS = STAGE_METATILE_ROWS * METATILE_H
+// THE ENGINE'S STAGE HEIGHT IS THE CONTRACT'S, NOT THE RESIDENT LEVEL'S.
+//
+// It used to be STAGE_METATILE_ROWS * METATILE_H -- the authored height of
+// whatever level the engine happened to be BUILT against -- which made the
+// scroller's wrap, its start row and its completion boundary depend on
+// LEVELDIR. Building with LEVELDIR=src/level2 produced a 552-row engine; the
+// campaign builds with level 1 and gets an 800-row one. Two different games
+// from one source tree, decided by a Makefile variable.
+//
+// It is STILL COMPILE-TIME, and deliberately so -- runtime-variable stage
+// height is the agreed follow-up and is not attempted here. What changed is
+// WHERE the number comes from: LEVELPKG_STAGE_ROWS, the shared contract that
+// also tells tools/pad_stage_map.py what to pad every package up to. One
+// number, one place, and no LEVELDIR in it.
+.const TERRAIN_STAGE_ROWS = LEVELPKG_STAGE_ROWS * METATILE_H
 
 // --- the glyph namespace ----------------------------------------------------
 // The metatile defs are full of literal character codes in this namespace, so
 // the base must match what the level editor emitted: rebasing the codes would
 // mean transforming the whole map through something nobody can check by eye.
 .const TERRAIN_GLYPH_BASE = 96
-.if (TERRAIN_GLYPH_BASE + TERRAIN_GLYPH_COUNT > 256) {
+
+// THE CEILING, NOT THIS LEVEL'S COUNT. The glyphs arrive in the level package
+// now, so the engine reserves a window big enough for any level it will load
+// and the actual count is a runtime byte (trnGlyphCount). TERRAIN_GLYPH_COUNT
+// still exists -- the PACKAGE build uses it to size what it emits -- but the
+// engine must not assume the resident level's value, because the resident level
+// changes.
+.const TERRAIN_GLYPH_MAX = 128
+.if (TERRAIN_GLYPH_BASE + TERRAIN_GLYPH_MAX > 256) {
     .error "the terrain glyph namespace runs past character code 255"
 }
 
@@ -105,16 +123,26 @@
     .error "the terrain charset and the blank aperture charset must differ"
 }
 
-* = TERRAIN_GLYPHS "terrain glyphs"
-#import "stage_charset.asm"      // declares terrainGlyphs/terrainGlyphsEnd
-                                        // and self-checks its own byte count
+// THE GLYPHS ARE NO LONGER ASSEMBLED HERE. They used to be -- `#import
+// "stage_charset.asm"` at this address -- which made the resident level's
+// artwork part of the ENGINE binary and therefore unchangeable at run time. A
+// campaign loads a second level whose charset is different (128 glyphs against
+// level 1's 80, in different colours), so the bitmaps moved into the level
+// package and terrainApplyPackage copies them into this window at level init.
+//
+// The window is now plain RAM the PRG zero-fills, which is the correct resting
+// state: a glyph code nothing has loaded renders as $d021 rather than as a
+// fragment of the previous level.
+.const TERRAIN_GLYPHS_END = TERRAIN_GLYPHS + TERRAIN_GLYPH_MAX * 8
 
-.if (terrainGlyphsEnd > TERRAIN_CHARSET + $800) {
-    .error "the terrain glyphs run past the end of their charset window"
+.if (TERRAIN_GLYPHS_END > TERRAIN_CHARSET + $800) {
+    .error "the terrain glyph window runs past the end of the charset"
 }
 .if (TERRAIN_GLYPHS < $0810) {
-    .error "the terrain glyphs would overwrite the BASIC stub"
+    .error "the terrain glyph window would overwrite the BASIC stub"
 }
+// The terrain window is checked against the turret glyphs in src/turrets.asm,
+// which is parsed after this file and is where TURRET_GLYPHS is declared.
 
 // ===========================================================================
 // The authored map. IT IS NOT IN THIS BINARY AT ALL.
@@ -149,7 +177,7 @@
 // fits the region the package was compiled against. Both read the same
 // stage_config.asm, so a level too tall for its budget fails here as well as
 // there, and it fails whichever of the two is assembled first.
-.if (STAGE_METATILE_ROWS * METATILES_PER_ROW > LEVELPKG_MAP_MAX) {
+.if (LEVELPKG_STAGE_ROWS * METATILES_PER_ROW > LEVELPKG_MAP_MAX) {
     .error "the stage map has outgrown the level package's map budget"
 }
 .if (STAGE_METATILE_COUNT * 16 > LEVELPKG_DEFS_MAX) {
@@ -194,8 +222,8 @@ trTiles: .fill 4 * TR_TILE_STRIDE, 0
 .if ((trTiles & $ff) != 0) {
     .error "the sub-row tables must be page aligned: the row selector patches high bytes only"
 }
-.if (STAGE_METATILE_COUNT * METATILE_W > TR_TILE_STRIDE) {
-    .error "a sub-row table has outgrown its 256-byte stride"
+.if (LEVELPKG_DEFS_MAX / 16 * METATILE_W != TR_TILE_STRIDE) {
+    .error "the transpose walks the whole definition reservation: it must fill the stride exactly"
 }
 
 // ===========================================================================
@@ -228,11 +256,76 @@ trIds:     .fill METATILES_PER_ROW, 0   // the cached metatile row's ten IDs
 trRowBase: .byte 0, 0                   // metatileRow * METATILES_PER_ROW
 trCachedLo: .byte 0                     // which metatile row trIds holds...
 trCachedHi: .byte 0                     // ...$ff in the high byte = nothing
+
+// --- THE RESIDENT LEVEL'S RENDER IDENTITY, copied out of its package --------
+// These were compiled-in constants until the campaign made the resident level
+// changeable. trnBgColour is read by the renderer's two aperture splits every
+// frame; the other two are read only at level init.
+trnBgColour:   .byte 0                  // $d021, the playfield background
+trnCramValue:  .byte 0                  // the colour-RAM fill, bit 3 already set
+trnGlyphCount: .byte 0                  // how many glyphs this level authored
 terrainStateEnd:
 
 .if (terrainStateEnd > $6c80) {
     .error "the terrain state has outgrown its $6c00 segment"
 }
+
+// terrainApplyPackage lives in its own run because the terrain code segment
+// ends at $6980, where src/vicbank.asm begins, and adding the routine to it
+// overlapped the two. $6b05-$6bff is the gap the vic bank leaves below the
+// terrain state at $6c00.
+* = $6b10 "terrain package adopt"
+
+
+
+// ---------------------------------------------------------------------------
+// terrainApplyPackage — adopt the resident package's charset and palette.
+//
+// CALLED BEFORE terrainInit, AND AGAIN ON EVERY LEVEL LOAD. Everything it reads
+// lives above $e000, so it requires the KERNAL banked OUT ($01 = $35); every
+// caller is already in that state.
+//
+// THE GLYPH WINDOW IS CLEARED FIRST, all TERRAIN_GLYPH_MAX of it, not just the
+// part the new level fills. Level 1 authors 80 glyphs and level 2 authors 128:
+// loading level 1 after level 2 without the clear would leave level 2's glyphs
+// 80..127 sitting in the window, and any metatile that referenced a code that
+// high would draw the previous level's artwork.
+// ---------------------------------------------------------------------------
+terrainApplyPackage:
+    // ---- 1. the glyphs: the WHOLE window, unconditionally -----------------
+    // ALL 1,024 BYTES, not trnGlyphCount * 8, and that is the stronger contract
+    // rather than the lazier one. The package reserves the full window at
+    // LEVELPKG_CHARS and KickAssembler zero-fills whatever the level did not
+    // author, so a level with 80 glyphs supplies 80 glyphs and 384 zero bytes.
+    // Copying the lot therefore CLEARS the previous level's high glyphs as a
+    // side effect of loading the new one's -- no separate blanking pass, and no
+    // way for a stale glyph to survive a level change. A count-driven copy would
+    // have left level 2's glyphs 80..127 in the window when level 1 loaded after
+    // it, and any metatile naming a code that high would have drawn them.
+    ldx #0
+!copy:
+    .for (var p = 0; p < TERRAIN_GLYPH_MAX * 8 / 256; p++) {
+        lda LEVELPKG_CHARS + p * 256,x
+        sta TERRAIN_GLYPHS + p * 256,x
+    }
+    inx
+    bne !copy-
+
+    lda LEVELPKG_GLYPHN                 // recorded for diagnostics and tests;
+    sta trnGlyphCount                   // the copy above does not depend on it
+
+    // ---- 2. the palette ---------------------------------------------------
+    lda LEVELPKG_PAL + 0
+    sta trnBgColour                     // $d021 is the RENDERER's to write, at
+                                        // rasters 55 and 248; see the note below
+    lda LEVELPKG_PAL + 1
+    sta $d022                           // bit pair 01
+    lda LEVELPKG_PAL + 2
+    sta $d023                           // bit pair 10
+    lda LEVELPKG_PAL + 3
+    sta trnCramValue
+    rts
+
 
 * = $6800 "terrain code"
 
@@ -246,10 +339,10 @@ terrainStateEnd:
 // ---------------------------------------------------------------------------
 terrainInit:
     // ---- colour RAM: one value, the whole screen -------------------------
-    // TERRAIN_COLOUR_RAM is 9 = 8 | 1: bit 3 selects MULTICOLOUR for the cell
+    // The fill value is the package's: bit 3 selects MULTICOLOUR for the cell
     // and the low three bits are its bit-pair-11 colour. Both pages share this
     // one colour RAM, which a level-global colour makes correct for free.
-    lda #TERRAIN_COLOUR_RAM
+    lda trnCramValue
     ldx #0
 !fill:
     sta COLOUR_RAM + $000,x
@@ -271,10 +364,16 @@ terrainInit:
     // APERTURE_D021 and write the register at rasters 55 and 248. Terrain owns
     // the colour, the renderer owns the register -- the same division
     // src/hud.asm already lives by.
-    lda #TERRAIN_MC_COLOUR_1
-    sta $d022                           // bit pair 01
-    lda #TERRAIN_MC_COLOUR_2
-    sta $d023                           // bit pair 10
+    // THE MULTICOLOUR PAIR IS terrainApplyPackage's, AND WRITING IT HERE WAS
+    // THE LEVEL 2 CORRUPTION. These two stores used to load the compile-time
+    // TERRAIN_MC_COLOUR_1/2 -- the colours of whatever level the ENGINE was
+    // built against. terrainApplyPackage sets $d022/$d023 from the loaded
+    // package and runs FIRST, so on a runtime level change these overwrote the
+    // new level's palette with level 1's: level 2 asks for $d022 = 0, got 15,
+    // and every black chip body on its PCB terrain came out light grey.
+    //
+    // Nothing is written here now. terrainApplyPackage owns the pair, on the
+    // boot path and the level-change path alike.
 
     // ---- multicolour TEXT mode -------------------------------------------
     // Read-modify-write on purpose: $d016 also carries CSEL and XSCROLL, and
@@ -341,7 +440,22 @@ terrainInit:
     clc
     adc #METATILE_W
     tax
-    cpx #STAGE_METATILE_COUNT * METATILE_W
+    // THE WHOLE RESERVATION, NOT THIS BUILD'S METATILE COUNT.
+    //
+    // It was `cpx #STAGE_METATILE_COUNT * METATILE_W` -- the count of whatever
+    // level the ENGINE was compiled against -- and that was the second half of
+    // the level 2 corruption. Level 1 authors 41 definitions and level 2 authors
+    // 49, so an engine built for level 1 transposed only 41 of them: every map
+    // cell naming metatile 41..48 read sub-row entries that had never been
+    // written, and level 2's terrain lost exactly the detail those tiles carry.
+    //
+    // Transposing the full LEVELPKG_DEFS reservation fixes it without a count.
+    // The package reserves 64 definitions and zero-fills the ones the level did
+    // not author, so the pass both loads this level's tiles AND clears the
+    // previous level's out of the tail -- the same argument terrainApplyPackage
+    // makes for copying the whole charset window. TR_TILE_STRIDE is 256 and
+    // 64 * METATILE_W is 256, so the transpose exactly fills the tables.
+    cpx #0                              // wrapped past 255: all 64 done
     bne !tile-
     rts
 

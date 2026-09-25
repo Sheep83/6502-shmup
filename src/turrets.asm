@@ -32,9 +32,23 @@
 //   world row R+1 , col C     BL = 228      col C+1   BR = 229
 // ===========================================================================
 
-#import "stage_turrets.asm"      // TURRET_TOTAL, turretCols, turretRows.
-                                        // Constants and lists only: it emits no
-                                        // bytes and moves no program counter.
+// THE AUTHORED TURRET LIST IS NO LONGER COMPILED IN. It used to arrive here as
+// `#import "stage_turrets.asm"` -- TURRET_TOTAL and two assembler lists -- which
+// baked level 1's five turrets, at level 1's rows, into the ENGINE. A campaign
+// loads a second level with a different list (level 2 has none at all), so the
+// list moved into the level package and turretBuildTables derives every table
+// below from it at level init. See src/levelpkg.asm.
+//
+// THE POOL IS NOW A FIXED EIGHT, whatever the level authors. Sizing the arrays
+// and the scans to the level's own count would have meant turning eleven
+// `ldx #TURRET_MAX - 1` loops into variable-bound ones, each needing an
+// empty-list guard; fixing the pool at the engine's capacity instead leaves
+// every loop exactly as it was and makes a surplus slot simply a DEAD turret --
+// turretBuildTables clears its alive flag and no authored row ever names it.
+// Eight is also what this file was written around: the note in turretFireTick
+// about "two thirds of every volley's turret scan walks eight entries" predates
+// level 1 settling on five.
+.const TURRET_MAX = LEVELPKG_TRT_MAX
 
 // ---------------------------------------------------------------------------
 // The glyph namespace: 226..229, being TL, TR, BL, BR.
@@ -43,8 +57,8 @@
 // zero-filled by the PRG. The guards below keep the two namespaces disjoint.
 .const TURRET_GLYPH_BASE = 226
 .const TURRET_GLYPH_SPAN = 4            // TL, TR, BL, BR -- ONE shared body
-.const TURRET_BODY_W     = 2            // characters
-.const TURRET_BODY_H     = 2
+.const TURRET_BODY_W     = LEVELPKG_TRT_BODY_W    // the shared contract:
+.const TURRET_BODY_H     = LEVELPKG_TRT_BODY_H    // src/levelpkg.asm
 
 .if (TURRET_GLYPH_BASE < TERRAIN_GLYPH_BASE + TERRAIN_GLYPH_COUNT) {
     .error "the turret glyphs overlap the terrain glyph namespace"
@@ -184,8 +198,8 @@
 .if (TURRET_GLYPHS + TURRET_GLYPH_SPAN * 8 > TERRAIN_CHARSET + $800) {
     .error "the turret glyphs run past the end of the terrain charset window"
 }
-.if (TURRET_GLYPHS < terrainGlyphsEnd) {
-    .error "the turret glyphs overlap the terrain glyph bitmaps"
+.if (TURRET_GLYPHS < TERRAIN_GLYPHS_END) {
+    .error "the turret glyphs overlap the terrain glyph window"
 }
 
 // A lit dome on a shadowed octagonal mounting plate, with a central lamp.
@@ -250,29 +264,18 @@ turretGlyphsEnd:
 // assembly time from the authored list: one byte per metatile row, holding the
 // turret that lives there or $ff. The scan becomes `lda abs,x / bmi`, the same
 // row now measures 968, and the inner path stops depending on the turret COUNT
-// at all. It costs STAGE_METATILE_ROWS bytes outside VIC bank 0 -- 105 for
+// at all. It costs LEVELPKG_STAGE_ROWS bytes outside VIC bank 0 -- 105 for
 // level 1 -- which is the same trade src/terrain.asm already makes twice, for
 // the transposed sub-row tables and the metatile-ID cache.
-.const TURRET_ROW_PHASE = 1             // authored rows are 1 (mod METATILE_H)
+.const TURRET_ROW_PHASE = LEVELPKG_TRT_ROW_PHASE  // the shared contract
 .const TURRET_NONE      = $ff           // no turret in this metatile row
 
-.for (var t = 0; t < TURRET_TOTAL; t++) {
-    .if (mod(turretRows.get(t), METATILE_H) != TURRET_ROW_PHASE) {
-        .error "authored turret row is not metatileRow * METATILE_H + 1"
-    }
-    .if (turretRows.get(t) + TURRET_BODY_H - 1 >= TERRAIN_STAGE_ROWS) {
-        .error "an authored turret body runs off the bottom of the stage"
-    }
-    .if (turretCols.get(t) + TURRET_BODY_W > SCREEN_COLS) {
-        .error "an authored turret body runs off the right of the screen"
-    }
-    .for (var u = 0; u < t; u++) {
-        .if (floor(turretRows.get(u) / METATILE_H)
-             == floor(turretRows.get(t) / METATILE_H)) {
-            .error "two authored turrets share a metatile row: turretAtMetaRow holds only one"
-        }
-    }
-}
+// THE AUTHORING GUARDS MOVED WITH THE LIST. They checked the authored rows and
+// columns at assembly time, and the authored list is no longer visible here --
+// it is in the level package. src/level_package.asm now makes exactly the same
+// checks, against the same lists, in the build that emits them, so a bad turret
+// is still a build error and is still caught in the level that authored it.
+
 // ELEVEN BITS OF STAGE ROW AND NINE OF METATILE ROW, since the level package
 // made 440-metatile-row stages possible. Both numbers used to be smaller and
 // neither limit was visible at 105 rows:
@@ -288,16 +291,12 @@ turretGlyphsEnd:
 .if (TERRAIN_STAGE_ROWS > 2047) {
     .error "a stage row no longer fits the eleven bits the turret derivation carries"
 }
-.if (STAGE_METATILE_ROWS > 512) {
+.if (LEVELPKG_STAGE_ROWS > 512) {
     .error "turretAtMetaRow is two pages: the stage has too many metatile rows"
 }
-.if (TURRET_TOTAL > 127) {
+.if (TURRET_MAX > 127) {
     .error "a turret index must stay positive: turretOverlayRow tests TURRET_NONE with bmi"
 }
-.if (turretCols.size() != TURRET_TOTAL || turretRows.size() != TURRET_TOTAL) {
-    .error "the authored turret lists do not match TURRET_TOTAL"
-}
-
 // The lookup, built by the assembler: start every metatile row at
 // TURRET_NONE, then stamp in each authored turret. Written as a stamping pass
 // rather than a per-row search because a search has to answer "which of the
@@ -313,14 +312,6 @@ turretGlyphsEnd:
 // THE LIST IS THE WHOLE TABLE, not just the stage. Rows past the end of the
 // level keep TURRET_NONE so that the two-page lookup can select its base from
 // bit 8 alone, without also having to know how tall this particular level is.
-.var turretAtRow = List()
-.for (var m = 0; m < 2 * 256; m++) {
-    .eval turretAtRow.add(TURRET_NONE)
-}
-.for (var t = 0; t < TURRET_TOTAL; t++) {
-    .eval turretAtRow.set(floor(turretRows.get(t) / METATILE_H), t)
-}
-
 // MOVED FROM $6d00 TO THE RUN THE TERRAIN MAP VACATED.
 //
 // turretAtMetaRow became two pages when the level package made 440-row stages
@@ -339,27 +330,27 @@ turretGlyphsEnd:
 // rather than sizing the table to the stage keeps that selection a compare
 // against a constant instead of against the level's height.
 .const TURRET_META_PAGES = 2
-turretAtMetaRow: .fill TURRET_META_PAGES * 256, turretAtRow.get(i)
+turretAtMetaRow: .fill TURRET_META_PAGES * 256, TURRET_NONE
 
 // metatileRow, derived from the authored world row. Not read by the renderer
 // -- the table above already answers its question -- but it is what the table
 // is built from, and a test reads it to prove the two agree.
-turretMetaRow: .fill TURRET_TOTAL, floor(turretRows.get(i) / METATILE_H)
-turretCol:     .fill TURRET_TOTAL, turretCols.get(i)
+turretMetaRow: .fill TURRET_MAX, 0
+turretCol:     .fill TURRET_MAX, 0
 
 // The authored TOP body row, sixteen bits. The overlay is asked about a stage
 // row, but combat asks the other way round -- "where is turret 3 right now" --
 // and that question starts from the authored row. Deriving it from
 // turretMetaRow would be a 16-bit multiply per turret per frame for a value
 // that never changes.
-turretRowLo:   .fill TURRET_TOTAL, <turretRows.get(i)
-turretRowHi:   .fill TURRET_TOTAL, >turretRows.get(i)
+turretRowLo:   .fill TURRET_MAX, 0
+turretRowHi:   .fill TURRET_MAX, 0
 
 // The body's LEFT EDGE in hardware sprite X, nine bits, and it is CONSTANT:
 // the playfield scrolls vertically only, so a turret's column never moves.
 // Character column c's left edge is sprite X 24 + 8c.
-turretXLo:     .fill TURRET_TOTAL, <(24 + turretCols.get(i) * 8)
-turretXHi:     .fill TURRET_TOTAL, >(24 + turretCols.get(i) * 8)
+turretXLo:     .fill TURRET_MAX, 0
+turretXHi:     .fill TURRET_MAX, 0
 
 // The idle animation: white, red, yellow, red.
 turretPulseTable: .byte 1, 2, 7, 2
@@ -398,18 +389,18 @@ turretTablesEnd:
 * = $6e00 "turret state"
 
 // --- authored lifetime -----------------------------------------------------
-turretAlive:   .fill TURRET_TOTAL, 1    // 1 = standing. THE restoration switch.
-turretHealth:  .fill TURRET_TOTAL, 0    // TURRET_START_HEALTH down to 0
+turretAlive:   .fill TURRET_MAX, 1    // 1 = standing. THE restoration switch.
+turretHealth:  .fill TURRET_MAX, 0    // TURRET_START_HEALTH down to 0
 
 // --- derived once a frame from the DISPLAYED page's geometry ---------------
 // turretWorldTick writes all three; nothing else may.
-turretLogY:    .fill TURRET_TOTAL, 0    // the sprite Y a sprite would need to
+turretLogY:    .fill TURRET_MAX, 0    // the sprite Y a sprite would need to
                                         // cover the body's top pixel row, so
                                         // the hitscan can compare turrets and
                                         // enemies on ONE scale
-turretVisible: .fill TURRET_TOTAL, 0    // 1 = the whole 16-pixel body is inside
+turretVisible: .fill TURRET_MAX, 0    // 1 = the whole 16-pixel body is inside
                                         // the aperture. COMBAT gate.
-turretPaintRow:.fill TURRET_TOTAL, 0    // matrix row of the first body cell row
+turretPaintRow:.fill TURRET_MAX, 0    // matrix row of the first body cell row
                                         // that is on the page, or TURRET_ROW_NONE.
                                         // PRESENTATION gate, and deliberately
                                         // NOT the same thing as turretVisible:
@@ -418,19 +409,19 @@ turretPaintRow:.fill TURRET_TOTAL, 0    // matrix row of the first body cell row
                                         // gate and not the combat one, or a
                                         // half-on turret paints in flat terrain
                                         // colour.
-turretPaintPair:.fill TURRET_TOTAL, 0   // 1 = two body rows are on the page,
+turretPaintPair:.fill TURRET_MAX, 0   // 1 = two body rows are on the page,
                                         // 0 = only the one at turretPaintRow
 
 // --- what colour RAM currently holds ---------------------------------------
-turretCramRow: .fill TURRET_TOTAL, 0    // the matrix row this turret last
+turretCramRow: .fill TURRET_MAX, 0    // the matrix row this turret last
                                         // painted, or TURRET_ROW_NONE. The
                                         // whole of "put the colour back".
-turretHitTimer:.fill TURRET_TOTAL, 0    // frames of hit flash remaining
+turretHitTimer:.fill TURRET_MAX, 0    // frames of hit flash remaining
 
 // Frames until this turret may fire. Counted down only while it is combat-
 // visible and alive, and slammed back to the full interval the moment it is
 // not -- so it measures time ON the aperture, not time since the last shot.
-turretFireTimer:.fill TURRET_TOTAL, 0
+turretFireTimer:.fill TURRET_MAX, 0
 
 // --- globals ---------------------------------------------------------------
 // The pulse is ONE phase for every turret: turretPulseTable is indexed by a
@@ -450,6 +441,11 @@ trtDeadPending:.byte 0
 // aperture for about a third of the level, so without this two thirds of every
 // volley's turret scan walks eight entries to reject all eight.
 trtVisibleMask:.byte 0
+
+// HOW MANY OF THE EIGHT SLOTS THIS LEVEL AUTHORED. The pool is always eight and
+// every scan walks all eight; this says which of them are real. Slots at or
+// above it are held dead by turretBuildTables and no metatile row names them.
+turretCount:   .byte 0
 
 // The stageTopRow the page derivation below was last built for, and the two
 // reasons the colour might need repainting. Both exist because the expensive
@@ -480,8 +476,8 @@ trtRepaint:    .byte 0                 // the bodies moved, the pulse stepped,
 // trtNextHi is $ff when no shadow stands. A real stage row's high byte is 0 or
 // 1, so the sign bit is the whole test, and a shadow can never be mistaken for
 // a page the scroller did not go to.
-trtNextRow:    .fill TURRET_TOTAL, 0   // shadow turretPaintRow
-trtNextPair:   .fill TURRET_TOTAL, 0   // shadow turretPaintPair
+trtNextRow:    .fill TURRET_MAX, 0   // shadow turretPaintRow
+trtNextPair:   .fill TURRET_MAX, 0   // shadow turretPaintPair
 trtNextLo:     .byte 0                 // the stageTopRow the shadow is for
 trtNextHi:     .byte $ff               // $ff = nothing prepared
 trtFlash:      .byte 0                 // how many hit flashes are running
@@ -493,6 +489,7 @@ trtKills:      .byte 0                  // turrets destroyed: the kill event a
 trtHalf:       .byte 0                  // 0 = the authored row (TL/TR),
                                         // 1 = the row below it (BL/BR)
 trtIdx:        .byte 0                  // the turret a loop is working on
+trtTmp:        .byte 0                  // scratch, turretBuildTables only
 trtRelLo:      .byte 0                  // (authored row - a page top row)
 trtRelHi:      .byte 0                  // reduced mod STAGE_ROWS
 trtRow:        .byte 0                  // a matrix row being painted
@@ -514,7 +511,7 @@ turretStateEnd:
     .error "the turret state has outgrown its $6e00 segment"
 }
 
-.if (TURRET_TOTAL > 8) {
+.if (TURRET_MAX > 8) {
     .error "trtDeadPending is one bit a turret"
 }
 
@@ -547,7 +544,7 @@ turretStateEnd:
 // because ROWS_PER_TICK is its constant and it is imported after this file.
 .const TURRET_PREPARE_FINE = 7
 
-.if (STAGE_METATILE_ROWS < TURRET_SCAN_ROWS) {
+.if (LEVELPKG_STAGE_ROWS < TURRET_SCAN_ROWS) {
     .error "the stage is shorter than the turret world scan window"
 }
 
@@ -558,8 +555,99 @@ turretStateEnd:
 // BEFORE scrollInit, because scrollInit builds both pages through renderRow
 // and a turret inside the boot aperture must be composed into them.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// turretBuildTables — derive every placement table from the resident package.
+//
+// CALLED BEFORE turretInit, AND AGAIN ON EVERY LEVEL LOAD. It reads above $e000
+// and therefore needs the KERNAL banked out; every caller is already there.
+//
+// This is the work the ASSEMBLER used to do from the authored lists. Doing it at
+// run time costs 512 stores for the lookup plus a handful per turret, once per
+// level, and buys a level the right to bring its own turrets.
+// ---------------------------------------------------------------------------
+turretBuildTables:
+    // ---- the two-page lookup: nothing anywhere, then stamp what is ---------
+    lda #TURRET_NONE
+    ldx #0
+!clearLookup:
+    sta turretAtMetaRow + $000,x
+    sta turretAtMetaRow + $100,x
+    inx
+    bne !clearLookup-
+
+    // ---- the per-turret columns, for ALL EIGHT slots -----------------------
+    // Every slot is written, not just the authored ones. The package pads its
+    // own list to eight with zeros, so a level with five turrets positively
+    // clears slots 5..7 rather than leaving the previous level's there.
+    ldx #TURRET_MAX - 1
+!slot:
+    lda LEVELPKG_TRTCOL,x
+    sta turretCol,x
+    // the body's left edge in sprite X: 24 + 8c, nine bits
+    asl
+    asl
+    asl                                 // c * 8; c <= 37 so this cannot carry
+    clc
+    adc #24
+    sta turretXLo,x
+    lda #0
+    adc #0                              // the ninth bit, from the add above
+    sta turretXHi,x
+
+    lda LEVELPKG_TRTROWLO,x
+    sta turretRowLo,x
+    lda LEVELPKG_TRTROWHI,x
+    sta turretRowHi,x
+
+    // metatileRow = authored row / METATILE_H, a real sixteen-bit shift
+    lda LEVELPKG_TRTROWHI,x
+    sta trtTmp
+    lda LEVELPKG_TRTROWLO,x
+    .for (var i = 0; i < 2; i++) {      // METATILE_H is 4
+        lsr trtTmp
+        ror
+    }
+    sta turretMetaRow,x
+    dex
+    bpl !slot-
+
+    // ---- stamp the authored slots into the lookup --------------------------
+    // ONLY the authored ones: an unauthored slot keeps column 0 and row 0, and
+    // stamping it would put a phantom turret in metatile row 0 of every level.
+    lda LEVELPKG_TRTN
+    cmp #TURRET_MAX + 1
+    bcc !countOk+
+    lda #TURRET_MAX                     // a corrupt count cannot be allowed to
+!countOk:                               // name a slot that does not exist
+    sta turretCount
+    tax
+    dex
+    bmi !noneAuthored+
+!stamp:
+    ldy turretMetaRow,x                 // the low eight bits pick the entry
+    // AND BIT 8 OF THE METATILE ROW PICKS THE PAGE, which is bit 10 of the
+    // AUTHORED row -- metatileRow is the authored row shifted right twice, so
+    // its bit 8 is the authored row's bit 10, which is bit 2 of rowHi. Testing
+    // bit 0 of rowHi instead would have selected on the authored row's bit 8,
+    // i.e. metatile-row bit 6, and put two thirds of a tall stage's turrets on
+    // the wrong page.
+    lda turretRowHi,x
+    and #%00000100
+    beq !page0+
+    txa
+    sta turretAtMetaRow + $100,y
+    jmp !next+
+!page0:
+    txa
+    sta turretAtMetaRow + $000,y
+!next:
+    dex
+    bpl !stamp-
+!noneAuthored:
+    rts
+
 turretInit:
-    ldx #TURRET_TOTAL - 1
+    ldx #TURRET_MAX - 1
 !slot:
     lda #1
     sta turretAlive,x
@@ -730,7 +818,7 @@ turretWorldTick:
 
     // ---- adopt: sixteen bytes, and no arithmetic at all --------------------
 !adopt:
-    ldx #TURRET_TOTAL - 1
+    ldx #TURRET_MAX - 1
 !swap:
     lda trtNextRow,x
     sta turretPaintRow,x
@@ -766,7 +854,7 @@ turretWorldTick:
     // all, so its firing timer runs 100, 99 ... 93, 100 for ever and NO TURRET
     // CAN EVER FIRE -- an eight-frame sawtooth with a floor of 93, on a turret
     // whose logY says it sat wholly inside the aperture the whole time.
-    ldx #TURRET_TOTAL - 1
+    ldx #TURRET_MAX - 1
 !blank:
     lda turretPaintPair,x                // == 0 is turretAimTick's !next exactly:
     bne !keep+                           // the shadow raises pair only for rel
@@ -832,7 +920,7 @@ turretPrepareTick:
 // live arrays are only ever reached by the sixteen-byte adopt above.
 // ---------------------------------------------------------------------------
 turretDeriveShadow:
-    ldx #TURRET_TOTAL - 1
+    ldx #TURRET_MAX - 1
 !clear:
     lda #TURRET_ROW_NONE
     sta trtNextRow,x
@@ -863,9 +951,9 @@ turretDeriveShadow:
     sbc #0
     sta trtScanHi
     bpl !haveScan+                      // m0 was 0: the scan starts at the
-    lda #<(STAGE_METATILE_ROWS - 1)     // stage's LAST metatile row and wraps
+    lda #<(LEVELPKG_STAGE_ROWS - 1)     // stage's LAST metatile row and wraps
     sta trtScanLo                       // forward from there
-    lda #>(STAGE_METATILE_ROWS - 1)
+    lda #>(LEVELPKG_STAGE_ROWS - 1)
     sta trtScanHi
 !haveScan:
 
@@ -887,11 +975,11 @@ turretDeriveShadow:
     inc trtScanHi
 !noCarry:
     lda trtScanHi                       // wrapped past the end of the stage?
-    cmp #>STAGE_METATILE_ROWS
+    cmp #>LEVELPKG_STAGE_ROWS
     bcc !noWrap+
     bne !wrap+
     lda trtScanLo
-    cmp #<STAGE_METATILE_ROWS
+    cmp #<LEVELPKG_STAGE_ROWS
     bcc !noWrap+
 !wrap:
     lda #0                              // the stage wraps and so does the scan
@@ -981,7 +1069,7 @@ turretAimTick:
     // on the page costs a load and a branch and nothing else.
     lda #0
     sta trtVisibleMask
-    ldx #TURRET_TOTAL - 1
+    ldx #TURRET_MAX - 1
 !aim:
     lda turretPaintPair,x
     beq !next+                          // ONLY ONE BODY ROW IS ON THE PAGE, so
@@ -1213,7 +1301,7 @@ turretPaintTick:
     lda #0
     sta trtRepaint
 
-    ldx #TURRET_TOTAL - 1
+    ldx #TURRET_MAX - 1
 !turret:
     // ---- the cheap question first ----------------------------------------
     // Nothing on the page AND nothing painted last frame AND not flashing means
@@ -1276,8 +1364,10 @@ turretPaintTick:
     lda turretCramRow,x
     bmi !noOld+                         // TURRET_ROW_NONE: nothing was painted
     sta trtRow
-    lda #TERRAIN_COLOUR_RAM
-    sta trtColour
+    lda trnCramValue                    // THE RESIDENT LEVEL'S fill, not the
+    sta trtColour                       // compile-time one: a turret restoring
+                                        // its cells after a level change must
+                                        // put back the colour THIS level uses
     lda #1
     sta trtPair                         // RESTORE BOTH ROWS, ALWAYS, and do not
                                         // ask how many were painted. The pair
@@ -1423,7 +1513,7 @@ traceTurretRay:
     bne !scan+                          // Turrets are on the aperture for about
     rts                                 // a third of the level, so two volleys
 !scan:                                  // in three leave in five cycles
-    ldx #TURRET_TOTAL - 1
+    ldx #TURRET_MAX - 1
 !turret:
     lda turretVisible,x                 // tested FIRST: it is 0 for six of the
     beq !next+                          // eight even when a turret is on screen,
@@ -1531,7 +1621,7 @@ turretDamage:
     rts
 
 turretBit: .byte 1, 2, 4, 8, 16, 32, 64, 128
-.if (TURRET_TOTAL > 8) { .error "turretBit is one byte of flags" }
+.if (TURRET_MAX > 8) { .error "turretBit is one byte of flags" }
 
 // ===========================================================================
 // FIRING
@@ -1573,7 +1663,7 @@ turretFireTick:
     bne !any+
     rts                                 // the whole cost of an ordinary frame
 !any:
-    ldx #TURRET_TOTAL - 1
+    ldx #TURRET_MAX - 1
 !turret:
     lda turretVisible,x                 // turretAimTick already answered this,
     beq !offAperture+                   // and it means "the whole 16-pixel body
@@ -1689,7 +1779,7 @@ turretRestoreTick:
     rts                                 // the whole cost on an ordinary frame:
 !work:                                  // one load and one branch, 12 cycles
 
-    ldx #TURRET_TOTAL - 1
+    ldx #TURRET_MAX - 1
 !turret:
     stx trtIdx
     lda trtDeadPending

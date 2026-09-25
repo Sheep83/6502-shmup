@@ -61,10 +61,33 @@
 
 * = $5300 "level loader"
 
+// ---------------------------------------------------------------------------
+// levelLoad — the BOOT load. Fatal on failure, as it has always been.
+//
+// It now names the level through the campaign rather than through a literal, so
+// that boot and a mid-run level change read the sequence from the same place.
+// At boot cmpLevel is 0, which is LEVEL1.
+// ---------------------------------------------------------------------------
 levelLoad:
-    lda #levelNameEnd - levelName
-    ldx #<levelName
-    ldy #>levelName
+    jsr levelLoadCore
+    bcc !ok+                            // A holds why; the border goes red.
+    jmp levelLoadFailed                 // a jmp because levelLoadRuntime now
+!ok:                                    // sits between the two
+    rts
+
+// ---------------------------------------------------------------------------
+// levelLoadCore — SETNAM, SETLFS, LOAD, then prove the bytes arrived.
+//
+// Exit: carry CLEAR on success; carry SET with A = the KERNAL's status byte or
+//       LL_ERR_SIGNATURE. It NEVER halts -- the caller decides what a failure
+//       means, because at boot it is fatal and mid-run it is not.
+//
+// IT REQUIRES THE KERNAL MAPPED AND INTERRUPTS ITS OWN AFFAIR. At boot both are
+// already true. Mid-run levelLoadRuntime arranges them and puts them back; see
+// the long note there for why that is the whole difficulty.
+// ---------------------------------------------------------------------------
+levelLoadCore:
+    jsr cmpLevelName                    // -> A = length, X/Y = name pointer
     jsr SETNAM
 
     lda #LEVEL_SA                       // logical file number; any free one
@@ -76,7 +99,12 @@ levelLoad:
     ldx #<LEVELPKG_BASE                 // ignored with SA = 1, supplied anyway
     ldy #>LEVELPKG_BASE                 // so no register reaches the KERNAL
     jsr KLOAD                           // holding whatever BASIC left in it
-    bcs levelLoadFailed                 // carry set: A holds the KERNAL error
+    bcc !ok+                            // carry set: A holds the KERNAL error.
+    jmp levelCoreFailed                 // BRANCHED AROUND A JMP because the
+                                        // failure tail is now past a branch's
+                                        // reach -- levelLoadRuntime grew
+                                        // between the two
+!ok:
 
     // ---- THE BYTES ACTUALLY ARRIVED ---------------------------------------
     // Checked rather than assumed. A short file, a wrong name matching some
@@ -116,11 +144,138 @@ levelLoad:
 
     cpx #0
     bne levelSigBad
+    clc                                 // the bytes are there
     rts
 
 levelSigBad:
     lda #LL_ERR_SIGNATURE
-    // falls through
+levelCoreFailed:
+    sec
+    rts
+
+// ---------------------------------------------------------------------------
+// levelLoadRuntime — the SAME load, from inside a running game.
+//
+// Exit: carry CLEAR on success, carry SET with A = why on failure. The caller
+//       stays alive either way; see gsUpgradeContinue in src/gamestate.asm.
+//
+// ---------------------------------------------------------------------------
+// WHAT HAS TO BE UNDONE AND PUT BACK, AND WHY EACH ONE MATTERS
+// ---------------------------------------------------------------------------
+// src/levelload.asm's original note explains that the boot load works because
+// nothing has happened yet: the KERNAL is mapped, the interrupts are still
+// BASIC's, and no subsystem has state to disturb. By the time a level changes,
+// all three are false. This routine re-creates that environment and restores
+// the engine's afterwards. It does NOT reimplement the load -- levelLoadCore is
+// the same code the boot path runs, which is the whole point of the refactor.
+//
+//   INTERRUPTS OFF, FOR THE WHOLE LOAD. Not merely tidy: the KERNAL's serial
+//   routines are timing-critical bit-banging, and a raster interrupt taken in
+//   the middle of an IEC byte corrupts it. Masking is also what makes the
+//   banking safe -- see below.
+//
+//   $01 BACK TO $37. The engine runs at $35 with the KERNAL banked out, so
+//   $ffd5 is level data rather than a routine; calling it at $35 would execute
+//   the previous level's map. The store must happen with interrupts already
+//   masked, because the engine's IRQ vector lives at $fffe in the RAM the
+//   KERNAL is about to cover: an interrupt taken at $37 vectors through the
+//   KERNAL's $fffe, into the KERNAL's handler, which this engine has not
+//   prepared for since boot.
+//
+//   THE RASTER LATCH CLEARED BEFORE THE MASK LIFTS. $d019 latches through the
+//   load whether or not anyone is listening, so without the acknowledge below
+//   the first instruction after `cli` would take a stale interrupt.
+//
+//   THE PACKAGE CANNOT REACH THE CODE THAT IS RUNNING. The file is bounded at
+//   $fff9 and the hardware vectors at $fffa-$ffff are outside it -- so the
+//   engine's own $fffe survives the load untouched -- while every byte of
+//   engine CODE lives below $a000. There is no window in which the processor
+//   could execute a byte the loader has overwritten, and it is the package's
+//   own layout guard in src/levelpkg.asm that keeps that true.
+//
+//   THE DISPLAY IS LEFT ALONE. The caller is a non-game state, so the screen
+//   already shows a static text page that the stub IRQ is merely re-asserting;
+//   with interrupts masked the registers simply hold their last values for the
+//   half-second the drive takes. Blanking would have been a visible flicker for
+//   no gain.
+// ---------------------------------------------------------------------------
+// THE VERDICT TRAVELS IN MEMORY, NOT ON THE STACK. Three more things have to
+// happen after levelLoadCore returns and every one of them disturbs A or the
+// flags, so the result is parked in two bytes and rebuilt at the end. A first
+// version tried to carry it in php/pha pairs through the restore and was both
+// unreadable and wrong.
+//
+// $35 IS RESTORED UNCONDITIONALLY rather than saved and replaced, because there
+// is exactly one state this can be called from: the engine's, which is $35. A
+// save/restore would have implied a generality that does not exist and hidden
+// the assumption instead of stating it.
+// THE CIA HAS TO GO BACK TOO, AND THAT IS THE PART THAT COST THIS A DEBUGGING
+// ROUND. installRenderer writes $7f to $dc0d, which disables every CIA
+// interrupt, and the engine never wants one again. But the KERNAL's IEC
+// routines are built on the CIA: they time the bus with timer A and they expect
+// the jiffy interrupt to be running. Called with the CIA as the engine leaves
+// it, the LOAD does not fail -- it HANGS, waiting for a timeout that can never
+// arrive. The symptom is the machine sitting in the KERNAL's interrupt handler
+// at $ea7b for ever with $01 still $37.
+//
+// The boot load never hit this because it runs BEFORE installRenderer, with the
+// CIA exactly as BASIC left it. So this restores that: timer A latched to the
+// PAL jiffy period and its interrupt enabled, the VIC's raster interrupt off,
+// and then the reverse afterwards.
+.const CIA_JIFFY_PAL = $4025            // what the KERNAL programs timer A to
+
+levelLoadRuntime:
+    sei
+    lda #$37                            // KERNAL in: $ffd5 is a routine again
+    sta $01
+
+    // ---- hand the machine back to the KERNAL ------------------------------
+    lda #0
+    sta $d01a                           // no raster interrupt: the VIC must not
+                                        // interrupt an IEC byte
+    lda #$01
+    sta $d019                           // ...and acknowledge any that latched
+    lda #$7f
+    sta $dc0d                           // clear every CIA mask bit, then read
+    lda $dc0d                           // the register to clear what is pending
+    lda #<CIA_JIFFY_PAL
+    sta $dc04
+    lda #>CIA_JIFFY_PAL
+    sta $dc05
+    lda #%00010001
+    sta $dc0e                           // timer A: continuous, running, latched
+    lda #%10000001
+    sta $dc0d                           // enable the timer A interrupt
+
+    cli                                 // THE KERNAL EXPECTS TO BE INTERRUPTED.
+                                        // Its serial code masks its own critical
+                                        // sections; what it cannot survive is
+                                        // having no jiffy at all.
+    jsr levelLoadCore                   // the boot path's own code, verbatim
+    sei
+
+    sta llRunCode                       // why, if it failed
+    lda #0
+    rol                                 // carry -> bit 0
+    sta llRunFail
+
+    // ---- and take it back --------------------------------------------------
+    lda #$7f
+    sta $dc0d                           // no CIA interrupts, as installRenderer
+    lda $dc0d                           // left it; read to clear the pending
+    lda #$35                            // KERNAL out: the package is readable
+    sta $01                             // and $fffe is the engine's vector again
+    lda #$01
+    sta $d019                           // acknowledge whatever the VIC latched
+    sta $d01a                           // raster interrupt on again ($01 = enable)
+    cli
+
+    lda llRunCode
+    lsr llRunFail                       // bit 0 -> carry, for the caller
+    rts
+
+llRunCode: .byte 0
+llRunFail: .byte 0
 
 // ---------------------------------------------------------------------------
 // levelLoadFailed — stop, visibly. Never returns.

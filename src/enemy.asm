@@ -282,50 +282,26 @@
 // ROWS of three bytes when an enemy straddles an aperture edge; it never looks
 // inside a byte, and it takes its source address from logPtr. So it follows
 // whichever species and whichever frame is live without knowing either exists.
-// LEVEL 1'S ARTWORK IS COMPILED IN AT THE SLOTS LEVEL 1 CLAIMED. When there is
-// a loader these two segments are what it writes instead; until then the PRG
-// carries them, which is why the window's contents and the window's claims are
-// asserted against each other rather than assumed to agree.
-* = ENEMY_SPRITES "level1 ring frames"
-#import "generated_sprites/enemy_art.asm"                 // sonicRingFrames, four 64-byte frames
-
-* = DROPPER_SPRITES "level1 dropper frames"
-#import "generated_sprites/enemy_dropper_art.asm"         // orbitalDropperFrames, four frames
-
-* = SQUARE_SPRITES "level1 square frames"
-#import "generated_sprites/enemy_square_art.asm"          // squareFrames, four frames
-
-// The names the rest of the engine knew the Ring's art by, kept pointing at the
-// same things they always meant: the first frame's bytes, and the address that
-// art ends at. src/ebullet.asm places the projectile above enemyBitmapEnd.
-.label enemyBitmap    = sonicRing_north
-.label enemyBitmapEnd = sonicRingFramesEnd
-
-.if (sonicRingFramesEnd - sonicRingFrames != ENEMY_FRAMES * 64) {
-    .error "the Ring art is not ENEMY_FRAMES blocks of 64 bytes"
-}
-.if (orbitalDropperFramesEnd - orbitalDropperFrames != DROPPER_FRAMES * 64) {
-    .error "the Dropper art is not DROPPER_FRAMES blocks of 64 bytes"
-}
-// THE FRAMES MUST BE ADJACENT AND IN THE AUTHORED ORDER, because the sequence
-// tables below are written as "first + n" rather than as a list of addresses.
-// Checked against the labels themselves so that reordering an art file is a
-// build error rather than a scrambled animation.
-.if (sonicRing_north != ENEMY_SPRITES + 0 * 64) { .error "Ring frame 0 is not north" }
-.if (sonicRing_east  != ENEMY_SPRITES + 1 * 64) { .error "Ring frame 1 is not east"  }
-.if (sonicRing_south != ENEMY_SPRITES + 2 * 64) { .error "Ring frame 2 is not south" }
-.if (sonicRing_west  != ENEMY_SPRITES + 3 * 64) { .error "Ring frame 3 is not west"  }
-.if (orbitalDropper_0_wide        != DROPPER_SPRITES + 0 * 64) { .error "Dropper frame 0 is not wide" }
-.if (orbitalDropper_1_front_right != DROPPER_SPRITES + 1 * 64) { .error "Dropper frame 1 is not front-right" }
-.if (orbitalDropper_2_front       != DROPPER_SPRITES + 2 * 64) { .error "Dropper frame 2 is not front" }
-.if (orbitalDropper_3_front_left  != DROPPER_SPRITES + 3 * 64) { .error "Dropper frame 3 is not front-left" }
-.if (squareFramesEnd - squareFrames != SQUARE_FRAMES * 64) {
-    .error "the Square art is not SQUARE_FRAMES blocks of 64 bytes"
-}
-.if (square_0_full   != SQUARE_SPRITES + 0 * 64) { .error "Square frame 0 is not full" }
-.if (square_1_turn   != SQUARE_SPRITES + 1 * 64) { .error "Square frame 1 is not turn" }
-.if (square_2_narrow != SQUARE_SPRITES + 2 * 64) { .error "Square frame 2 is not narrow" }
-.if (square_3_edge   != SQUARE_SPRITES + 3 * 64) { .error "Square frame 3 is not edge" }
+// THE ARTWORK IS NOT IN THIS BINARY ANY MORE. Three segments used to sit here,
+// assembling level 1's Ring, Dropper and Square straight into the sprite window
+// at the slots level 1 claimed. That made the resident level's enemies part of
+// the ENGINE and unchangeable at run time, which a campaign cannot live with.
+//
+// The blocks now travel in the level package -- see LEVELPKG_SPR in
+// src/levelpkg.asm and the manifest in each level's stage_sprites.asm -- and
+// levelApplySprites copies them into LEVEL_SPRITES at level init. NOTHING ELSE
+// CHANGED: the window, the slot model, the species-to-slot claims, the sprite
+// pointers and the animation tables are all exactly as they were, and the
+// engine still reaches a species' art through levelSlotAddr.
+//
+// THE FRAME-ORDER GUARDS WENT WITH THE ARTWORK, to src/level_package.asm, which
+// is the build that now has the labels to check. A reordered art file is still
+// a build error, in the build that emits it.
+//
+// enemyBitmapEnd was the top of the compiled-in art and src/ebullet.asm placed
+// the projectile bitmap above it. With the art gone the window's own end is the
+// honest bound, and it is a constant rather than a label.
+.label enemyBitmapEnd = LEVEL_SPRITES_END
 
 // ===========================================================================
 // PER-OBJECT SPECIES. MAIN THREAD ONLY.

@@ -120,7 +120,10 @@
 .const BOSS_BAR_CELLS = 25          // BOSS_HP_FULL / 2, so one cell is 2 HP
 .const BOSS_BAR_AT    = COLOUR_RAM + BOSS_BAR_ROW * 40 + BOSS_BAR_COL
 .const BOSS_BAR_FULL  = 8 | 2       // multicolour cell, red
-.const BOSS_BAR_EMPTY = TERRAIN_COLOUR_RAM
+// THE EMPTY BAR IS THE RESIDENT LEVEL'S COLOUR-RAM FILL, read at run time from
+// trnCramValue rather than compiled in: the bar is drawn over terrain cells and
+// has to hand them back the colour THIS level uses. It was a constant, which
+// made it level 1's colour in a level 2 arena.
 
 .if (BOSS_BAR_CELLS * 2 != BOSS_HP_FULL) {
     .error "the boss bar does not divide the boss's health evenly"
@@ -678,7 +681,7 @@ bossDrawBar:
 !cell:
     cpx bossBarDrawn
     bcc !lit+
-    lda #BOSS_BAR_EMPTY
+    lda trnCramValue
     jmp !put+
 !lit:
     lda #BOSS_BAR_FULL
@@ -698,7 +701,7 @@ bossClearBar:
     lda #0
     sta bossBarDrawn
     ldx #0
-    lda #BOSS_BAR_EMPTY
+    lda trnCramValue
 !cell:
     sta BOSS_BAR_AT,x
     inx

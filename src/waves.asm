@@ -536,7 +536,12 @@ waveTick:
     // runs for thousands of rows past its last authored moment takes this
     // branch every frame and does nothing, which is exactly right.
     ldy wvNextTrig
-    cpy #WAVE_TRIGGERS
+    // THE COUNT IS THE RESIDENT PACKAGE'S, not the engine's build-time one.
+    // It was `cpy #WAVE_TRIGGERS`, which baked in the trigger count of whatever
+    // level the ENGINE was compiled against: after a runtime level change the
+    // director walked level 1's twelve entries through level 2's seven-entry
+    // list and fired the five zero-padded rows as waves at world row 0.
+    cpy LEVELPKG_TRIGN
     bcs !noTrigger+
 
     // ---- THE BOSS APPROACH: has authoring stopped? ------------------------
@@ -566,7 +571,9 @@ waveTick:
     cmp waveNoSpawnLo
     bcc !mayStart+
 !quiet:
-    lda #WAVE_TRIGGERS                  // terminal: the schedule is over
+    lda LEVELPKG_TRIGN                  // terminal: the schedule is over.
+                                        // The PACKAGE's count, for the same
+                                        // reason as the compare above
     sta wvNextTrig
     jmp !noTrigger+
 !mayStart:

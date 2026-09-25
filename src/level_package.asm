@@ -35,11 +35,69 @@
 #import "stage_map_rows.asm"
 levelMapEnd:
 
-.if (levelMapEnd - LEVELPKG_MAP != STAGE_METATILE_ROWS * 10) {
-    .error "the emitted stage map is not STAGE_METATILE_ROWS * 10 bytes"
+// THE CAPACITY, NOT THE AUTHORED LENGTH. build/stage_map_rows.asm is produced by
+// tools/pad_stage_map.py, which pads a short level up to the engine's one stage
+// height; see src/levelpkg.asm. A level authored at 138 rows still emits 200.
+.if (levelMapEnd - LEVELPKG_MAP != LEVELPKG_STAGE_ROWS * 10) {
+    .error "the emitted stage map is not LEVELPKG_STAGE_ROWS * 10 bytes"
+}
+.if (STAGE_METATILE_ROWS > LEVELPKG_STAGE_ROWS) {
+    .error "this level authors more metatile rows than the engine's stage capacity"
 }
 .if (levelMapEnd - LEVELPKG_MAP > LEVELPKG_MAP_MAX) {
     .error "the stage map has outgrown the 440-row map budget"
+}
+
+// ---------------------------------------------------------------------------
+// THE SPRITE PAYLOAD: the enemy window and the boss cells.
+//
+// These used to be compiled into the ENGINE -- `* = ENEMY_SPRITES` and friends
+// in src/enemy.asm, `* = BOSS_SPRITES` in src/main.asm -- which made the
+// resident level's enemies part of the engine binary and unchangeable at run
+// time. They are level-owned artwork, so they travel with the level.
+//
+// THE WINDOW IS EMITTED AS ONE CONTIGUOUS IMAGE in slot order, padded to the
+// engine's twenty blocks. The padding matters: a package is loaded over the
+// previous level's bytes, so a level claiming twelve slots must positively zero
+// the other eight rather than leave the last level's enemies readable in them.
+// ---------------------------------------------------------------------------
+#import "stage_enemies.asm"             // LVL_SLOT_*, the slot claims
+
+* = LEVELPKG_SPR "level sprite window"
+#import "stage_sprites.asm"
+levelSprEnd:
+
+.if (levelSprEnd - LEVELPKG_SPR > LEVELPKG_SPR_MAX) {
+    .error "this level's sprite window exceeds the engine's twenty blocks"
+}
+.if (mod(levelSprEnd - LEVELPKG_SPR, 64) != 0) {
+    .error "the sprite window is not a whole number of 64-byte blocks"
+}
+// THE SLOTS THE MANIFEST FILLS MUST BE THE SLOTS THE LEVEL CLAIMS. stage_enemies
+// says where each species lives and stage_sprites supplies the bytes; checking
+// them against each other is what stops a manifest edited in one file and not
+// the other from shipping a Dropper where the engine expects a Ring.
+.var sprBlocks = (levelSprEnd - LEVELPKG_SPR) / 64
+.if (LVL_SLOT_RING + 4 > sprBlocks || LVL_SLOT_DROPPER + 4 > sprBlocks
+     || LVL_SLOT_SQUARE + 4 > sprBlocks) {
+    .error "stage_enemies claims a slot that stage_sprites does not fill"
+}
+.fill LEVELPKG_SPR_MAX - (levelSprEnd - LEVELPKG_SPR), 0    // unclaimed slots
+
+// boss_art.asm PINS ITSELF with `* = BOSS_SPRITES`, which in the engine is the
+// runtime address $3580. In this build that symbol does not exist, and the
+// bytes belong at the package's own address -- so the package declares it. The
+// generated file is imported UNCHANGED, which keeps SpritePad's output the one
+// source of the artwork in both builds.
+.const BOSS_SPRITES = LEVELPKG_BOSS
+
+// No `* =` of our own: the import pins itself at the address declared above,
+// and a second segment here would only add an empty one to the memory map.
+#import "generated_sprites/boss_art.asm"
+levelBossEnd:
+
+.if (levelBossEnd - LEVELPKG_BOSS != LEVELPKG_BOSS_MAX) {
+    .error "the boss artwork is not BOSS_CELLS blocks of 64 bytes"
 }
 
 // ---------------------------------------------------------------------------
@@ -199,4 +257,94 @@ levelSigEnd:
 
 .if (levelSigEnd > LEVELPKG_TOP + 1) {
     .error "the level package runs past $fff9 into the hardware vectors"
+}
+
+// ===========================================================================
+// THE LEVEL'S RENDER IDENTITY — what the level LOOKS like, not what it DOES
+// ===========================================================================
+// These four things used to be compiled into the ENGINE from src/level1/, which
+// was invisible while there was one level and wrong the moment there were two:
+// level 2 would have been drawn with level 1's glyphs, level 1's colours and
+// five of level 1's turrets standing in its terrain. See src/levelpkg.asm.
+//
+// Each is imported from the LEVEL's own directory, exactly as the map and the
+// encounters are, so a level owns its appearance the way it owns its content.
+// ---------------------------------------------------------------------------
+#import "stage_turrets.asm"             // TURRET_TOTAL, turretCols, turretRows
+
+* = LEVELPKG_CHARS "level charset"
+#import "stage_charset.asm"             // terrainGlyphs / terrainGlyphsEnd
+levelCharsEnd:
+
+.if (terrainGlyphsEnd - terrainGlyphs != TERRAIN_GLYPH_COUNT * 8) {
+    .error "the emitted charset is not TERRAIN_GLYPH_COUNT glyphs"
+}
+.if (levelCharsEnd - LEVELPKG_CHARS > LEVELPKG_CHARS_MAX) {
+    .error "this level's charset exceeds the engine's 128-glyph window"
+}
+
+// THE PALETTE. Four bytes the engine pokes straight into $d021/$d022/$d023 and
+// uses as the colour-RAM fill; see terrainApplyPackage in src/terrain.asm.
+* = LEVELPKG_PAL "level palette"
+    .byte TERRAIN_BACKGROUND_COLOUR     // $d021, bit pair 00
+    .byte TERRAIN_MC_COLOUR_1           // $d022, bit pair 01
+    .byte TERRAIN_MC_COLOUR_2           // $d023, bit pair 10
+    .byte TERRAIN_COLOUR_RAM            // colour RAM, already carrying bit 3
+
+* = LEVELPKG_GLYPHN "level glyph count"
+    .byte TERRAIN_GLYPH_COUNT
+
+// THE TURRETS, as three parallel columns padded to the engine's capacity. The
+// engine reads turretCount first and never looks past it, but the unused slots
+// are written anyway: a package is loaded over the previous level's bytes, so a
+// short list that left the tail alone would leave the PREVIOUS level's turrets
+// readable in it.
+* = LEVELPKG_TRTN "level turret count"
+    .byte TURRET_TOTAL
+* = LEVELPKG_TRTCOL "level turret cols"
+    .fill LEVELPKG_TRT_MAX, (i < TURRET_TOTAL) ? turretCols.get(i) : 0
+* = LEVELPKG_TRTROWLO "level turret rows lo"
+    .fill LEVELPKG_TRT_MAX, (i < TURRET_TOTAL) ? <turretRows.get(i) : 0
+* = LEVELPKG_TRTROWHI "level turret rows hi"
+    .fill LEVELPKG_TRT_MAX, (i < TURRET_TOTAL) ? >turretRows.get(i) : 0
+
+* = LEVELPKG_TRIGN "level trigger count"
+    .byte WAVE_TRIGGERS
+levelAssetsEnd:
+
+.if (WAVE_TRIGGERS > LEVELPKG_TRIG_SLOTS) {
+    .error "more authored triggers than the package reserves room for"
+}
+
+// THE AUTHORING GUARDS, MOVED HERE WITH THE LIST. src/turrets.asm used to make
+// these checks, because the list used to be compiled into the engine. It is now
+// package data, so the checks belong to the build that emits it -- same checks,
+// same lists, still a build error, still caught in the level that authored it.
+.if (TURRET_TOTAL > LEVELPKG_TRT_MAX) {
+    .error "this level authors more turrets than the engine's capacity"
+}
+.if (turretCols.size() != TURRET_TOTAL || turretRows.size() != TURRET_TOTAL) {
+    .error "the authored turret lists do not match TURRET_TOTAL"
+}
+.for (var t = 0; t < TURRET_TOTAL; t++) {
+    .if (mod(turretRows.get(t), LEVELPKG_METATILE_H) != LEVELPKG_TRT_ROW_PHASE) {
+        .error "authored turret row is not metatileRow * METATILE_H + 1"
+    }
+    // AGAINST THE ENGINE'S CAPACITY, not this level's authored height: the map
+    // is padded up to LEVELPKG_STAGE_ROWS and the turret lookup spans all of it.
+    .if (turretRows.get(t) + LEVELPKG_TRT_BODY_H - 1 >= LEVELPKG_STAGE_ROWS * LEVELPKG_METATILE_H) {
+        .error "an authored turret body runs off the bottom of the stage"
+    }
+    .if (turretCols.get(t) + LEVELPKG_TRT_BODY_W > LEVELPKG_SCREEN_COLS) {
+        .error "an authored turret body runs off the right of the screen"
+    }
+    .for (var u = 0; u < t; u++) {
+        .if (floor(turretRows.get(u) / LEVELPKG_METATILE_H)
+             == floor(turretRows.get(t) / LEVELPKG_METATILE_H)) {
+            .error "two authored turrets share a metatile row: turretAtMetaRow holds only one"
+        }
+    }
+}
+.if (levelAssetsEnd > LEVELPKG_TOP + 1) {
+    .error "the render identity runs past $fff9 into the hardware vectors"
 }

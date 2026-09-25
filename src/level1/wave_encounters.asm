@@ -114,24 +114,24 @@
 // A trigger names one row; once consumed it never becomes due again. The
 // rows must be NON-DECREASING because the director's cursor only ever
 // walks forward, and every row must be below STAGE_NO_SPAWN_ROW.
-.var trigRow      = List().add(20, 52, 90, 126, 160, 205, 260, 310, 665)
+.var trigRow      = List().add(20, 52, 90, 126, 160, 205, 260, 310, 350, 450, 550, 665)
 
 // Which definition each appearance plays.
-.var trigDef      = List().add(WAVE_DEF_SWEEP, WAVE_DEF_S, WAVE_DEF_LINGER, WAVE_DEF_LOOP, WAVE_DEF_LOOP_5, WAVE_DEF_DIVE_4, WAVE_DEF_UP_N_OVER, WAVE_DEF_DIVE_4, WAVE_DEF_UP_N_OVER)
+.var trigDef      = List().add(WAVE_DEF_SWEEP, WAVE_DEF_S, WAVE_DEF_LINGER, WAVE_DEF_LOOP, WAVE_DEF_LOOP_5, WAVE_DEF_DIVE_4, WAVE_DEF_UP_N_OVER, WAVE_DEF_DIVE_4, WAVE_DEF_LOOP, WAVE_DEF_LOOP, WAVE_DEF_LOOP, WAVE_DEF_UP_N_OVER)
 
 // WHICH ENEMY THE WAVE IS MADE OF -- an authored column rather than
 // arithmetic on the cursor, so inserting a trigger cannot silently invert
 // every wave after it.
-.var trigSpecies  = List().add(SPECIES_RING, SPECIES_DROPPER, SPECIES_RING, SPECIES_DROPPER, SPECIES_RING, SPECIES_RING, SPECIES_RING, SPECIES_SQUARE, SPECIES_RING)
+.var trigSpecies  = List().add(SPECIES_RING, SPECIES_DROPPER, SPECIES_RING, SPECIES_DROPPER, SPECIES_RING, SPECIES_RING, SPECIES_RING, SPECIES_SQUARE, SPECIES_DROPPER, SPECIES_DROPPER, SPECIES_DROPPER, SPECIES_RING)
 
 // WHICH SIDE A DROPPER FLIES IN FROM. Read only when the species above is
 // SPECIES_DROPPER; a Ring wave carries whatever is written here and
 // ignores it.
-.var trigSide     = List().add(DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_RIGHT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT)
+.var trigSide     = List().add(DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_RIGHT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT)
 
 // WHICH MEMBERS OF THIS APPEARANCE MAY SHOOT -- a bitmask over MEMBER
 // INDEX, bit 0 the first member sent, and zero for a formation that does
 // not shoot at all.
-.var trigFire     = List().add(%00000101, %00000010, %00000101, %00000000, %00000101, %00001111, %00110111, %00001111, %00110111)
+.var trigFire     = List().add(%00000101, %00000010, %00000101, %00000000, %00000101, %00001111, %00110111, %00001111, %00000000, %00000000, %00000000, %00110111)
 
-.const WAVE_TRIGGERS          = 9
+.const WAVE_TRIGGERS          = 12
