@@ -76,8 +76,12 @@
 
 // ...and where it gives up. Past the bottom of the renderable band there is
 // nothing left to collect and nothing left to see, so the slot goes back.
-// Chosen to match the projectile's own EBULLET_Y_MAX: both are "below the
-// aperture and no longer anybody's business".
+// It used to be "chosen to match the projectile's own EBULLET_Y_MAX". That is
+// no longer true and the cross-reference would mislead: EBULLET_Y_MAX became
+// 247 when the bolt was enrolled in vertical clipping, because a bolt now has a
+// derived last-visible row. A token's own art fills its sprite, so its
+// last-visible row is a different number; 250 is left exactly as it was, and
+// re-deriving it is not this change's business.
 .const PICKUP_Y_MAX  = 250
 
 // --- the flash --------------------------------------------------------------

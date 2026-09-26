@@ -57,10 +57,43 @@
 .const EBULLET_X_MAX    = 345           // 9-bit; past the useful right edge
 .const EBULLET_X_MIN    = 8             // a borrow out of the low byte
 
-// Vertical despawn. Wider than the renderable band on purpose: a projectile
-// may fly on below the aperture undrawn, but it stops being able to hit the
-// player there -- see ebulletPlayerTick.
-.const EBULLET_Y_MAX    = 250
+// ---------------------------------------------------------------------------
+// THE BOLT'S INK, AND THE THREE COORDINATES THAT FOLLOW FROM IT
+// ---------------------------------------------------------------------------
+// A sprite is 21 rows; this bolt inks only the first seven of them. Everything
+// below is derived from that one fact, so the day the artwork changes there is
+// exactly one number to change -- and tests/test_ebullet_clipping.py reads the
+// bitmap out of memory and proves rows 7..20 really are blank.
+.const EBULLET_INK_ROWS = 7             // source rows 0..6 carry pixels
+.if (EBULLET_INK_ROWS > SPRITE_HEIGHT) {
+    .error "the bolt cannot ink more rows than a sprite has"
+}
+
+// WHERE THE INK ACTUALLY LANDS, once the bolt is enrolled in vertical clipping.
+// src/clip.asm pins a bottom-clipped sprite's PRESENTED Y at MAX_SPRITE_Y and
+// shifts the pixels instead, so block row r shows at raster MAX_SPRITE_Y + r
+// and is filled from source row r - c. Source row s therefore appears at raster
+// logY + s, exactly where an unclipped sprite at logY would have put it -- and
+// the block runs out at row 20, i.e. raster MAX_SPRITE_Y + SPRITE_HEIGHT - 1.
+//
+// So the last logical Y at which ANY of the bolt is still drawn is 246, and the
+// first at which any of it is inside the aperture is 55 - 6 = 49.
+.const EBULLET_INK_Y_MAX = MAX_SPRITE_Y + SPRITE_HEIGHT - 1         // 246
+.const EBULLET_INK_Y_MIN = MIN_SPRITE_Y - (EBULLET_INK_ROWS - 1)    // 49
+
+// RETIREMENT IS ONE PIXEL PAST THE LAST VISIBLE ROW. It used to be 250, which
+// left the bolt alive and invisible for four more logical rows -- the "invisible
+// tail" the despawn audit found. There is now nothing to see and nothing to
+// hit past 246, so there is nothing left to be.
+.const EBULLET_Y_MAX    = EBULLET_INK_Y_MAX + 1                     // 247
+
+// THE CLIPPER CAN ONLY REACH SO FAR. A bottom clip of SPRITE_HEIGHT rows or
+// more is refused by logClipAnnotate (it returns 0 and the sprite is culled at
+// admission), so retiring at or before that point is what keeps "alive" and
+// "drawable" the same statement.
+.if (EBULLET_Y_MAX > MAX_SPRITE_Y + SPRITE_HEIGHT) {
+    .error "a bolt would outlive the reach of the bottom clip"
+}
 
 .if (EBULLET_MAX > MAX_OBJECTS) {
     .error "the projectile cap cannot exceed the object pool"
@@ -430,7 +463,20 @@ ebulletTick:
     sta logY,x
     cmp #EBULLET_Y_MAX
     bcs ebulletRetire
-    rts
+
+    // ---- how much of it is outside the aperture ---------------------------
+    // THE SAME CALL src/pickup.asm MAKES, AND FOR THE SAME REASON. A bolt used
+    // to be admitted whole or not at all, so it vanished the instant its
+    // logical Y passed MAX_SPRITE_Y -- fourteen rasters above the floor,
+    // because the ink is only seven rows of a twenty-one-row sprite and the
+    // admission rule judges the sprite. logClipAnnotate writes logClip from
+    // logY; the builder turns that into a clamped presented Y and src/clip.asm
+    // renders a row-shifted copy from whatever logPtr names.
+    //
+    // NOTHING PROJECTILE-SPECIFIC EXISTS IN THAT PATH, and LOGICAL Y IS NOT
+    // TOUCHED: movement, collision and retirement all go on reading the truth.
+    // An in-band bolt gets logClip = 0 and is presented exactly as before.
+    jmp logClipAnnotate                 // X preserved; its rts is ours
 
 // ---------------------------------------------------------------------------
 // ebulletRetire — the ONE place a projectile leaves the world.
@@ -486,11 +532,30 @@ ebulletPlayerTick:
     cmp #TYPE_EBULLET
     bne !next+
 
-    // ---- is it where the player can see it? -------------------------------
+    // ---- is any of it still VISIBLE? --------------------------------------
+    // THE BOUNDS ARE THE INK'S, NOT THE RENDERER'S ADMISSION RULE'S. They used
+    // to be MIN_SPRITE_Y..MAX_SPRITE_Y, which was right only while admission
+    // was all-or-nothing: a bolt was drawn whole or not at all, so "inside the
+    // admission band" and "visible" were the same statement. Vertical clipping
+    // breaks that -- a bolt at logY 240 is partly drawn and was, under the old
+    // gate, already harmless while the player could still see it.
+    //
+    // So the gate is now the reach of the INK: the bolt is dangerous exactly
+    // while at least one of its seven inked rows is being drawn inside the
+    // aperture. Visible and dangerous agree again, which is the property the
+    // despawn audit set out to preserve.
+    //
+    // THE BOX BELOW NEEDS NO CHANGE, and that is worth stating because it looks
+    // as though it should. PLAYER_MAX_Y is MAX_SPRITE_Y, so the player's
+    // twenty-one rows reach at most raster 246 -- which is exactly the lowest
+    // raster the clipper can draw. Every ink row the clipper drops is therefore
+    // a row the player can never be standing on, and "visible overlap" and
+    // "box overlap" are the same test. No per-row visibility arithmetic is
+    // needed, and none is done.
     lda logY,x
-    cmp #MIN_SPRITE_Y
+    cmp #EBULLET_INK_Y_MIN
     bcc !next+
-    cmp #MAX_SPRITE_Y + 1
+    cmp #EBULLET_INK_Y_MAX + 1
     bcs !next+
 
     // ---- vertical overlap -------------------------------------------------
