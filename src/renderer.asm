@@ -243,13 +243,52 @@
 
 // Where the TOP aperture split arms.
 //
-// 53, not 52. The handoff exits at raster 51 in the worst measured case, so 52
-// would leave exactly one raster of margin -- and the handoff is the phase most
-// likely to grow. 53 gives two, and still leaves the poll running
-// well before its target: exactly one of lines 48..55 is a badline, and at
-// YSCROLL=5 (the only phase where line 53 is one) the target is 55, two lines
-// further on, which the poll reaches with the whole of line 54 in hand.
-.const TOP_ARM_LINE     = 53
+// 52, AND THE REASON IS A BADLINE IN THE PROLOGUE RATHER THAN ON THE TARGET.
+//
+// This was 53, on the argument that "exactly one of lines 48..55 is a badline,
+// and at YSCROLL=5 (the only phase where line 53 is one) the target is 55, two
+// lines further on, which the poll reaches with the whole of line 54 in hand."
+// That argument asks whether the TARGET line is a badline. The question that
+// decides this is whether a badline falls between the arm and the target, and
+// the answer changes the arithmetic completely.
+//
+// Entry to the first `cpy $d012` costs about a hundred cycles and is not
+// negotiable: up to 14 of interrupt latency, 19 of prologue, the lifecycle
+// test, an absolute jmp per phase down the dispatch chain, the YSCROLL test
+// and the three loads the stores need. That is already a raster and a half. A
+// badline anywhere in it stalls the CPU for a further 43 cycles -- and lines
+// 53 and 54 ARE badlines, at YSCROLL 5 and 6 respectively. Armed at 53 the
+// budget is lines 53..54, 126 cycles, against 100 + 43 = 143 needed. It does
+// not fit, and what does not fit is the POLL: its first sample already reads
+// 55, the `beq` early-exit fires, and the two stores go out wherever the beam
+// happens to be.
+//
+// MEASURED, at the store, with VICE's own LIN/CYC (see
+// reports/top-border-raster-shimmer.md):
+//
+//            $d018 (deadline 15)   $d021 (deadline 17)
+//   YSCROLL 0-4     7..13 ok            11..17 ok
+//   YSCROLL 5      19..24 LATE          23..28 LATE
+//   YSCROLL 6      20..23 LATE          24..29 LATE
+//
+// Two phases in eight, so a 12.5 Hz shimmer along the top edge of the
+// playfield: six or so characters of line 55 drawn from the BLANK charset and
+// painted in the border's black instead of the level's colour. edgeLate cannot
+// see it -- it compares the LINE, and the line was right every time.
+//
+// 52 buys the missing raster. The budget becomes lines 52..54, 189 cycles,
+// against the same worst case of 143: 46 cycles in hand, and exactly one of
+// 52, 53, 54 can be the badline whatever YSCROLL is, so the 43 is paid once.
+//
+// THE HANDOFF'S EXIT IS NOT THE CONSTRAINT IT LOOKS LIKE. It exits as late as
+// raster 51, so 52 leaves it one raster rather than two, and the objection to
+// 52 was that the handoff is the phase most likely to grow. But an arm the
+// beam has already passed is not dropped: exLate chases PH_TOP by name --
+// precisely because a missed top split blanks the whole screen -- so a handoff
+// that ever exits at 52 or later runs exTop immediately, from three lines out,
+// with more margin than the interrupt would have given it. The failure mode
+// the two-raster gap was protecting against does not exist for this phase.
+.const TOP_ARM_LINE     = 52
 
 // ===========================================================================
 // Schedule storage — two buffers, outside VIC bank 0 so it can never be
@@ -1406,8 +1445,11 @@ huPtrStore:
     // frame -- far below the badline range, and $d015 is still zero so there is
     // no sprite DMA anywhere -- and it has fourteen lines in hand before the
     // HUD's own first fetch at line 17. The handoff at raster 40 has TWO: it
-    // exits as late as raster 51 against TOP_ARM_LINE 53, and that margin is
-    // the tightest in the engine. Sixty-eight cycles of player programming
+    // exits as late as raster 51 against TOP_ARM_LINE 52, and that margin is
+    // the tightest in the engine -- one raster, and deliberately so: see
+    // TOP_ARM_LINE, where the badline arithmetic that needs the earlier arm is
+    // set out, and exLate, which chases PH_TOP by name if this phase ever does
+    // overrun the arm. Sixty-eight cycles of player programming
     // belongs in the phase that has a line to spare, not the one that does not.
     //
     // It is also programmed ONCE per frame and then left alone: no batch, no
@@ -1791,22 +1833,34 @@ exBottom:
 // ===========================================================================
 // exTop — open the aperture at 248's mirror: the real charset from line 55.
 // ===========================================================================
-// Armed at TOP_ARM_LINE so the poll is already running before line 55 whatever
-// the fine scroll is. Exactly one of lines 48..55 is a badline -- the one with
-// raster & 7 == YSCROLL -- and on it the CPU is stalled from cycle 12 to 54.
-// Arming at 52 means that stall can cost at most the arm line itself: the
-// handler still reaches the poll with more than a line in hand, and the poll
-// simply rides through any later stall and resumes.
+// Armed at TOP_ARM_LINE so the poll is ALREADY SPINNING before line 55 at
+// every fine-scroll phase, which is the property the rest of this routine is
+// built on and the one that used to fail.
+//
+// Exactly one of lines 48..55 is a badline -- the one with raster & 7 ==
+// YSCROLL -- and on it the CPU is stalled from cycle 12 to 54. The stall that
+// matters is not the one on the TARGET line but any that falls between the arm
+// and the target, because the hundred cycles of interrupt entry and dispatch
+// have to cross it: at YSCROLL 5 and 6 that is lines 53 and 54, and armed at
+// 53 the poll's first sample arrived INSIDE line 55 and the early-exit stored
+// six characters into the display. Armed at 52 there are three lines of
+// budget against one possible stall, and the poll reaches line 55's boundary
+// with the whole of line 54 in hand at every phase. Measured, per phase, in
+// reports/top-border-raster-shimmer.md.
 //
 // The store lands in cycles 6..12 of line 55, before the first g-access in
 // cycle 15. Sprite DMA for slots 3..7 owns cycles 0..9 of a line, but only for
 // a sprite already active there, i.e. Y <= 54 -- which MIN_SPRITE_Y = 55
 // forbids at admission. topSplitMin/Max is the standing proof.
 //
-// When YSCROLL = 7 none of this matters -- row 0 begins AT 55 and lines 48..54
-// are idle, which the VIC renders from $3fff regardless of the charset -- but
-// the same code runs for every phase because a special case here would be one
-// more thing to get wrong for no measurable saving.
+// YSCROLL = 7 IS THE ONE PHASE THAT NEEDS ITS OWN PATH, and it needs it for
+// $d021 rather than for the charset. Row 0 begins AT 55, so lines 48..54 are
+// idle and the VIC renders them from $3fff whatever $d018 says -- which is why
+// the charset store can simply move to 54 and take a whole line of slack. But
+// 55 being the frame's first badline also means the CPU is stalled there from
+// cycle 12, and $d021 cannot follow the charset onto 54 without painting an
+// idle line in the playfield's colour. That store is therefore COUNTED from
+// the line-54 detection rather than polled; the arithmetic is at exTopPhase7.
 exTop:
     ldx frameCurrent
 
@@ -1857,8 +1911,10 @@ exTop:
     // IT THERE. Idle lines are drawn in $d021, so a background store on 54
     // would paint line 54 grey at one phase in eight and black at the other
     // seven -- the flicker, moved from the charset to the colour. So the
-    // background gets its own short poll to 55 on that path alone, which lands
-    // it in cycles 6..12 with the whole of line 54 in hand beforehand.
+    // background gets its own path to 55, and it is COUNTED rather than polled:
+    // 55 is a badline at this phase, the store's window is only cycles 0..11,
+    // and a 7-cycle poll cannot hold a 12-cycle window -- one arrival in seven
+    // is stalled to cycle 55 and loses the whole line. See exTopPhase7.
     //
     // The two paths are written out rather than merged because the merge point
     // is inside the deadline: a single `cpy/beq` to pick between them after the
@@ -1903,9 +1959,72 @@ exTopPhase7:
     sta $d018                           // line 54 is idle at this phase: this
                                         // store has a whole line of slack, and
                                         // nothing it selects is displayed here
-    lda $d012                           // record the landing NOW, before the
-    sta topLanded                       // second poll moves the beam to 55
-    ldx trnBgColour                     // the resident level's background
+
+    // ---- $D021 IS COUNTED FROM HERE, NOT POLLED -------------------------
+    //
+    // WHY A POLL CANNOT DO THIS ONE. Line 55 IS a badline at this phase, so
+    // the CPU is stalled from its cycle 12 and the store has cycles 0..11 --
+    // twelve. A poll loop is `cpy $d012 / bne`, which is SEVEN cycles, and
+    // seven cycles is also its worst-case lateness: the sample that first
+    // reads 55 lands at cycle 0..6 and the store follows six cycles later, at
+    // 6..12. One arrival in seven lands on 12, is stalled to cycle 55, and
+    // paints the WHOLE of line 55 in the border's black.
+    //
+    // AND THE GRID IS PHASE-LOCKED, so this is not a rare coincidence: a PAL
+    // line is 63 cycles, 63 = 9 x 7, so a 7-cycle poll samples at exactly the
+    // same offset on every line it spins through. Which of the seven offsets a
+    // frame gets is decided by interrupt latency and never drifts within the
+    // frame. Measured before this was written: 22 of 86 phase-7 frames stalled
+    // to cycle 55 -- an intermittent black scanline along the top of the
+    // playfield, and edgeLate cannot see it because the LINE was right.
+    //
+    // So the beam is not asked where it is; it is COUNTED. The poll above has
+    // just seen line 54 at cycle s, s in 0..6 -- bounded because the poll was
+    // already spinning, which TOP_ARM_LINE now guarantees. From the end of the
+    // $d018 store, 56 cycles lands the $d021 write at s+62: cycle 62 of line
+    // 54 at the earliest, cycle 5 of line 55 at the latest.
+    //
+    // BOTH ENDS OF THAT ARE SAFE, which is what makes 56 the right count
+    // rather than a tuned one. Cycles 57..62 of line 54 are the right border
+    // -- the main border flip flop set at x=344 in cycle 56 -- so $d021 is not
+    // being displayed there and an early write is invisible. Cycles 0..11 of
+    // line 55 are before the badline stall. The window is 18 cycles wide
+    // against a 7-cycle spread, so it absorbs the spread twice over, and the
+    // one thing that could still steal cycles here -- HW0..HW2 sprite DMA in
+    // cycles 58..62 of line 54 -- costs at most five and lands the write at
+    // cycle 10 of line 55, still inside.
+    //
+    // Nothing else can steal: line 54 is never a badline at YSCROLL=7, and
+    // HW3..HW7 DMA would own cycles 0..9 of line 55 only for a sprite active
+    // AT 55, which MIN_SPRITE_Y refuses admission.
+    cpy $d012                           // 4   still on 54? Y is 54
+    bne exTop7Poll                      // 2   the count has no anchor if the
+                                        //     poll never spun -- see below
+    lda $d012                           // 4
+    sta topLanded                       // 4
+    ldx trnBgColour                     // 4   the resident level's background
+    ldy #5                              // 2
+!pad:
+    dey                                 // 2 x5
+    bne !pad-                           // 3 taken x4 + 2 = 24 for the loop
+    nop                                 // 2
+    nop                                 // 2
+    nop                                 // 2
+    nop                                 // 2
+    stx $d021                           // 4   write on the last cycle: s+62
+    lda topLanded
+    jmp exTopLanded
+
+exTop7Poll:
+    // THE HANDLER ARRIVED INSIDE LINE 54 OR LATER, so `s in 0..6` does not
+    // hold and the count above would be anchored to nothing. Poll instead and
+    // take the 1-in-7. This is the pre-existing behaviour, kept for a case
+    // TOP_ARM_LINE should make unreachable: the arm is two lines early and
+    // exLate chases this phase, so reaching here means something upstream has
+    // grown by a whole raster and the count is the wrong thing to trust.
+    lda $d012
+    sta topLanded
+    ldx trnBgColour
     ldy #TOP_SPLIT_LINE
     cpy $d012                           // NEVER SPIN A WHOLE FRAME WITH I SET:
     beq !at55+                          // if 55 has already gone, store at once
