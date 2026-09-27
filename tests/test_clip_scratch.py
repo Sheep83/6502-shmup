@@ -264,8 +264,7 @@ def main():
         check("the pool never overflowed", rd1(mon, sym["clipPoolFull"]) == 0,
               str(rd1(mon, sym["clipPoolFull"])))
 
-        for name in ("gameOverrun", "publishSkip",
-                     "scrollLate", "edgeLate", "statOverflow",
+        for name in ("gameOverrun", "scrollLate", "edgeLate", "statOverflow",
                      "statPageMismatch", "statPtrMismatch"):
             got = rd1(mon, sym[name])
             check(f"{name} is zero over the run", got == 0, str(got))

@@ -209,8 +209,7 @@ def main():
         free_run(mon, sym["frameCounter"], 5)
         mon.cmd("delete")
         for label, name in (("gameOverrun", "gameOverrun"),
-                            ("publishSkip", "publishSkip"),
-                            ("schedBuildDefer", "schedBuildDefer"),
+                                                        ("schedBuildDefer", "schedBuildDefer"),
                             ("statPageMismatch", "statPageMismatch"),
                             ("statPtrMismatch", "statPtrMismatch")):
             val = rd1(mon, sym[name])

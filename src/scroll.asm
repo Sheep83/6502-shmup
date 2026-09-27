@@ -291,6 +291,30 @@ scrollInit:
 
     lda #SCREEN_ROWS
     sta regenRow                        // idle until the first coarse step
+
+    // THIS INIT'S RECORD SUPERSEDES ANY PENDING ONE, and saying so is what
+    // stops a benign startup artefact being counted as a production fault.
+    //
+    // scrollInit is called three times on the way into a game -- gameInit at
+    // boot, gsEnterGame, and the level transition -- and between the first two
+    // the machine sits in ATTRACT, where irqHandler routes to gsAttractIrq.
+    // That path programs its own display and never adopts, so framePending
+    // stays set from the first init's publication all the way through the
+    // attract screen. The second init then published into an unadopted slot and
+    // publishSkip counted it: measured in-engine at frame 6500, gsState=0,
+    // previous publication at raster 130, this one at raster 60 (see
+    // reports/publish-skip-in-engine-capture.md). Every fresh boot did it, and
+    // it is what five test suites were red on.
+    //
+    // IT IS NOT A FAULT AND MUST NOT BE COUNTED AS ONE. publishSkip means "the
+    // main thread outran the display and a frame of motion was dropped" -- and
+    // nothing here was dropped: there is no scrolling in ATTRACT, and a pending
+    // record from before a wholesale re-initialisation describes a world that
+    // no longer exists. Clearing it is the truthful statement, not a
+    // suppression: the counter keeps its meaning for the real, rare in-play
+    // event, which is untouched by this.
+    lda #0
+    sta framePending
     jsr publishFrame
     rts
 

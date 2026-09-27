@@ -33,7 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
-from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,  # noqa: E402
+from harness import (check_all, PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,  # noqa: E402
                      step_n, check, report, LAUNCHED_PIDS)
 
 sym = symbols(SYM)
@@ -138,19 +138,25 @@ def main():
         # ---- 1. an ordinary in-band bolt is NOT clipped --------------------
         inband = {y: c for y, c in clip_by_logy.items()
                   if MIN_SPRITE_Y <= y <= MAX_SPRITE_Y}
-        check("an in-band bolt is never clipped and never gets a scratch bitmap",
-              all(c == {0} for c in inband.values()),
-              f"{len(inband)} in-band Y values, non-zero clip at "
-              f"{[y for y, c in inband.items() if c != {0}][:6]}")
+        # THE PARENT COLLECTION WAS GATED AND THIS SUBSET WAS NOT. If every bolt
+        # observed happened to be out of band, `inband` is empty and all() says
+        # yes to a claim it never tested.
+        check_all("an in-band bolt is never clipped and never gets a scratch bitmap",
+                  inband.items(), lambda kv: kv[1] == {0},
+                  what="in-band bolt positions",
+                  detail=lambda items, bad:
+                      f"{len(items)} in-band Y values, non-zero clip at "
+                      f"{[y for y, c in bad][:6]}")
 
         # ---- 2. a bolt past 226 is still drawn, via clipping ---------------
         past = {y: c for y, c in clip_by_logy.items() if y > MAX_SPRITE_Y}
         check("a bolt past Y=226 is annotated for BOTTOM clipping",
               bool(past) and all(all(x < 0 for x in c) for c in past.values()),
               f"logical Y {sorted(past)[:8]} -> clip {sorted({x for c in past.values() for x in c})}")
-        check("...and its clip is exactly how far past the edge it is",
-              all(c == {-(y - MAX_SPRITE_Y)} for y, c in past.items()),
-              f"mismatches {[(y, c) for y, c in past.items() if c != {-(y - MAX_SPRITE_Y)}][:4]}")
+        check_all("...and its clip is exactly how far past the edge it is",
+                  past.items(), lambda kv: kv[1] == {-(kv[0] - MAX_SPRITE_Y)},
+                  what="out-of-band bolt positions",
+                  detail=lambda items, bad: f"mismatches {bad[:4]}")
         check("...and it is still in the published schedule below Y=226",
               max_logy_drawn[0] > MAX_SPRITE_Y,
               f"deepest logical Y of a scheduled bolt: {max_logy_drawn[0]}")
@@ -161,11 +167,11 @@ def main():
               drawn_below_226[0] == 0,
               f"{drawn_below_226[0]} entries outside; bolt presented Y seen: "
               f"{sorted(allpres)[:4]}..{sorted(allpres)[-4:]}")
-        check("a clipped bolt presents at exactly MAX_SPRITE_Y",
-              all(s_ == {MAX_SPRITE_Y} for y, s_ in pres_by_logy.items()
-                  if y > MAX_SPRITE_Y),
-              str({y: s_ for y, s_ in pres_by_logy.items()
-                   if y > MAX_SPRITE_Y and s_ != {MAX_SPRITE_Y}}))
+        check_all("a clipped bolt presents at exactly MAX_SPRITE_Y",
+                  [(y, s_) for y, s_ in pres_by_logy.items() if y > MAX_SPRITE_Y],
+                  lambda kv: kv[1] == {MAX_SPRITE_Y},
+                  what="clipped bolt positions",
+                  detail=lambda items, bad: str(dict(bad)))
 
         # ---- 4. the bolt reaches the floor, and retires there --------------
         check("a bolt now lives to the last row its ink can be drawn on",

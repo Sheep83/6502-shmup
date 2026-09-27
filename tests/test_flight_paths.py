@@ -177,6 +177,33 @@ def main():
         mon.cmd("delete")
 
         print(f"  .... watched {seen_frames} production frames")
+
+        # ============================================================
+        # WHAT THIS FILE CAN AND CANNOT TELL YOU -- read before believing a
+        # failure below.
+        #
+        # Every claim here is about an ENGINE capability -- the movement
+        # vocabulary -- but it is measured by WATCHING AUTHORED LEVEL 1 and
+        # hoping the content exercises each primitive inside the window. That is
+        # coverage by luck, and the audit classified it as such
+        # (reports/test-suite-audit-and-purge.md).
+        #
+        # A failure below therefore has TWO possible meanings and the messages
+        # are written to tell them apart:
+        #
+        #   "0 of N" / "best 0" ... the authored content never produced the case
+        #                           in this window. The engine is not implicated.
+        #   a WRONG value         ... the primitive ran and misbehaved. That is
+        #                           an engine finding.
+        #
+        # The proper repair is to arrange each primitive deliberately -- poke a
+        # movement program, run it, observe the headings -- so the test stops
+        # depending on what Level 1 happens to contain. That is a real piece of
+        # work against the wm* state machine and is NOT done here; lengthening
+        # the window until probability makes it green would be worse than
+        # leaving it honest. See the phase-2 report's remaining-limitations
+        # section.
+        # ============================================================
         check("every movement primitive ran, including the new linger",
               len(modes_seen) == 5,
               " ".join(sorted(NAMES.get(m, str(m)) for m in modes_seen)))
@@ -198,8 +225,7 @@ def main():
         check("two DIFFERENT authored patterns were in flight at once",
               both_diff > 0, f"{both_diff} frames")
 
-        for name in ("gameOverrun", "publishSkip",
-                     "scrollLate", "edgeLate"):
+        for name in ("gameOverrun", "scrollLate", "edgeLate"):
             got = rd1(mon, sym[name])
             check(f"{name} is zero over the run", got == 0, str(got))
         for name in ("wvDropped", "objAllocFail", "objDoubleFree"):

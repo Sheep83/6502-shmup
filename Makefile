@@ -145,7 +145,7 @@ VICE_OPTS := -saveres -pal -joydev2 $(JOY2) $(KEYSET)
 .PHONY: test-boot test-production test-movement-pool test-no-spawn-row test-turret-regression
 .PHONY: test-encounter-director test-player-ship test-flight-paths test-ingress-egress test-clip-scratch
 .PHONY: test-sfx test-enemy-fire test-pickup test-lifecycle test-player-death test-boss
-.PHONY: test-heat-cadence
+.PHONY: test-heat-cadence smoke test-fast test-full test-soak
 .PHONY: run run-proof420 run-d64 clean
 
 all: build
@@ -359,6 +359,49 @@ test: build
 	python3 tests/test_player_death.py
 	python3 tests/test_boss.py
 	python3 tests/test_heat_cadence.py
+
+# The tier runner. A tier that stops at its first failing suite tells you
+# almost nothing -- the cold fast-tier run aborted after 42s having reported one
+# result out of twelve. So each suite runs, its verdict is collected, and the
+# tier fails at the END if any did. tools/run_tier.sh owns that; it launches
+# nothing itself and kills nothing.
+# ===========================================================================
+# TEST TIERS — measured, not guessed.
+# ===========================================================================
+# Medians over four full runs (reports/test-suite-rehabilitation-phase2.md):
+# the whole suite is ~62 minutes, which is not a thing anyone runs between
+# edits. So it is split by COST, with the cheap tier chosen to still touch
+# every major contract: boot, package data, clipping, HUD publication,
+# encounters, firing, the player, pickups and projectile velocity.
+#
+#   make test-fast    ~7 min, 12 suites   routine use, run it constantly
+#   make test         ~18 min, 13 suites  the curated integration set
+#   make test-full    ~62 min, 33 suites  everything, before a milestone
+#   make test-soak    ~31 min, 7 suites   long timing/content traversal
+#
+# test-soak is separated because its members are slow for a REASON -- they
+# traverse authored content or watch long timing windows -- not because they
+# are less important. Run it when the renderer, scroller or level data changes.
+
+# FAST: WORST-CASE under 90s each over four runs, and runtime that does not swing.
+# ROUTINE REGRESSION -- the everyday safety net. ~75s. See docs/TESTING.md.
+# Routine development = this + a manual playtest. The 33-suite battery below
+# is CERTIFICATION: release, or multiplexer/scroller/raster/clipping changes.
+smoke: build
+	@python3 tests/run_smoke.py
+
+test-fast: build
+	@tools/run_tier.sh test-fast aimed_velocity boot boss_hud_transition clip_scratch enemy_fire heat_cadence lifecycle movement_pool no_spawn_row pickup player_death player_ship
+
+# FULL: every suite in the repository.
+test-full: build
+	@tools/run_tier.sh test-full aimed_fire aimed_velocity attrition_inflives bank2_arena boot boss boss_hud_transition campaign clip_scratch dropper_flight ebullet_clipping encounter_director enemy_fire flight_paths heat_cadence ingress_egress level_assets level_identity lifecycle movement_pool no_spawn_row p_economy_colours pickup player_death player_ship production sfx species_order square_species token_encounter turret_arming turret_regression wave_triggers
+
+# SOAK: the suites whose runtime is UNBOUNDED -- they wait on content-dependent
+# events, so they have been measured from 25s to 2,226s. See the phase-2 report:
+# their runtime and their flakiness are the same defect and want the same fix.
+test-soak: build
+	@tools/run_tier.sh test-soak dropper_flight encounter_director flight_paths ingress_egress production species_order square_species token_encounter
 
 test-boot: build
 	python3 tests/test_boot.py

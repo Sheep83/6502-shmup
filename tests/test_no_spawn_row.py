@@ -16,11 +16,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
-from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
+from harness import (level_const, PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
                      step_n, call, check, report)
 
 PORT = 6715
-NO_SPAWN = 340                  # src/level1/stage_config.asm -> package $f530
+# READ FROM THE LEVEL, NOT RESTATED. This was 340 with a comment pointing at
+# the file that actually defines it; the level was re-authored to 725 and the
+# test failed seven checks about an engine that was behaving correctly.
+NO_SPAWN = level_const("STAGE_NO_SPAWN_ROW")    # src/level1/stage_config.asm
 NOSPAWN_ADDR = 0xf530           # the stage header in the LOADED package
 WAVE_TRIGGERS = 4
 TRIG_ROWS = [48, 52, 90, 126]

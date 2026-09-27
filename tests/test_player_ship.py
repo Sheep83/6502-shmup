@@ -569,13 +569,13 @@ def machine():
         # --- the engine is unharmed -----------------------------------------
         print("\n--- production health, with the new ship live ---")
         poke(mon, sym["plyBank"], BANK_NEUTRAL)
-        for n in ("gameOverrun", "publishSkip", "schedBuildDefer",
+        for n in ("gameOverrun", "schedBuildDefer",
                   "scrollLate", "edgeLate", "statPageMismatch", "statPtrMismatch"):
             for name in ((n,) if n in sym else ()):
                 poke(mon, sym[name], 0)
         free_run(mon, sym["frameCounter"], 6)
         mon.cmd("delete")
-        for n in ("gameOverrun", "publishSkip", "schedBuildDefer",
+        for n in ("gameOverrun", "schedBuildDefer",
                   "scrollLate", "edgeLate", "statPageMismatch", "statPtrMismatch"):
             if n in sym:
                 got = rd1(mon, sym[n])

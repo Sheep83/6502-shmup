@@ -96,6 +96,58 @@ class Monitor:
 # level 1, 138 for level 2 -- is how much of that height it AUTHORS, not how
 # far the scroller runs. So this is one number for the whole campaign, and it
 # is read out of the source that defines it.
+# ---------------------------------------------------------------------------
+# A CLAIM ABOUT NOTHING IS NOT A PASSING CLAIM.
+#
+# `check("every X is Y", all(f(x) for x in xs))` passes when xs is EMPTY, and
+# an empty xs is exactly what a test gets when the scenario it needed never
+# happened -- no enemy spawned, no bolt flew, the window was too short. The
+# suite has 68 such assertions and the aimed-velocity bug showed what they cost:
+# a test can be green for years while proving nothing at all.
+#
+# check_all() splits the two questions it was conflating: did the case occur,
+# and was it correct. A missing case fails with "NO <what> were exercised",
+# which is actionable, instead of passing silently.
+def check_all(msg, seq, pred, what="cases", detail=None):
+    """check() that refuses to pass on an empty sequence."""
+    items = list(seq)
+    if not items:
+        check(f"{msg} -- NO {what} WERE EXERCISED", False,
+              f"0 {what} observed: the test never reached its own scenario")
+        return False
+    bad = [x for x in items if not pred(x)]
+    check(msg, not bad,
+          detail(items, bad) if detail else
+          (f"{len(items)} {what} checked" if not bad
+           else f"{len(bad)} of {len(items)} {what} failed, e.g. {bad[0]!r}"))
+    return not bad
+
+
+def check_exercised(msg, count, minimum=1, what="cases"):
+    """State plainly that the scenario occurred, as its own assertion."""
+    check(f"{msg}", count >= minimum,
+          f"{count} {what} (needed at least {minimum})")
+    return count >= minimum
+
+
+# ---------------------------------------------------------------------------
+# AUTHORED CONSTANTS COME FROM THE LEVEL, NOT FROM A COPY IN THE TEST.
+#
+# test_no_spawn_row carried `NO_SPAWN = 340  # src/level1/stage_config.asm`.
+# The comment named the source of truth and the code ignored it, so when the
+# level was re-authored to 725 the test failed seven checks while the engine was
+# behaving perfectly. That is the same failure as the five stale copies of the
+# stage geometry, and it has the same fix: read it.
+def level_const(name, level="level1", root=None):
+    """The value of a `.const NAME = n` in a level's stage_config.asm."""
+    root = Path(root) if root else Path(__file__).resolve().parent.parent
+    cfg = (root / "src" / level / "stage_config.asm").read_text(encoding="utf-8")
+    m = re.search(rf"^\s*\.const\s+{re.escape(name)}\s*=\s*(\d+)", cfg, re.M)
+    if not m:
+        raise SystemExit(f"{name} not found in src/{level}/stage_config.asm")
+    return int(m.group(1))
+
+
 def stage_geometry(root=None):
     """(metatile_rows, logical_rows, final_view_progress) from the engine."""
     root = Path(root) if root else Path(__file__).resolve().parent.parent
@@ -493,6 +545,72 @@ def frames_elapsed(mon, frame_counter_addr, since):
     return (read16(mon, frame_counter_addr) - since) & 0xffff
 
 
+# ---------------------------------------------------------------------------
+# THREE WAYS TO ADVANCE THE MACHINE, AND THEY ARE NOT INTERCHANGEABLE.
+#
+#   free_run(seconds)        HOST time. Verifies only that the machine moved,
+#                            never how far. Do not assert on a window it sized.
+#   run_frames(n)/step_n(n)  GAME frames, verified, via a breakpoint every
+#                            frame. Exact -- and it PERTURBS TIMING: stopping
+#                            at gameFrame resets the phase relationship between
+#                            the main thread and the raster IRQ, which was
+#                            measured to MASK the rare publishSkip event
+#                            entirely (4,500 stepped frames: nothing; one
+#                            7,631-frame uninterrupted window: one event). Use
+#                            it to sample state, never to judge timing health.
+#   soak_frames(n)           GAME frames, measured, with as few stops as
+#                            possible. The machine runs uninterrupted in long
+#                            slices and the elapsed frames are READ rather than
+#                            assumed. This is the primitive for any window whose
+#                            SUBJECT is timing: publishSkip, gameOverrun,
+#                            scrollLate, edgeLate.
+#
+# The rule: if the test is asking "what did the engine compute", step it. If it
+# is asking "did the engine keep up", soak it.
+def soak_frames(mon, frame_counter_addr, target, max_slices=20):
+    """Run uninterrupted until ~`target` frames have elapsed, and not far past.
+
+    Returns the frames actually run, measured from the counter.
+
+    THE WINDOW HAS TO BE BOUNDED ABOVE AS WELL AS BELOW. A first version slept a
+    fixed four seconds per slice, which in warp is thousands of frames: asked for
+    1,800 it delivered 7,778, and an invariant that only holds over a short
+    window is worthless if the window is four times longer than asked. So the
+    machine is calibrated first -- one short slice measures frames per host
+    second -- and each following slice is sized to the frames still wanted.
+    Monitor contact stays in single figures, nowhere near the per-frame stopping
+    that masks renderer timing.
+    """
+    start = read16(mon, frame_counter_addr)
+
+    def done():
+        return (read16(mon, frame_counter_addr) - start) & 0xffff
+
+    CAL_S = 0.2
+    before = read16(mon, frame_counter_addr)
+    mon.cmd("x")
+    time.sleep(CAL_S)
+    mon.cmd("delete")
+    per_s = max(1.0, ((read16(mon, frame_counter_addr) - before) & 0xffff) / CAL_S)
+
+    for _ in range(max_slices):
+        short = target - done()
+        if short <= 0:
+            return done()
+        # aim at 80% of what is left, so the last slice cannot overshoot far
+        nap = max(0.02, min(2.0, (short * 0.8) / per_s))
+        before = read16(mon, frame_counter_addr)
+        mon.cmd("x")
+        time.sleep(nap)
+        mon.cmd("delete")
+        ran = (read16(mon, frame_counter_addr) - before) & 0xffff
+        if ran == 0:
+            raise RuntimeError("the machine advanced no frames in a slice: "
+                               "it is halted, not slow")
+        per_s = max(1.0, ran / nap)     # re-estimate: host speed drifts
+    return done()
+
+
 def run_frames(mon, frame_counter_addr, n, frame_sym=None):
     """Advance EXACTLY n distinct frames, verified, and return them.
 
@@ -530,8 +648,38 @@ def run_frames(mon, frame_counter_addr, n, frame_sym=None):
         mon.cmd(f"delete {bp}")
 
 
+def run_until_state(mon, frame_counter_addr, predicate, seconds=20, slice_s=0.3):
+    """Wait for predicate() ACROSS STATE CHANGES, including non-game states.
+
+    THIS EXISTS BECAUSE run_frames/run_until ARE GAMEPLAY-ONLY. They arm a
+    breakpoint on gameFrame, and gameFrame does not execute while gsNonGame is
+    set -- irqHandler routes to gsAttractIrq instead. So in ATTRACT, the upgrade
+    shop, GAME OVER or INITIALS those helpers advance NOTHING: the breakpoint
+    never fires, no frames pass, and a caller waiting for a transition waits for
+    ever. That is not a hypothetical -- it hung the smoke runner at the level-2
+    load and silently swallowed a FIRE press in the shop.
+
+    Time here is host time, deliberately: this is for DRIVING the lifecycle and
+    watching for a state change, never for judging timing health. Use
+    soak_frames for that, and run_frames to sample inside gameplay.
+    """
+    end = time.time() + seconds
+    while True:
+        if predicate():
+            return True
+        if time.time() >= end:
+            return False
+        mon.cmd("x")
+        time.sleep(slice_s)
+        mon.cmd("delete")
+
+
 def run_until(mon, frame_counter_addr, predicate, max_frames, frame_sym=None):
     """Step frames until predicate() holds, or max_frames pass.
+
+    GAMEPLAY ONLY: this arms a breakpoint on gameFrame, which does not run in
+    non-game states. Crossing ATTRACT / the shop / GAME OVER needs
+    run_until_state() instead.
 
     Returns (ok, frames_used). THE BUDGET IS FRAMES, so the same call covers
     the same amount of game on a cold host as on a warm one -- which is the
