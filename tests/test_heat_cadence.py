@@ -58,7 +58,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
-from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
+from harness import (stage_geometry, PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
                      step_n, check, report)
 
 sym = symbols(SYM)
@@ -74,7 +74,7 @@ HUD_HEAT_PIXELS = 48
 VB_HUD_SLICES   = (14 * 64) // 128  # HUD_BLOCKS * 64 / VB_SLICE
 
 WPN_HEAT_RISE = 2                   # src/weapon.asm, per frame while firing
-STAGE_FINAL   = 395
+_MT, _LOGICAL, STAGE_FINAL = stage_geometry()   # was 395, stale
 CADENCE_FRAMES = 24
 # THE TWO BOUNDS, AND WHY THEY ARE WHERE THEY ARE.
 #
@@ -265,7 +265,7 @@ def main():
         poke(mon, sym["stageHold"], 0)
         poke(mon, sym["worldProgressLo"], (STAGE_FINAL - 1) & 0xff)
         poke(mon, sym["worldProgressHi"], (STAGE_FINAL - 1) >> 8)
-        top = 1 % 420
+        top = 1 % _LOGICAL
         poke(mon, sym["stageTopRowLo"], top & 0xff)
         poke(mon, sym["stageTopRowHi"], top >> 8)
         reached = False

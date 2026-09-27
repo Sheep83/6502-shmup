@@ -33,7 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
-from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
+from harness import (stage_geometry, PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
                      free_run, step_n, call, check, report)
 
 MAX_OBJECTS = 16
@@ -48,10 +48,14 @@ BOSS_PTR = 0x3580 // 64                     # $d6
 BOSS_COL, BOSS_COL_HIT = 4, 1
 VICTORY_PAUSE = 100
 EXIT_GONE_Y = 55 - 21                       # MIN_SPRITE_Y - SPRITE_HEIGHT
-# src/level1/stage_config.asm x src/terrain.asm, restated independently
-STAGE_METATILE_ROWS, METATILE_H, SCREEN_ROWS = 105, 4, 25
-STAGE_ROWS = STAGE_METATILE_ROWS * METATILE_H                   # 420
-STAGE_FINAL = STAGE_ROWS - SCREEN_ROWS                          # 395
+# READ FROM THE ENGINE, NOT RESTATED. This block said 105 / 420 / 395 and was
+# commented "restated independently", which is how it went stale: the campaign
+# fixed the engine at LEVELPKG_STAGE_ROWS and the numbers became 200 / 800 /
+# 775. The stage then never "completed" where this file expected, the boss
+# never started, and every assertion below it either failed or crashed.
+SCREEN_ROWS = 25
+STAGE_METATILE_ROWS, STAGE_ROWS, STAGE_FINAL = stage_geometry()
+METATILE_H = STAGE_ROWS // STAGE_METATILE_ROWS
 JOY_IDLE, JOY_RIGHT_FIRE = 0xff, 0xe7
 PORT = 6676
 
@@ -120,7 +124,7 @@ def main():
     check("the stage boundary follows from the authored geometry: "
           f"{STAGE_METATILE_ROWS} metatile rows x {METATILE_H} - {SCREEN_ROWS} "
           f"viewport rows = {STAGE_FINAL}",
-          STAGE_FINAL == 395, str(STAGE_FINAL))
+          STAGE_FINAL == STAGE_ROWS - SCREEN_ROWS, str(STAGE_FINAL))
 
     v = None
     try:
@@ -348,6 +352,14 @@ def main():
             rd1(mon, sym["plyX"])))
         rising = [f for f in flight if f[0] == LP_EXIT]
         check("the exit runs", bool(rising), str(flight[:3]))
+        # A RECORDED FAILURE DOES NOT STOP THE TEST, so the precondition has to
+        # be honoured explicitly. Without this the empty list below raised
+        # IndexError, the run ended with no verdict at all, and every later
+        # assertion in this file was lost -- turning one stale constant into a
+        # crash that hid the other twenty checks.
+        if not rising:
+            print("  -- exit never ran: skipping the ascent checks that need it")
+            return report("boss")
         vels = [f[2] for f in rising]
         check("the ship ACCELERATES rather than jumping to a fixed speed",
               vels[0] < vels[len(vels) // 2] < max(vels) and max(vels) > 8,

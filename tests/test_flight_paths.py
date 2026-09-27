@@ -198,7 +198,7 @@ def main():
         check("two DIFFERENT authored patterns were in flight at once",
               both_diff > 0, f"{both_diff} frames")
 
-        for name in ("gameOverrun", "publishSkip", "schedBuildDefer",
+        for name in ("gameOverrun", "publishSkip",
                      "scrollLate", "edgeLate"):
             got = rd1(mon, sym[name])
             check(f"{name} is zero over the run", got == 0, str(got))

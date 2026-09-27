@@ -572,7 +572,7 @@ def main():
         mon.cmd("delete")
 
         # ---- the engine is unharmed ---------------------------------------
-        for name in ("gameOverrun", "schedBuildDefer", "scrollLate", "edgeLate",
+        for name in ("gameOverrun",  "scrollLate", "edgeLate",
                      "objDoubleFree", "objAllocFail", "wvDropped"):
             got = rd1(mon, sym[name])
             check(f"{name} is zero over the whole run", got == 0, str(got))

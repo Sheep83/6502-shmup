@@ -44,6 +44,7 @@ EBULLET_MAX   = 3               # src/ebullet.asm: the shared cap
 EBULLET_VY    = 3
 SPECIES_RING  = 0               # src/enemy.asm: a species IS its anim row
 ENEMY_FIRE_DOWN = 1
+ENEMY_FIRE_AIMED = 2            # src/enemy.asm
 ENEMY_MUZZLE_X = 8              # src/waves.asm
 ENEMY_MUZZLE_Y = 18
 WAVE_FIRE_PERIOD = 48
@@ -234,9 +235,24 @@ def main():
                 continue
             granted.append(rd1(mon, sym["enyFire"] + born[0]))
             retire_enemy(mon, sym, born[0])         # give the slot straight back
+        # THE MASK DECIDES WHO, THE AUTHORING DECIDES WHAT, and this check is
+        # named for the first of those. It used to demand
+        # [ENEMY_FIRE_DOWN, 0, ENEMY_FIRE_DOWN, 0] -- pinning the MODE as well
+        # as the pattern -- and went stale the moment the sweep definition was
+        # authored to fire AIMED: the engine returned [2, 0, 2, 0], which is
+        # the right members carrying the right licence, and the test called it
+        # a failure. Changing the 1 to a 2 would only re-pin it to today's
+        # content, so the claim is now the one in the name: exactly the masked
+        # members are licensed, and they all carry the same authored mode.
+        licensed = [i for i, g in enumerate(granted) if g]
+        modes_granted = {g for g in granted if g}
         check("member n fires if and only if the authored mask says bit n",
-              granted == [ENEMY_FIRE_DOWN, 0, ENEMY_FIRE_DOWN, 0],
+              licensed == [0, 2],
               f"members 0..3 got {granted} from mask {bin(0b0101)}")
+        check("...and every licensed member carries ONE authored fire mode",
+              len(modes_granted) == 1 and modes_granted <= {ENEMY_FIRE_DOWN,
+                                                            ENEMY_FIRE_AIMED},
+              f"modes granted {sorted(modes_granted)}")
 
         # THE SPECIES CAN VETO IT. Both level-1 species fire, so the row is
         # patched to NONE in RAM for one spawn: an appearance authored to fire,

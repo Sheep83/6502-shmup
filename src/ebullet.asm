@@ -456,9 +456,35 @@ ebulletTick:
     bcc ebulletRetire
 
 !vertical:
+    // THE SLOPE'S OWN VERTICAL STEP, not the constant.
+    //
+    // This read `adc #EBULLET_VY`, so every bolt fell three pixels a frame
+    // whatever ebulletAim had decided. objVX was consumed four instructions
+    // above and objVY was not consumed at all -- written at spawn, written
+    // again from ebulletAimVY, and never read by anything. The steepest slope
+    // therefore stored a vertical step of 2 and flew at 3, which is the one
+    // case the table exists to prevent: 3.61 px/frame against the vertical's
+    // 3.00, a 20% spread across an arc that is supposed to be normalised.
+    //
+    // MEASURED, from position rather than from the stored byte, before and
+    // after (reports/enemy-projectile-velocity-consumption.md):
+    //
+    //     |VX|   stored VY   was        now
+    //      0        3        3.00       3.00
+    //      1        3        3.16       3.16
+    //      2        2        3.61       2.83
+    //
+    // THE DOMAIN IS WHY `adc` IS STILL SAFE. A projectile's objVY is 2 or 3
+    // and nothing else: ebulletSpawn writes EBULLET_VY before the slot is
+    // activated, and the aimed path may then overwrite it from ebulletAimVY,
+    // whose every entry is positive. It is never zero, so no bolt can stall,
+    // and never negative, so the carry out of this add still means only one
+    // thing -- the position wrapped past 255 and the bolt is below the screen.
+    // A future upward projectile would need a signed step here, and would have
+    // to revisit this add and the retirement test together.
     lda logY,x
     clc
-    adc #EBULLET_VY
+    adc objVY,x
     bcs ebulletRetire                   // wrapped: definitely below the screen
     sta logY,x
     cmp #EBULLET_Y_MAX

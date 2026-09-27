@@ -165,10 +165,18 @@ def main():
               f"direct {a[k]}  transitioned {b[k]}")
 
     # the charset SELECT bits of $d018, which are not the alternating half
+    # BIT 7 IS NOT A MODE BIT. This masked 0xF8, which excludes YSCROLL and
+    # KEEPS bit 7 -- and bit 7 of a $d011 READ is raster bit 8, not the
+    # raster-compare high bit it is on a WRITE (src/renderer.asm says so where
+    # it refuses to read-modify-write this register). So the comparison
+    # included WHERE THE BEAM WAS at sample time, and passed or failed on beam
+    # position: FAIL on one baseline run and PASS on the next, from an
+    # unchanged binary. 0x78 is the actual mode field -- DEN, RSEL, BMM, ECM.
     check("direct and transitioned level 2 agree: $d011 mode bits",
-          (a["$d011"] & 0xF8) == (b["$d011"] & 0xF8),
+          (a["$d011"] & 0x78) == (b["$d011"] & 0x78),
           f"direct ${a['$d011']:02x}  transitioned ${b['$d011']:02x} "
-          f"(YSCROLL excluded: it is published a frame behind scrollFine)")
+          f"(YSCROLL and RST8 excluded: one is published a frame behind "
+          f"scrollFine, the other is the live raster MSB)")
     check("direct and transitioned level 2 agree: $d018 charset bits",
           (a["$d018"] & 0x0E) == (b["$d018"] & 0x0E),
           f"direct ${a['$d018']:02x}  transitioned ${b['$d018']:02x} "

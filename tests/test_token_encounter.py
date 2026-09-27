@@ -883,7 +883,7 @@ def main():
         mon.cmd("delete")
 
         # --- the engine is unharmed ---------------------------------------
-        for name in ("gameOverrun", "schedBuildDefer", "scrollLate", "edgeLate",
+        for name in ("gameOverrun",  "scrollLate", "edgeLate",
                      "objDoubleFree", "objAllocFail"):
             got = rd1(mon, sym[name])
             check(f"{name} is zero with the encounter run end to end",

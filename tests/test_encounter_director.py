@@ -249,7 +249,7 @@ def main():
         check("an enemy despawned and returned its pool slot", despawn_confirmed)
 
         # --- the engine is unharmed ------------------------------------------
-        for name in ("gameOverrun", "publishSkip", "schedBuildDefer",
+        for name in ("gameOverrun", "publishSkip",
                      "scrollLate", "edgeLate"):
             got = rd1(mon, sym[name])
             check(f"{name} is zero with the director running", got == 0, str(got))

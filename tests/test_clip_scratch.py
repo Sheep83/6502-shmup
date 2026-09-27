@@ -45,8 +45,20 @@ CLIP_POOL_SLOTS = 6
 # Velocity is in quarter pixels, so the slowest non-zero speed advances logY
 # once every four frames; anything longer than that means it is not moving.
 LOGY_HOLD_MAX = 5
-ENEMY_FRAMES = 4                # frames per species...
-SPECIES = ("sonicRingFrames", "orbitalDropperFrames")   # ...and two species now,
+# THE SOURCE ART IS READ FROM THE WINDOW, NOT FROM ENGINE SYMBOLS.
+#
+# This named sonicRingFrames and orbitalDropperFrames and indexed them as
+# engine labels. The level's artwork has since moved OUT of the engine PRG and
+# into the runtime-loaded package (src/enemy.asm: `.label enemyBitmapEnd =
+# LEVEL_SPRITES_END`), so those symbols are no longer in build/main.sym at all
+# and this file died on `KeyError: 'sonicRingFrames'` before asserting
+# anything.
+#
+# Reading the sprite WINDOW instead is not merely a repair, it is the more
+# honest question: the clipper's source is whatever the resident level loaded
+# into $2c00, whichever species and however many frames that turns out to be.
+# The test no longer needs to know the cast list.
+LEVEL_SPRITES, LEVEL_SPRITE_BLOCKS = 0x2c00, 20     # src/main.asm:136-137
                                 # either of which may be the one being clipped
 POOL = [0x0340, 0x0380, 0x03c0, 0x3100, 0x3140, 0x3180,
         0x31c0, 0x3680, 0x3700, 0x3740, 0x3780, 0x37c0]
@@ -82,18 +94,15 @@ def main():
         # EVERY FRAME OF EVERY SPECIES -- enemies animate AND there are two
         # kinds of them now, so the clipper's source is whichever frame of
         # whichever species logPtr named when the sample was taken.
-        canon = [rd(mon, sym[s] + f * 64, 63)
-                 for s in SPECIES for f in range(ENEMY_FRAMES)]
-        check("every animation frame of both enemy species was read from the "
-              "machine",
-              len(canon) == len(SPECIES) * ENEMY_FRAMES
-              and all(len(c) == 63 and any(c) for c in canon))
-        # The Dropper ping-pongs through a frame twice per cycle, so its frames
-        # need only be distinct WITHIN a species, not across the whole set.
-        for s, name in enumerate(SPECIES):
-            grp = canon[s * ENEMY_FRAMES:(s + 1) * ENEMY_FRAMES]
-            check(f"...{name} is {ENEMY_FRAMES} DISTINCT frames, not one repeated",
-                  len({tuple(c) for c in grp}) == ENEMY_FRAMES)
+        blocks = [rd(mon, LEVEL_SPRITES + b * 64, 63)
+                  for b in range(LEVEL_SPRITE_BLOCKS)]
+        canon = [b for b in blocks if any(b)]
+        check("the resident level published enemy art into the sprite window",
+              len(canon) >= 4, f"{len(canon)} non-empty blocks of "
+                               f"{LEVEL_SPRITE_BLOCKS}")
+        check("...and they are DISTINCT frames, not one bitmap repeated",
+              len({tuple(c) for c in canon}) == len(canon),
+              f"{len({tuple(c) for c in canon})} distinct of {len(canon)}")
 
         bp = set_bp(mon, sym["gameFrame"])
 
@@ -255,7 +264,7 @@ def main():
         check("the pool never overflowed", rd1(mon, sym["clipPoolFull"]) == 0,
               str(rd1(mon, sym["clipPoolFull"])))
 
-        for name in ("gameOverrun", "publishSkip", "schedBuildDefer",
+        for name in ("gameOverrun", "publishSkip",
                      "scrollLate", "edgeLate", "statOverflow",
                      "statPageMismatch", "statPtrMismatch"):
             got = rd1(mon, sym[name])

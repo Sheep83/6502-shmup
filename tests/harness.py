@@ -79,6 +79,38 @@ class Monitor:
         except Exception: pass
 
 
+# ---------------------------------------------------------------------------
+# STAGE GEOMETRY, READ FROM THE ENGINE RATHER THAN RESTATED.
+#
+# Five suites carried their own copy of this, one of them commented "restated
+# independently", and every copy went stale the day the campaign landed: they
+# said 105 metatile rows / 420 logical / 395 final while the engine had been
+# fixed at 200 / 800 / 775. test_boss then asserted STAGE_FINAL == 395, never
+# saw the stage complete, never started the boss, and crashed indexing an empty
+# list -- and test_heat_cadence failed ten checks downstream of the same thing.
+#
+# THE HEIGHT IS THE ENGINE'S, NOT THE LEVEL'S. src/levelpkg.asm fixes
+# LEVELPKG_STAGE_ROWS for every package ("the campaign fixed the engine at one
+# height ... and every package now emits exactly that", enforced by a build
+# guard in src/level_package.asm). A level's own STAGE_METATILE_ROWS -- 200 for
+# level 1, 138 for level 2 -- is how much of that height it AUTHORS, not how
+# far the scroller runs. So this is one number for the whole campaign, and it
+# is read out of the source that defines it.
+def stage_geometry(root=None):
+    """(metatile_rows, logical_rows, final_view_progress) from the engine."""
+    root = Path(root) if root else Path(__file__).resolve().parent.parent
+    pkg = (root / "src" / "levelpkg.asm").read_text(encoding="utf-8")
+    m = re.search(r"^\s*\.const\s+LEVELPKG_STAGE_ROWS\s*=\s*(\d+)", pkg, re.M)
+    if not m:
+        raise SystemExit("LEVELPKG_STAGE_ROWS not found in src/levelpkg.asm")
+    rows = int(m.group(1))
+    terrain = (root / "src" / "terrain.asm").read_text(encoding="utf-8")
+    mh = re.search(r"^\s*\.const\s+METATILE_H\s*=\s*(\d+)", terrain, re.M)
+    metatile_h = int(mh.group(1)) if mh else 4
+    logical = rows * metatile_h
+    return rows, logical, logical - 25          # SCREEN_ROWS
+
+
 def port_owner(port):
     """The PID listening on `port`, or None.
 
@@ -261,6 +293,21 @@ class Vice:
         # so the responsiveness probe above left it standing still -- sleeping
         # would advance nothing at all. Each press and release has to be carried
         # by a real run of frames.
+        # THE BOOT RACE IS REAL AND IS NOT FIXED HERE. Sampling gsState once
+        # per wall-clock second can miss PLAYING entirely: hudLives is not
+        # topped up until PLAYING has been SEEN, so in warp the game can start,
+        # the parked ship can lose every life, and the lifecycle can be sitting
+        # in INITIALS by the next sample -- which is the intermittent
+        # `never reached PLAYING: gsState = 3` that test_player_ship hits.
+        #
+        # A frame-stepped version of this loop WAS written and measured, and it
+        # did fix that crash. It also moved where every other suite starts, and
+        # two that had been passing (test_turret_arming, test_boss_hud_
+        # transition) then failed deterministically, because their assertions
+        # are coupled to the old, sloppier arrival point. Trading one
+        # intermittent crash for two deterministic failures is not an
+        # improvement, so the racy loop stands until those couplings are
+        # repaired in the same change. See the audit report.
         for _ in range(8):
             poke(mon, sym["joyState"], 0xef)        # fire down
             free_run(mon, sym["frameCounter"], 1)
@@ -425,6 +472,96 @@ def poke(mon, addr, val):
 def read16(mon, addr):
     v = rd(mon, addr, 2)
     return v[0] | (v[1] << 8)
+
+
+# ---------------------------------------------------------------------------
+# WAIT IN FRAMES, NOT IN SECONDS.
+#
+# free_run() below advances WALL-CLOCK time and verifies only that the machine
+# is moving -- not how far it got. That is the right primitive for "let the
+# game breathe", and the wrong one for "wait until X happens", because every
+# event this engine has is denominated in FRAMES. Eight seconds of host time
+# buys a different number of frames on a cold first run after a build, on a
+# loaded machine, or when another suite is running beside this one -- which is
+# exactly the "fails the first time, passes the second" and "fails in batch,
+# passes alone" pattern this suite has been chasing.
+#
+# So: wait on the frame counter. The budget is frames, the machine is advanced
+# in short slices, and a stalled emulator is an error rather than a timeout.
+def frames_elapsed(mon, frame_counter_addr, since):
+    """How many frames have passed since `since`, 16-bit wraparound safe."""
+    return (read16(mon, frame_counter_addr) - since) & 0xffff
+
+
+def run_frames(mon, frame_counter_addr, n, frame_sym=None):
+    """Advance EXACTLY n distinct frames, verified, and return them.
+
+    A BREAKPOINT IS NOT OPTIONAL HERE, and the first draft of this helper is
+    why the comment says so. It advanced the machine with `x` + sleep() and
+    called the result a frame budget -- but with nothing armed, `x` runs free
+    until the next monitor command, so a 0.25s slice in warp is THOUSANDS of
+    frames. Asking for 30 delivered about 30,000, the parked ship lost every
+    life inside the "budget", and the lifecycle sailed past PLAYING into
+    INITIALS. That is the same wall-clock-for-frames error this helper exists
+    to remove, reproduced inside the fix for it.
+
+    So the frame routine is armed and every stop is verified against the
+    counter, exactly as step_n() does for sampling.
+    """
+    sym = symbols(SYM)
+    addr = frame_sym if frame_sym is not None else sym["gameFrame"]
+    bp = set_bp(mon, addr)
+    try:
+        start = prev = read16(mon, frame_counter_addr)
+        tries, budget = 0, n * 6 + 20
+        while frames_elapsed(mon, frame_counter_addr, start) < n:
+            tries += 1
+            if tries > budget:
+                raise RuntimeError(
+                    f"only {frames_elapsed(mon, frame_counter_addr, start)} of "
+                    f"{n} frames ran in {tries} stops: the machine is halted")
+            mon.cmd("x")
+            now = read16(mon, frame_counter_addr)
+            if now == prev:
+                continue                    # a dropped/duplicated stop
+            prev = now
+        return frames_elapsed(mon, frame_counter_addr, start)
+    finally:
+        mon.cmd(f"delete {bp}")
+
+
+def run_until(mon, frame_counter_addr, predicate, max_frames, frame_sym=None):
+    """Step frames until predicate() holds, or max_frames pass.
+
+    Returns (ok, frames_used). THE BUDGET IS FRAMES, so the same call covers
+    the same amount of game on a cold host as on a warm one -- which is the
+    whole point, and what free_run() cannot promise. The predicate is sampled
+    EVERY frame, so a state that is only briefly true cannot be stepped over.
+    """
+    sym = symbols(SYM)
+    addr = frame_sym if frame_sym is not None else sym["gameFrame"]
+    if predicate():
+        return True, 0
+    bp = set_bp(mon, addr)
+    try:
+        start = prev = read16(mon, frame_counter_addr)
+        tries, budget = 0, max_frames * 6 + 20
+        while True:
+            used = frames_elapsed(mon, frame_counter_addr, start)
+            if used >= max_frames:
+                return False, used
+            tries += 1
+            if tries > budget:
+                raise RuntimeError("the machine stopped advancing frames")
+            mon.cmd("x")
+            now = read16(mon, frame_counter_addr)
+            if now == prev:
+                continue
+            prev = now
+            if predicate():
+                return True, frames_elapsed(mon, frame_counter_addr, start)
+    finally:
+        mon.cmd(f"delete {bp}")
 
 
 def free_run(mon, frame_counter_addr, seconds, slice_s=2.0, max_stalls=30):

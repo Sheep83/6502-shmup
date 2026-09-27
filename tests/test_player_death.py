@@ -37,7 +37,7 @@ DEATH_LEN = BOOM_FRAMES * BOOM_HOLD             # 48 frames
 INVULN = 100
 GS_PLAYING, GS_GAMEOVER = 1, 2
 JOY_IDLE, JOY_RIGHT_FIRE = 0xff, 0xe7
-PORT = 6675
+PORT = 6678
 
 
 def align(mon, sym):

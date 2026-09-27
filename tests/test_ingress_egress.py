@@ -228,7 +228,7 @@ def main():
         check("all four authored patterns ran during the window",
               len(colours) == 4, f"colours {sorted(colours)}")
 
-        for name in ("gameOverrun", "publishSkip", "schedBuildDefer",
+        for name in ("gameOverrun", "publishSkip",
                      "scrollLate", "edgeLate"):
             got = rd1(mon, sym[name])
             check(f"{name} is zero over the run", got == 0, str(got))

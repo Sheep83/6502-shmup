@@ -159,13 +159,29 @@ def main():
     vxs = sorted({vx for vx, _ in both.values()})
     check("AIMED: every horizontal velocity is inside the quantised arc",
           all(abs(vx) <= EBULLET_VX_MAX for vx in vxs), str(vxs))
+    # TWO CHECKS USED TO LIVE HERE AND BOTH WERE FALSE CONFIDENCE.
+    #
+    # The first asserted that each slope "carries its matched vertical step" by
+    # reading the STORED objVY. The second computed the shot's speed as
+    # sqrt(vx^2 + vy^2) from those same stored bytes and required the arc to be
+    # normalised within 10%. Between them they certified a speed the projectile
+    # did not fly: ebulletTick consumed objVX for the horizontal step and a
+    # CONSTANT for the vertical, so the steepest slope stored 2 and moved 3 --
+    # and both checks passed throughout, because every byte they read was
+    # correct. They pass identically on the fixed and the unfixed engine.
+    #
+    # The 10% gate had a second defect of its own: the authored table [3,3,2]
+    # spreads 11.7% by construction, so it could never hold once all three
+    # buckets were observed together -- it survived by not always seeing them.
+    #
+    # Both claims are now made from MEASURED DISPLACEMENT in
+    # tests/test_aimed_velocity.py, which fails on the bug these could not see.
+    # What stays in this file is the coverage that file does not have: that the
+    # bolt leans toward the ship, that it is not homing, that FIRE_DOWN is
+    # straight, and that all three species reach the aimed path.
     pairs = {(abs(vx), vy) for vx, vy in both.values()}
-    check("AIMED: each slope carries its matched vertical step",
-          all(EXPECTED_VY[a] == vy for a, vy in pairs), str(sorted(pairs)))
-    speeds = sorted({round((a * a + vy * vy) ** 0.5, 2) for a, vy in pairs})
-    spread = (max(speeds) - min(speeds)) / min(speeds) * 100 if speeds else 0
-    check("AIMED: the diagonal does not outrun the vertical (within 10%)",
-          spread <= 10.0, f"speeds {speeds} -> {spread:.1f}% spread")
+    print(f"  info (vx,vy) pairs observed: {sorted(pairs)} "
+          f"-- speed is asserted from motion in test_aimed_velocity.py")
 
     # ---- 4. not homing, and all three species, in one session -------------
     mixed = ["RING", "DROPPER", "SQUARE"] * 3
