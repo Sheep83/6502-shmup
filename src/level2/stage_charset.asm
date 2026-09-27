@@ -137,13 +137,13 @@ terrainGlyphs:
     .byte   0, 60, 60, 60, 60, 60, 60,  0   // code 214
     .byte   0, 60, 60, 20, 20, 60, 60,  0   // code 215
     .byte   0,255,255,255,255,255,255, 40   // code 216
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 217
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 218
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 219
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 220
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 221
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 222
-    .byte   0,  0,  0,  0,  0,  0,  0,  0   // code 223
+    .byte   0,  0,  0, 48, 48,  0,  0,  0   // code 217
+    .byte   0,  0,  0,  0,  0,  0, 12,  0   // code 218
+    .byte   0, 48, 60,  0,  0,  0,  0,  0   // code 219
+    .byte   0,  0,192,  0,  0,  0,  3,  0   // code 220
+    .byte   0,  0,  0,  0,  8,  8,  0,  0   // code 221
+    .byte   0,  0,  0,  0,  0, 16,  0,  0   // code 222
+    .byte   0,128, 32, 32,  0,  0,  0,  0   // code 223
 terrainGlyphsEnd:
 .if (terrainGlyphsEnd - terrainGlyphs != TERRAIN_GLYPH_COUNT * 8) {
     .error "terrainGlyphs data size does not match TERRAIN_GLYPH_COUNT * 8"
