@@ -259,6 +259,47 @@ class EncounterWorkspace(tk.Toplevel):
         self.t_fire_note = ttk.Label(d, text="", font=("TkDefaultFont", 9))
         self.t_fire_note.grid(row=5, column=1, columnspan=2, sticky="w")
 
+        # ---- how THIS appearance is coloured -----------------------------
+        # ON THE TRIGGER, not on the wave definition, and that is the whole
+        # point of the control being here. A definition is reusable formation
+        # vocabulary; the same `sweep` can now arrive cyan at one row and mixed
+        # at another without being cloned, and editing one occurrence cannot
+        # reach any other.
+        ttk.Label(d, text="colour mode").grid(row=6, column=0, sticky="w")
+        self.t_colmode = ttk.Combobox(
+            d, state="readonly", width=18,
+            values=[C.COLOUR_MODE_LABELS[m] for m in ("FIXED", "RANDOM")])
+        self.t_colmode.grid(row=6, column=1, sticky="w")
+        self.t_colmode.bind("<<ComboboxSelected>>", self._trigger_apply)
+        ttk.Label(d, text="random gives each enemy of this appearance its own "
+                          "colour at spawn, avoiding black, the shared sprite "
+                          "colours and the terrain",
+                  font=("TkDefaultFont", 9), wraplength=PROG_TEXT_WRAP,
+                  justify="left").grid(row=6, column=2, sticky="w", padx=(8, 0))
+
+        # HOW THIS APPEARANCE ATTACKS. Directly under the fire mask, because
+        # the two are one question asked twice: the mask says WHICH members
+        # shoot, this says HOW the ones that do aim. An empty mask is still the
+        # only way to say "this appearance does not shoot at all".
+        ttk.Label(d, text="fire mode").grid(row=8, column=0, sticky="w")
+        self.t_firemode = ttk.Combobox(
+            d, state="readonly", width=18,
+            values=[C.FIRE_MODE_LABELS[m] for m in ("DOWN", "AIMED")])
+        self.t_firemode.grid(row=8, column=1, sticky="w")
+        self.t_firemode.bind("<<ComboboxSelected>>", self._trigger_apply)
+        self.t_firemode_note = ttk.Label(d, text="", font=("TkDefaultFont", 9),
+                                         wraplength=PROG_TEXT_WRAP,
+                                         justify="left")
+        self.t_firemode_note.grid(row=8, column=2, sticky="w", padx=(8, 0))
+
+        ttk.Label(d, text="colour").grid(row=7, column=0, sticky="w")
+        self.t_colour = ttk.Entry(d, width=8)
+        self.t_colour.grid(row=7, column=1, sticky="w")
+        self.t_colour.bind("<Return>", self._trigger_apply)
+        self.t_colour.bind("<FocusOut>", self._trigger_apply)
+        self.t_colour_note = ttk.Label(d, text="", font=("TkDefaultFont", 9))
+        self.t_colour_note.grid(row=7, column=2, sticky="w", padx=(8, 0))
+
     # ------------------------------------------------------------------ waves
     def _build_waves(self, nb):
         f = ttk.Frame(nb, padding=6)
@@ -284,7 +325,8 @@ class EncounterWorkspace(tk.Toplevel):
                 ("start_y", "spawn Y (0..%d)" % C.MAX_SPAWN_Y),
                 ("x_step", "X step per member (signed)"),
                 ("y_step", "Y step per member (signed)"),
-                ("colour", "colour (0..%d)" % C.MAX_COLOUR),
+                # NO COLOUR ROW. Enemy colour is a property of the OCCURRENCE,
+                # not of the reusable formation, and lives on the trigger.
                 ("heading", "launch heading (0..%d)" % (C.WM_HEAD_LEN - 1)))
         for i, (key, hint) in enumerate(rows):
             ttk.Label(d, text=key.replace("_", " ")).grid(row=i, column=0, sticky="w")
@@ -319,24 +361,11 @@ class EncounterWorkspace(tk.Toplevel):
         self.w_prog = ttk.Combobox(d, state="readonly", width=18)
         self.w_prog.grid(row=r, column=1, columnspan=2, sticky="w")
         self.w_prog.bind("<<ComboboxSelected>>", self._wave_apply)
-        # HOW THIS WAVE'S ENEMIES SHOOT. On the definition rather than the
-        # trigger because it is a property of the wave's design, and because a
-        # shared definition is exactly the unit an author wants to opt into
-        # aimed fire. The default is the behaviour every existing wave already
-        # has, so nothing changes by being opened.
-        ttk.Label(d, text="firing").grid(row=r + 1, column=0, sticky="w")
-        self.w_fire = ttk.Combobox(d, state="readonly", width=18,
-                                   values=[C.FIRE_MODE_LABELS[m]
-                                           for m in ("DOWN", "AIMED")])
-        self.w_fire.grid(row=r + 1, column=1, columnspan=2, sticky="w")
-        self.w_fire.bind("<<ComboboxSelected>>", self._wave_apply)
-        ttk.Label(d, text="aimed shots sample the ship's position when they are "
-                          "fired and do not follow it",
-                  font=("TkDefaultFont", 9), wraplength=PROG_TEXT_WRAP,
-                  justify="left").grid(row=r + 1, column=3, sticky="w",
-                                       padx=(8, 0))
+        # NO FIRING CONTROL HERE. How a formation attacks is a property of the
+        # OCCURRENCE, not of the reusable shape, and lives on the trigger
+        # beside the fire mask that says which of its members shoot.
         self.w_used = ttk.Label(d, text="", font=("TkDefaultFont", 9))
-        self.w_used.grid(row=r + 2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.w_used.grid(row=r + 1, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
     # --------------------------------------------------------------- programs
     def _build_programs(self, nb):
@@ -757,6 +786,12 @@ class EncounterWorkspace(tk.Toplevel):
             self.t_wave.set(""); self.t_species.set(""); self.t_side.set("")
             self.t_where.configure(text="")
             self.t_fire_note.configure(text="")
+            self.t_colmode.set("")
+            self.t_colour.configure(state="normal")
+            self.t_colour.delete(0, "end")
+            self.t_colour_note.configure(text="")
+            self.t_firemode.set("")
+            self.t_firemode_note.configure(text="")
             for child in self.t_fire.winfo_children():
                 child.destroy()
             return
@@ -768,6 +803,20 @@ class EncounterWorkspace(tk.Toplevel):
         # A RING carries a side and ignores it, so the control is disabled
         # rather than inviting a meaningless choice.
         self.t_side.configure(state="readonly" if t.species == "DROPPER" else "disabled")
+
+        # THIS APPEARANCE'S COLOUR. Written while the entry is enabled: a
+        # disabled ttk.Entry ignores insert and delete from code as well as
+        # from the keyboard, so leaving the previous trigger's RANDOM state in
+        # place here would show the previous trigger's colour on this one.
+        self.t_colmode.set(C.COLOUR_MODE_LABELS.get(t.resolved_colour_mode,
+                                                    t.resolved_colour_mode))
+        self.t_colour.configure(state="normal")
+        self.t_colour.delete(0, "end")
+        self.t_colour.insert(0, str(t.resolved_colour))
+        self._sync_trigger_colour_enabled(t.resolved_colour_mode)
+        self.t_firemode.set(C.FIRE_MODE_LABELS.get(t.resolved_fire_mode,
+                                                   t.resolved_fire_mode))
+        self._sync_fire_mode_note(t)
 
         # Where the moment falls, in terrain terms -- DISPLAY ONLY. The authored
         # value is worldProgress; no converted coordinate is stored.
@@ -831,7 +880,6 @@ class EncounterWorkspace(tk.Toplevel):
         self.w_compass.set_heading(d.heading)
         self.w_head_text.set(self._describe_heading(d.heading))
         self.w_prog.set(d.movement_program)
-        self.w_fire.set(C.FIRE_MODE_LABELS.get(d.fire_mode, d.fire_mode))
         users = self.controller.triggers_using_definition(d.id)
         rows = ", ".join(str(self.controller.project.triggers[i].world_progress)
                          for i in users)
@@ -1476,6 +1524,22 @@ class EncounterWorkspace(tk.Toplevel):
         }
         if self.t_species.get() == "DROPPER" and self.t_side.get():
             fields["dropper_side"] = self.t_side.get()
+        fields["colour"] = _int_or(self.t_colour.get(), t.resolved_colour)
+        label = self.t_colmode.get()
+        for key, text in C.COLOUR_MODE_LABELS.items():
+            if text == label:
+                fields["colour_mode"] = key
+                break
+        # THE ENTRY FOLLOWS THE MODE IMMEDIATELY, before the refresh the edit
+        # triggers, so choosing Random greys the colour out as the author
+        # watches rather than on the next selection.
+        self._sync_trigger_colour_enabled(
+            fields.get("colour_mode", t.resolved_colour_mode))
+        label = self.t_firemode.get()
+        for key, text in C.FIRE_MODE_LABELS.items():
+            if text == label:
+                fields["fire_mode"] = key
+                break
         i = self._edit(self.controller.update_trigger, self.sel_trigger, **fields)
         if i is not None:
             self.sel_trigger = i
@@ -1499,6 +1563,37 @@ class EncounterWorkspace(tk.Toplevel):
                 "The referenced wave does not send them.", parent=self):
             return
         self._edit(self.controller.trim_fire_mask, self.sel_trigger)
+
+    def _sync_fire_mode_note(self, t):
+        """Say plainly when the mode cannot matter.
+
+        An empty fire mask means no member of this appearance shoots, so the
+        mode is authored data nobody will ever read -- and src/waves.asm
+        refuses to assemble an AIMED appearance with an empty mask. Saying so
+        here is cheaper than a build failure.
+        """
+        if not t.fire_bits:
+            self.t_firemode_note.configure(
+                text="no member of this appearance fires -- tick a member "
+                     "above before choosing a mode", foreground=COL_ERROR)
+        else:
+            self.t_firemode_note.configure(
+                text="aimed shots sample the ship's position when they are "
+                     "fired and do not follow it", foreground="")
+
+    def _sync_trigger_colour_enabled(self, mode):
+        """Grey the colour out when the runtime is not going to read it.
+
+        THE VALUE IS SHOWN, NOT BLANKED. A random appearance keeps the colour
+        the author chose -- switching back to Fixed returns it -- so hiding the
+        number would misrepresent what the file holds. Disabled says "this is
+        still here and is not in use", which is exactly the truth.
+        """
+        random = mode == "RANDOM"
+        self.t_colour.configure(state="disabled" if random else "normal")
+        self.t_colour_note.configure(
+            text=("not used while the mode is random"
+                  if random else "C64 colour 0..%d" % C.MAX_COLOUR))
 
     # ---- wave -------------------------------------------------------------
     def _wave_selected(self, _e=None):
@@ -1574,11 +1669,6 @@ class EncounterWorkspace(tk.Toplevel):
                   for k, e in self.w_fields.items()}
         if self.w_prog.get():
             fields["movement_program"] = self.w_prog.get()
-        label = self.w_fire.get()
-        for key, text in C.FIRE_MODE_LABELS.items():
-            if text == label:
-                fields["fire_mode"] = key
-                break
         self._edit(self.controller.update_wave_definition, self.sel_wave, **fields)
 
     # ---- program / stage ---------------------------------------------------

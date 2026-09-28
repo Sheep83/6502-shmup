@@ -170,10 +170,13 @@ class EncounterLibrary:
         project.movement_programs = [
             MovementProgram.from_dict(p.to_dict(), "library")
             for p in self.movement_programs]
-        project.wave_definitions = [
-            WaveDefinition.from_dict(d.to_dict(), "library")
-            for d in self.wave_definitions]
+        # copy(), NOT a to_dict round trip. A definition's legacy colour fields
+        # are deliberately absent from to_dict -- that is what removes the
+        # obsolete ownership from disk -- so round-tripping would throw away
+        # exactly the information the trigger migration below needs.
+        project.wave_definitions = [d.copy() for d in self.wave_definitions]
         project.shared_vocabulary = True
+        project_v6.resolve_trigger_encounter_fields(project)
         return project
 
     def harvest_from(self, project):
@@ -186,9 +189,7 @@ class EncounterLibrary:
         self.movement_programs = [
             MovementProgram.from_dict(p.to_dict(), "library")
             for p in project.movement_programs]
-        self.wave_definitions = [
-            WaveDefinition.from_dict(d.to_dict(), "library")
-            for d in project.wave_definitions]
+        self.wave_definitions = [d.copy() for d in project.wave_definitions]
         return self
 
     # ---- migration -------------------------------------------------------
@@ -253,7 +254,11 @@ def attach_if_absent(project, raw, library_path=None):
     # set. Testing truthiness instead made an empty list look like a missing
     # one, and a migrated v5 fixture silently acquired six movement programs.
     if "movementPrograms" in raw or "waveDefinitions" in raw:
-        return project                      # self-contained; not ours to touch
+        # Self-contained, so its own definitions are already in the document and
+        # any colour ownership they still carry can be moved onto the triggers
+        # here rather than waiting for a library that is never coming.
+        project_v6.resolve_trigger_encounter_fields(project)
+        return project                      # not ours to touch otherwise
     lib = EncounterLibrary.load_or_empty(library_path)
     if lib.movement_programs or lib.wave_definitions:
         lib.install_into(project)

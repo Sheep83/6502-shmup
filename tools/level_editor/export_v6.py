@@ -366,6 +366,63 @@ def wavedef_var(ident):
     return "def" + "".join(part.capitalize() for part in ident.split("_"))
 
 
+def wavedef_reserved_byte(_d):
+    """Byte 7 of a wave definition: reserved, and always zero.
+
+    IT USED TO BE THE COLOUR BYTE, then the colour plus the firing mode, then
+    the firing mode alone. Every one of those was a property of the OCCURRENCE
+    wearing the clothes of the reusable formation, and all of them now live on
+    the trigger -- see trigger_colour_byte and trigger_fire_mode_byte below.
+
+    The byte stays rather than the record shrinking: a definition is ten bytes
+    because src/waves.asm forms def * 10 in a single byte, and dropping to nine
+    would move the heading and program index for twenty-six bytes of package.
+    src/waves.asm refuses to assemble a definition whose byte 7 is not zero.
+    """
+    return 0
+
+
+def trigger_colour_byte(t):
+    """The trigger's colour byte: bits 0-3 the colour, bit 4 the random flag.
+
+    A FRESH FIELD WITH ONE MEANING, which is why it needs no cleverness. When
+    colour lived on the definition it had to be smuggled into a byte that was
+    already carrying the firing mode; a trigger column of its own has room to
+    say what it means.
+
+    THE COLOUR IS EMITTED IN BOTH MODES. A RANDOM trigger keeps the author's
+    chosen colour in the low nibble so switching back to Fixed returns it; the
+    runtime reads the nibble only when bit 4 is clear.
+    """
+    byte = t.resolved_colour & C.MAX_COLOUR
+    if t.resolved_colour_mode == "RANDOM":
+        byte |= C.TRIG_COL_RANDOM
+    return byte
+
+
+def trigger_fire_mode_byte(t):
+    """The trigger's firing mode: TRIG_FIRE_DOWN or TRIG_FIRE_AIMED.
+
+    A column of its own rather than a bit borrowed from a neighbour. trigFire
+    is a full eight-bit mask over member index and has no spare bits; trigSide
+    and trigSpecies have some, but neither is where a firing mode belongs and a
+    species value is a row offset that grows as species are added.
+    """
+    return C.FIRE_MODES[t.resolved_fire_mode]
+
+
+def trigger_fire_mode_expr(t):
+    return f"TRIG_FIRE_{t.resolved_fire_mode}"
+
+
+def trigger_colour_expr(t):
+    """...as the generated source spells it, symbolically where it matters."""
+    colour = t.resolved_colour & C.MAX_COLOUR
+    if t.resolved_colour_mode == "RANDOM":
+        return f"TRIG_COL_RANDOM + {colour}"
+    return str(colour)
+
+
 # ---------------------------------------------------------------------------
 # wave_programs.asm
 # ---------------------------------------------------------------------------
@@ -498,7 +555,8 @@ def render_wave_encounters(project, level_name):
         "//   4 startY     spawn line",
         "//   5 xStep      signed, added to X per member",
         "//   6 yStep      signed, added to Y per member",
-        "//   7 colour     every member of a wave shares one",
+        "//   7 reserved   always zero. Enemy colour and firing mode are",
+        "//                TRIGGER fields, not definition fields",
         "//   8 heading    launch heading, 0..WM_HEAD_LEN-1",
         "//   9 program    a program INDEX here; src/level_package.asm emits it as",
         "//                that program's BYTE OFFSET via progAt",
@@ -522,9 +580,10 @@ def render_wave_encounters(project, level_name):
             # so saying nothing keeps previously generated files byte-identical
             # and keeps the diff of a real change down to the lines that
             # actually changed.
-            (f"{d.colour | (C.FIRE_MODES[d.fire_mode] << C.WAVEDEF_FIRE_SHIFT)},",
-             "colour" if d.fire_mode == "DOWN"
-             else f"colour (low nibble) + firing mode {d.fire_mode}"),
+            # BYTE 7 IS RESERVED. The colour and the firing mode that used to
+            # share it belong to the trigger now -- see trigColour and
+            # trigFireMode below.
+            (f"{wavedef_reserved_byte(d)},", "reserved -- must be zero"),
             (f"{d.heading},", "launch heading"),
             (f"{prog_const(d.movement_program)})", "movement program INDEX"),
         ]
@@ -572,6 +631,20 @@ def render_wave_encounters(project, level_name):
         "// INDEX, bit 0 the first member sent, and zero for a formation that does",
         "// not shoot at all.",
         _list_decl("trigFire", [f"%{t.fire_bits:08b}" for t in trigs]),
+        "",
+        "// HOW THIS APPEARANCE IS COLOURED -- bits 0-3 the C64 colour every",
+        "// member wears, bit 4 (TRIG_COL_RANDOM) set if each enemy instead picks",
+        "// its own eligible colour once, at spawn. On the TRIGGER and not on the",
+        "// definition, so the same reusable formation can arrive in a different",
+        "// colour at every row it is used.",
+        _list_decl("trigColour", [trigger_colour_expr(t) for t in trigs]),
+        "",
+        "// HOW THIS APPEARANCE ATTACKS -- TRIG_FIRE_DOWN or TRIG_FIRE_AIMED.",
+        "// On the TRIGGER and not on the definition, so the same reusable",
+        "// formation can arrive silent at one row and aimed at another. Read",
+        "// only for the members trigFire admits, and only for a species that",
+        "// can shoot at all.",
+        _list_decl("trigFireMode", [trigger_fire_mode_expr(t) for t in trigs]),
         "",
         f".const {'WAVE_TRIGGERS':<22} = {len(trigs)}",
     ]

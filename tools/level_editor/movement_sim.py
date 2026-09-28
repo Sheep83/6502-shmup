@@ -643,5 +643,5 @@ def preview_program(project, program, *, heading=0, start=(160, 40),
     fake = project_v6.WaveDefinition(
         id=f"({program.id})", count=1, interval=1,
         start_x=start[0], start_y=start[1], x_step=0, y_step=0,
-        colour=1, heading=heading, movement_program=program.id)
+        heading=heading, movement_program=program.id)
     return simulate_wave(project, fake, max_frames=max_frames, stages=stages)

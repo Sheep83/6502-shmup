@@ -52,7 +52,7 @@ def build(rows=105, no_spawn=340, defs=1, glyphs=1):
         ])],
         wave_definitions=[WaveDefinition(id="w", count=4, interval=22, start_x=0,
                                          start_y=64, x_step=0, y_step=20,
-                                         colour=10, heading=0,
+                                         heading=0,
                                          movement_program="run")],
         triggers=[Trigger(world_progress=48, wave_definition="w", species="RING",
                           fire_mask=[0, 2], dropper_side="LEFT")],
@@ -205,7 +205,7 @@ print("\n=== wave definitions ===")
 p = build()
 p.movement_programs = [MovementProgram("run", p.movement_programs[0].stages)]
 p.wave_definitions = [WaveDefinition(id=f"w{i}", count=1, interval=1, start_x=0,
-                                     start_y=0, colour=1, heading=0,
+                                     start_y=0, heading=0,
                                      movement_program="run")
                       for i in range(C.MAX_WAVE_DEFINITIONS + 1)]
 p.triggers = [Trigger(10, "w0", "RING", [0])]
@@ -225,8 +225,12 @@ p = build(); p.wave_definitions[0].start_y = 256
 expect_error(p, "wavedef.start_y", "a spawn Y of 256 is rejected (logY is 8 bits)")
 p = build(); p.wave_definitions[0].heading = 64
 expect_error(p, "wavedef.heading", "a launch heading of 64 is rejected")
-p = build(); p.wave_definitions[0].colour = 16
-expect_error(p, "wavedef.colour", "a colour of 16 is rejected")
+# COLOUR IS THE TRIGGER'S NOW, so the rule moved with it. A definition has no
+# colour left to be out of range.
+p = build(); p.triggers[0].colour = 16
+expect_error(p, "trigger.colour", "a trigger colour of 16 is rejected")
+p = build(); p.triggers[0].colour_mode = "SOMETIMES"
+expect_error(p, "trigger.colour_mode", "an unknown trigger colour mode is rejected")
 p = build(); p.wave_definitions[0].x_step = 200
 expect_error(p, "wavedef.x_step", "an xStep that walks a member off the world fails")
 

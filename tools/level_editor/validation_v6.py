@@ -567,15 +567,10 @@ def _validate_wave_definitions(p, r):
                 r.error("wavedef.y_step",
                         f"member {d.count - 1} spawns at Y {last_y}, outside the "
                         f"eight bits logY carries", f"{path}.yStep")
-        if d.fire_mode not in C.FIRE_MODES:
-            r.error("wavedef.fire_mode",
-                    f"firing mode {d.fire_mode!r} is not one of "
-                    f"{', '.join(sorted(C.FIRE_MODES))}",
-                    f"waveDefinitions[{i}].fireMode")
-        if not (0 <= d.colour <= C.MAX_COLOUR):
-            r.error("wavedef.colour",
-                    f"colour must be 0..{C.MAX_COLOUR}; got {d.colour}",
-                    f"{path}.colour")
+        # A DEFINITION HAS NO FIRING MODE TO CHECK either. How an appearance
+        # attacks belongs to the trigger; see the trigger section below.
+        # A DEFINITION HAS NO COLOUR TO CHECK. Colour and colour mode belong to
+        # the trigger; see the trigger section below.
         if not (0 <= d.heading < C.WM_HEAD_LEN):
             r.error("wavedef.heading",
                     f"launch heading must be 0..{C.WM_HEAD_LEN - 1}; got {d.heading}",
@@ -630,6 +625,31 @@ def _validate_triggers(p, r):
             r.error("trigger.side",
                     f"unknown Dropper side {t.dropper_side!r}; expected one of "
                     f"{', '.join(sorted(C.DROPPER_SIDES))}", f"{path}.dropperSide")
+        if t.resolved_colour_mode not in C.COLOUR_MODES:
+            r.error("trigger.colour_mode",
+                    f"colour mode {t.resolved_colour_mode!r} is not one of "
+                    f"{', '.join(sorted(C.COLOUR_MODES))}", f"{path}.colourMode")
+        # CHECKED IN BOTH MODES. A RANDOM trigger keeps its chosen colour in the
+        # low nibble of the same byte the mode flag rides in, so a value the
+        # nibble cannot hold would corrupt the flag -- and would come back as
+        # garbage the day the trigger is switched to Fixed again.
+        if not (0 <= t.resolved_colour <= C.MAX_COLOUR):
+            r.error("trigger.colour",
+                    f"colour must be 0..{C.MAX_COLOUR}; got {t.resolved_colour}",
+                    f"{path}.colour")
+        if t.resolved_fire_mode not in C.FIRE_MODES:
+            r.error("trigger.fire_mode",
+                    f"firing mode {t.resolved_fire_mode!r} is not one of "
+                    f"{', '.join(sorted(C.FIRE_MODES))}", f"{path}.fireMode")
+        # A FIRING MODE ON AN APPEARANCE THAT SENDS NO SHOOTERS can never be
+        # read: the mask decides whether anyone fires, and it says no. Harmless
+        # in the package, but it means the author believes something untrue --
+        # and src/waves.asm refuses to assemble it.
+        elif t.resolved_fire_mode != "DOWN" and not t.fire_bits:
+            r.error("trigger.fire_mode_unused",
+                    f"firing mode {t.resolved_fire_mode} is set, but the fire "
+                    f"mask is empty so no member of this appearance shoots",
+                    f"{path}.fireMode")
 
         d = by_id.get(t.wave_definition)
         if d is None:

@@ -3993,7 +3993,10 @@
         0,
         2
       ],
-      "dropperSide": "LEFT"
+      "dropperSide": "LEFT",
+      "colour": 10,
+      "colourMode": "RANDOM",
+      "fireMode": "AIMED"
     },
     {
       "worldProgress": 52,
@@ -4002,7 +4005,10 @@
       "fireMask": [
         1
       ],
-      "dropperSide": "LEFT"
+      "dropperSide": "LEFT",
+      "colour": 3,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN"
     },
     {
       "worldProgress": 90,
@@ -4012,14 +4018,20 @@
         0,
         2
       ],
-      "dropperSide": "LEFT"
+      "dropperSide": "LEFT",
+      "colour": 7,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN"
     },
     {
       "worldProgress": 126,
       "waveDefinition": "loop",
       "species": "DROPPER",
       "fireMask": [],
-      "dropperSide": "RIGHT"
+      "dropperSide": "RIGHT",
+      "colour": 13,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN"
     },
     {
       "worldProgress": 160,
@@ -4029,7 +4041,10 @@
         0,
         2
       ],
-      "dropperSide": "LEFT"
+      "dropperSide": "LEFT",
+      "colour": 13,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN"
     },
     {
       "worldProgress": 205,
@@ -4041,7 +4056,10 @@
         2,
         3
       ],
-      "dropperSide": "LEFT"
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN"
     },
     {
       "worldProgress": 260,
@@ -4054,7 +4072,10 @@
         4,
         5
       ],
-      "dropperSide": "LEFT"
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN"
     }
   ],
   "levelMetatileSet": [

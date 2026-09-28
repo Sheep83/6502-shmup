@@ -107,7 +107,7 @@ from project_v6 import MovementProgram, MovementStage, WaveDefinition       # no
 p.movement_programs = [MovementProgram("run", [
     MovementStage("STRAIGHT", frames=30, vx=6, vy=0), MovementStage("EXIT")])]
 p.wave_definitions = [WaveDefinition(id="w", count=4, interval=22, start_x=0,
-                                     start_y=64, colour=10, heading=0,
+                                     start_y=64, heading=0,
                                      movement_program="run")]
 
 p.triggers = [Trigger(90, "w", "RING", [0]),

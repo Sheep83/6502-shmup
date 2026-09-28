@@ -30,8 +30,13 @@ LEVELPKG_MAP_MAX = 4400         # 440 rows * 10
 LEVELPKG_DEFS_MAX = 1024        # 64 defs * 16
 LEVELPKG_MOVE_MAX = 256         # wmStage is ONE BYTE -- the hardware ceiling
 LEVELPKG_WAVEDEF_SLOTS = 26     # waveDefBase forms def*10 in one byte
-LEVELPKG_TRIG_SLOTS = 180       # floor(1082 / 6 columns)
-LEVELPKG_TRIG_COLS = 6
+# THE SLOT COUNT FOLLOWS THE COLUMN COUNT, exactly as src/levelpkg.asm derives
+# it: floor(the encounter reservation left over / the number of columns). The
+# seventh and eighth columns -- this appearance's colour and its firing mode --
+# took the ceiling from 180 to 135, which is still more than ten times the
+# longest authored level.
+LEVELPKG_TRIG_COLS = 8
+LEVELPKG_TRIG_SLOTS = 1082 // LEVELPKG_TRIG_COLS                   # 135
 
 # Stage height. The binding limit is the map budget, not the turret tables
 # (src/turrets.asm allows 512 metatile rows / 2047 logical).
@@ -175,21 +180,49 @@ SPECIES = {
 SPECIES_LABELS = {"RING": "Ring", "DROPPER": "Dropper", "SQUARE": "Square"}
 DROPPER_SIDES = {"LEFT": 0, "RIGHT": 1}
 
-# --- how a wave's enemies shoot, src/enemy.asm + src/waves.asm ---------------
+# --- how an APPEARANCE attacks, src/encounter_format.asm --------------------
+# A TRIGGER FIELD, NOT A DEFINITION FIELD, for the same reason the colour is
+# one. The same reusable `sweep` should be able to arrive silent at one row,
+# firing straight down at another and aimed at a third without being cloned.
+#
 # DOWN is what every wave did before aimed fire existed and is the default, so
 # no authored level changes meaning by being loaded. AIMED samples the ship's
 # position at the instant of firing and never looks again -- the shot can be
 # dodged.
 #
-# The value is packed into bits 4-5 of the definition's COLOUR byte rather than
-# given a byte of its own: a definition is ten bytes and src/waves.asm forms
-# def * 10 in a single byte, so an eleventh would cap a level at 24 definitions
-# instead of 26. A colour is 0..15 and the high nibble was free. Mode 0 is
-# "however the species fires", which is what every previously exported package
-# already says.
+# "NO FIRING" IS NOT A MODE HERE. It is an empty fireMask, which is how it has
+# always been said and is still the only way to say it: the mask decides WHICH
+# members shoot, the species decides whether it CAN, and this decides HOW.
 FIRE_MODES = {"DOWN": 0, "AIMED": 1}
 FIRE_MODE_LABELS = {"DOWN": "Straight down", "AIMED": "Aimed at player"}
-WAVEDEF_FIRE_SHIFT = 4
+
+# --- how an APPEARANCE is coloured, src/encounter_format.asm -----------------
+# A TRIGGER FIELD, NOT A DEFINITION FIELD. A wave definition is reusable
+# formation vocabulary -- how many enemies, how far apart, along which path --
+# and the same `sweep` must be usable cyan at one row, yellow at another and
+# mixed at a third without being cloned. Colour is a property of the OCCURRENCE,
+# so it sits on the trigger beside the species and the fire mask, which are
+# occurrence properties for exactly the same reason.
+#
+# FIXED: every member of that appearance wears the trigger's `colour`.
+# RANDOM: each enemy picks its own eligible colour once, as it spawns, from the
+# colours the resident level leaves safe -- everything except black, the two
+# shared sprite multicolours ($d025/$d026) and the terrain's charset colour. The
+# player's colour is deliberately still eligible.
+#
+# ONE BYTE IN THE PACKAGE: bits 0-3 the colour, bit 4 the random flag. The
+# colour is kept in both modes, so switching a trigger to random and back
+# returns the colour the author chose.
+COLOUR_MODES = {"FIXED": 0, "RANDOM": 1}
+COLOUR_MODE_LABELS = {"FIXED": "Fixed colour",
+                      "RANDOM": "Random per enemy"}
+TRIG_COL_MASK = 0x0F
+TRIG_COL_RANDOM = 0x10
+
+# The colour a trigger gets when nothing says otherwise -- an older project
+# whose wave definition named no colour either. 1 is WaveDefinition's own
+# historical default.
+DEFAULT_TRIGGER_COLOUR = 1
 
 # THE ENEMY SPRITE WINDOW, and the slot every level's species are loaded into.
 #

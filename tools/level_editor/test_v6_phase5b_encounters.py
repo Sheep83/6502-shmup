@@ -131,7 +131,7 @@ check("...fire masks as member indices",
 check("...and their Dropper sides",
       [t.dropper_side for t in c.project.triggers] == [d["dropperSide"] for d in _dt])
 check("capacity reports triggers, waves, records and bytes against the caps",
-      c.capacity() == {"triggers": (len(_dt), 180),
+      c.capacity() == {"triggers": (len(_dt), C.MAX_TRIGGERS),
                        # shared now: counted from the library, not the level
                        "waveDefinitions": (
                            len(json.loads((HERE / "encounter_library.v6.json")

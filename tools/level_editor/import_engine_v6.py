@@ -241,17 +241,21 @@ def import_wave_definitions(src, programs):
             start_y=_u8(d[4], f"{what} startY"),
             x_step=_s8(d[5], f"{what} xStep"),
             y_step=_s8(d[6], f"{what} yStep"),
-            colour=_u8(d[7], f"{what} colour"),
+            # BYTE 7 IS THE FIRING MODE NOW; colour moved to the trigger.
+            # This importer has never separated the packed fields of byte 7 --
+            # a pre-existing limitation, untouched here -- so the value is
+            # simply not carried onto the definition any more.
             heading=_heading(d[8], f"{what} launch heading"),
             movement_program=programs[prog_index].id))
     return out
 
 
 def import_triggers(src, definitions):
-    """The six authored columns -> v6 Triggers, live entries only."""
+    """The eight authored columns -> v6 Triggers, live entries only."""
     live = src.const("WAVE_TRIGGERS")
     columns = {name: src.list_(name) for name in
-               ("trigRow", "trigDef", "trigSpecies", "trigFire", "trigSide")}
+               ("trigRow", "trigDef", "trigSpecies", "trigFire", "trigSide",
+                "trigColour", "trigFireMode")}
     lengths = {n: len(v) for n, v in columns.items()}
     if len(set(lengths.values())) != 1:
         raise EncounterImportError(
@@ -263,6 +267,7 @@ def import_triggers(src, definitions):
 
     species_of = {v: k for k, v in C.SPECIES.items()}
     side_of = {v: k for k, v in C.DROPPER_SIDES.items()}
+    fire_of = {v: k for k, v in C.FIRE_MODES.items()}
     out = []
     for i in range(live):                # LIVE ENTRIES ONLY -- see note below
         what = f"trigger {i}"
@@ -283,12 +288,24 @@ def import_triggers(src, definitions):
                 f"{what} names Dropper side {side!r}, which is not one of "
                 f"{sorted(C.DROPPER_SIDES.items())}")
         mask = _u8(columns["trigFire"][i], f"{what} fire mask")
+        # THE TWO ENCOUNTER COLUMNS. Colour and firing mode moved here from the
+        # wave definition; a trigger imported without them would come back
+        # silently defaulted rather than as authored.
+        colour = _u8(columns["trigColour"][i], f"{what} colour")
+        fmode = columns["trigFireMode"][i]
+        if fmode not in fire_of:
+            raise EncounterImportError(
+                f"{what} names firing mode {fmode!r}, which is not one of "
+                f"{sorted(C.FIRE_MODES.items())}")
         out.append(Trigger(
             world_progress=row,
             wave_definition=definitions[d_index].id,
             species=species_of[sp],
             fire_mask=[m for m in range(8) if mask & (1 << m)],
-            dropper_side=side_of[side]))
+            dropper_side=side_of[side],
+            colour=colour & C.TRIG_COL_MASK,
+            colour_mode=("RANDOM" if colour & C.TRIG_COL_RANDOM else "FIXED"),
+            fire_mode=fire_of[fmode]))
     return out, authored
 
 
@@ -394,7 +411,8 @@ def reference_encode_wave_definitions(definitions, programs):
             d.start_x & 0xFF, (d.start_x >> 8) & 0xFF,
             d.start_y & 0xFF,
             d.x_step & 0xFF, d.y_step & 0xFF,
-            d.colour & 0xFF, d.heading & 0xFF,
+            0,                          # byte 7: reserved, always zero
+            d.heading & 0xFF,
             offsets[d.movement_program] & 0xFF))
     return bytes(out)
 
@@ -411,5 +429,11 @@ def reference_encode_trigger_columns(triggers, definitions, slots=None):
         [C.SPECIES[t.species] for t in triggers],
         [t.fire_bits for t in triggers],
         [C.DROPPER_SIDES[t.dropper_side] for t in triggers],
+        # THE SEVENTH COLUMN: this appearance's colour and colour mode.
+        [(t.resolved_colour & C.MAX_COLOUR)
+         | (C.TRIG_COL_RANDOM if t.resolved_colour_mode == "RANDOM" else 0)
+         for t in triggers],
+        # ...AND THE EIGHTH: how it attacks.
+        [C.FIRE_MODES[t.resolved_fire_mode] for t in triggers],
     ]
     return bytes(b for col in cols for b in (col + [0] * (slots - n)))

@@ -1167,14 +1167,49 @@ gsSeedTable:
     bcc !hundreds-
     rts
 
+// ---------------------------------------------------------------------------
+// gsRandom8 — A = a pseudo-random byte. Entry/exit: X and Y preserved.
+//
+// THE PROJECT'S ONE RANDOM NUMBER, and gsSeed is still the only state it has.
+// This was inline in gsRandomLetter and is now a routine because a second
+// caller appeared: src/waves.asm picks a random individual sprite colour for a
+// wave authored to want one. Two steppers over one seed byte, or a second seed,
+// would both have been worse than naming the step once.
+//
+// WHY THE FEEDBACK CHANGED. The old step was `asl / eor gsSeed / eor $dc04`,
+// which is an affine map with no feedback from the bit the shift drops -- and
+// with a STATIONARY $dc04 it has a fixed point at zero, so the sequence can
+// stop dead. That never showed because the only caller ran eight times at boot
+// with the CIA free-running, but a per-spawn caller during gameplay -- where
+// the renderer has written $dc0d and the timer is not being looked at -- would
+// have been betting an authored feature on it.
+//
+// So the shift now feeds back through the taps of x^8 + x^4 + x^3 + x^2 + 1,
+// which is maximal-period over the 255 non-zero states, and $dc04 is kept as an
+// extra stir rather than as the only source of change. The eor can land on
+// zero, which is the LFSR's one absorbing state, so zero is replaced -- the
+// sequence has no way to stop.
+//
+// Not cryptography, and not meant to be: this decides placeholder initials and
+// the colour of a spaceship.
+gsRandom8:
+    lda gsSeed
+    asl
+    bcc !noTaps+
+    eor #$1d                            // x^8 + x^4 + x^3 + x^2 + 1
+!noTaps:
+    eor $dc04                           // a byte that moves independently of us
+    bne !live+
+    lda #$a5                            // zero is the one state an LFSR cannot
+                                        // leave; any non-zero byte will do
+!live:
+    sta gsSeed
+    rts
+
 // A = a pseudo-random screen code in 1..26 (A..Z). The old nextRandomLetter:
 // quality is irrelevant for placeholder names.
 gsRandomLetter:
-    lda gsSeed
-    asl
-    eor gsSeed
-    eor $dc04                           // a byte that changes every scanline
-    sta gsSeed
+    jsr gsRandom8
     and #%00011111                      // 0..31
     cmp #26
     bcc !inRange+

@@ -40,10 +40,14 @@ PORT = 6601
 FRAMES = 1100      # enemy shots are sparse: ~5 in 900 frames
 SAMPLE_EVERY = 2
 
-WAVEDEF_SIZE = 10
-WD_COLOUR = 7                 # the byte that also carries the firing mode
-FIRE_AIMED = 0x10             # bits 4-5
-COLOUR_MASK = 0x0F
+# HOW A WAVE FIRES IS A TRIGGER FIELD. It used to be bits 4-5 of the wave
+# DEFINITION's byte 7, and this file forced the mode by poking that byte; byte 7
+# is now reserved and zero, and the mode lives in the trigger list's own
+# trigFireMode column (src/encounter_format.asm). Poking the old place stopped
+# doing anything, which is exactly what this note exists to stop happening
+# silently again.
+LEVELPKG_TRIGN = 0xFF92       # the live trigger count; see src/levelpkg.asm
+TRIG_FIRE_DOWN, TRIG_FIRE_AIMED = 0, 1
 WAVE_DEFS = 7
 
 SPECIES = {"RING": 0, "DROPPER": 8, "SQUARE": 16}
@@ -60,10 +64,14 @@ def signed(b):
 
 
 def set_mode(mon, aimed):
-    base = sym["waveDefTable"]
-    for d in range(WAVE_DEFS):
-        a = base + d * WAVEDEF_SIZE + WD_COLOUR
-        poke(mon, a, (rd1(mon, a) & COLOUR_MASK) | (FIRE_AIMED if aimed else 0))
+    """Put every AUTHORED APPEARANCE into one firing mode.
+
+    Only the live entries: the columns are padded to the package's slot count
+    and the director never reads past LEVELPKG_TRIGN.
+    """
+    mode = TRIG_FIRE_AIMED if aimed else TRIG_FIRE_DOWN
+    for t in range(rd1(mon, LEVELPKG_TRIGN)):
+        poke(mon, sym["waveTrigFireMode"] + t, mode)
 
 
 def run(*, aimed, player_x=None, species=None, move_to=None):

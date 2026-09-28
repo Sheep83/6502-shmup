@@ -98,19 +98,20 @@
 // wide and 21 tall and the bolt is 8 wide, so (24-8)/2 centres it and 18 puts
 // it at the bottom edge -- the shot leaves the belly of the thing that fired
 // it, which is what makes it read as having come FROM the enemy.
-// --- the firing mode, packed into the definition's colour byte --------------
-// A WAVE DEFINITION IS TEN BYTES AND waveDefBase FORMS def * 10 IN ONE BYTE, so
-// an eleventh byte would cap the level at 24 definitions instead of 26 and turn
-// the shift-and-add into a multiply. The colour field is a C64 colour, 0..15,
-// and has four bits doing nothing -- so the mode lives there.
+// --- byte 7 of a wave definition: RESERVED, and always zero -----------------
+// A WAVE DEFINITION NO LONGER SAYS ANYTHING ABOUT COLOUR OR FIRING. This byte
+// was the colour, then the colour plus the firing mode, then the firing mode
+// alone; both were properties of the OCCURRENCE masquerading as properties of
+// the reusable formation, and both now live on the trigger -- see
+// TRIG_COL_MASK and TRIG_FIRE_DOWN in src/encounter_format.asm.
 //
-// THIS IS ALSO WHY OLD PACKAGES STILL MEAN WHAT THEY MEANT. Every colour byte
-// ever exported has a zero high nibble, and mode 0 is "fire the way the species
-// always did". A level built before aimed fire existed cannot accidentally
-// acquire it.
-.const WAVEDEF_COLOUR_MASK = $0f        // the authored colour
-.const WAVEDEF_FIRE_BITS   = $30        // bits 4-5: 0 = species default, 1 = aimed
-.const WAVEDEF_FIRE_AIMED  = $10
+// THE RECORD DELIBERATELY DID NOT SHRINK. A definition is ten bytes and
+// waveDefBase forms def * 10 in a single byte as n*8 + n*2; dropping to nine
+// would move the heading and the program index, change that arithmetic, and
+// touch the exporter, the package emitter and every `waveDefTable + n` offset
+// past this one -- a great deal of blast radius to reclaim twenty-six bytes.
+// The byte stays, reserved, with a guard below that keeps it honest.
+.const WAVEDEF_RESERVED_7  = 7
 
 .const ENEMY_MUZZLE_X    = 8
 .const ENEMY_MUZZLE_Y    = 18
@@ -173,6 +174,12 @@
     .if (def.size() != WAVEDEF_SIZE) { .error "a wave definition is not WAVEDEF_SIZE bytes" }
     .if (def.get(0) < 1) { .error "a wave definition sends no enemies" }
     .if (def.get(1) < 1) { .error "a wave interval of zero would spawn the whole wave in one frame" }
+    // BYTE 7 IS RESERVED AND MUST BE ZERO. Anything here is a colour or a
+    // firing mode left behind by the move to trigger ownership, and a value the
+    // runtime silently ignores is exactly how stale authored data survives.
+    .if (def.get(WAVEDEF_RESERVED_7) != 0) {
+        .error "a wave definition's reserved byte 7 is not zero -- colour and firing mode belong to the trigger now"
+    }
     .if (def.get(8) < 0 || def.get(8) >= WM_HEAD_LEN) { .error "a wave launches on a heading that does not exist" }
     .if (def.get(9) >= progs.size()) { .error "a wave names a stage program that does not exist" }
 
@@ -302,7 +309,8 @@
 
 .if (trigRow.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS
      || trigSpecies.size() != WAVE_TRIGGERS || trigFire.size() != WAVE_TRIGGERS
-     || trigSide.size() != WAVE_TRIGGERS) {
+     || trigSide.size() != WAVE_TRIGGERS || trigColour.size() != WAVE_TRIGGERS
+     || trigFireMode.size() != WAVE_TRIGGERS) {
     .error "the trigger list is not WAVE_TRIGGERS entries on every axis"
 }
 // THE CURSOR ONLY EVER WALKS FORWARD, so the rows must not go backwards. A
@@ -356,6 +364,25 @@
     // knows how many members it sends, so the assembler can say so.
     .if ((trigFire.get(t) >> waveDefs.get(trigDef.get(t)).get(0)) != 0) {
         .error "a trigger's fire mask names a member this wave never sends"
+    }
+    // THE COLOUR BYTE CARRIES TWO FIELDS AND NOTHING ELSE. Bits 5-7 have no
+    // meaning, so an authored byte above the sum of the two masks is data the
+    // runtime would silently ignore -- which is how a packed byte goes bad.
+    .if (trigColour.get(t) < 0
+         || trigColour.get(t) > TRIG_COL_MASK + TRIG_COL_RANDOM) {
+        .error "a trigger's colour byte has a bit outside the colour and the random flag"
+    }
+    // A MODE THE RUNTIME DOES NOT KNOW would fall through the compare in
+    // waveSpawnMember and fire straight down, which is a silent wrong answer
+    // rather than a loud one.
+    .if (trigFireMode.get(t) < 0 || trigFireMode.get(t) > TRIG_FIRE_MAX) {
+        .error "a trigger names a firing mode that does not exist"
+    }
+    // AN AIMED MODE ON AN APPEARANCE THAT SENDS NO SHOOTERS is authored data
+    // that can never be read: the fire mask decides WHETHER, and it says no.
+    // Harmless, but it means the author believes something untrue.
+    .if (trigFireMode.get(t) != TRIG_FIRE_DOWN && trigFire.get(t) == 0) {
+        .error "a trigger sets a firing mode but its fire mask sends no shooters"
     }
 }
 // ===========================================================================
@@ -418,6 +445,23 @@ wvFire:    .fill WAVE_SLOTS, 0      // the authored fire mask over member
 wvSide:    .fill WAVE_SLOTS, 0      // the entry side a Dropper in this wave
                                     // flies in from, latched with the species
                                     // below and for the same reason
+wvColour:  .fill WAVE_SLOTS, 0      // THIS APPEARANCE'S colour byte, latched
+                                    // from the trigger with the species below
+                                    // and for the same reason: the cursor has
+                                    // moved on by the time the members go out.
+                                    // Bits 0-3 the colour, bit 4 the random
+                                    // flag -- see TRIG_COL_MASK in
+                                    // src/encounter_format.asm. Held per
+                                    // INSTANCE, which is what lets two triggers
+                                    // playing the SAME definition arrive in
+                                    // different colours.
+wvFireMode: .fill WAVE_SLOTS, 0     // HOW this appearance aims, latched from
+                                    // the trigger with the fire mask below and
+                                    // for the same reason. TRIG_FIRE_DOWN or
+                                    // TRIG_FIRE_AIMED; see
+                                    // src/encounter_format.asm. Per INSTANCE,
+                                    // which is what lets two triggers playing
+                                    // the SAME definition attack differently.
 wvSpecies: .fill WAVE_SLOTS, 0      // which enemy this instance is made of,
                                     // copied from the authored trigger column
                                     // when the wave was armed. Held per
@@ -455,6 +499,23 @@ wvSpawned:   .byte 0                // enemies actually created
 // cursor says where the round-robin resumes.
 wvFirePhase: .byte 0                // frames until the next firing opportunity
 wvFireCursor: .byte 0               // pool slot the next scan starts at
+
+// --- the eligible colours a random-colour wave draws from -------------------
+// AN EXPLICIT SET, BUILT ONCE PER LEVEL, rather than a test applied to a die
+// roll. Rejection sampling would have been fewer bytes and it would have been a
+// loop whose length depends on which colours the level happens to forbid; this
+// is sixteen iterations at level init and a single indexed load per spawn.
+//
+// THE SET IS THE LEVEL'S, NOT THE BUILD'S. Every exclusion is read from the
+// configuration that is live when the pool is built, so level 2's black terrain
+// and level 3's charset colour each remove their own colour and no other.
+// waveColourPool is called from waveInit, which gameInit calls on the boot path
+// and on the level-change path alike, and in both cases after
+// terrainApplyPackage has installed the palette. See the routine.
+wvColPool:   .fill 16, 0            // the eligible colours, packed low
+wvColCount:  .byte 0                // how many of them there are: 12..15
+wvColBan:    .fill 4, 0             // black, the two shared sprite multicolours
+                                    // and the terrain's charset colour
 
 wvShots:     .byte 0                // saturating: bolts moving enemies fired
 wvShotBlocked: .byte 0              // opportunities that FOUND an eligible
@@ -507,6 +568,112 @@ waveInit:
     // THE CURSOR IS THE WHOLE ARMING, and it was zeroed with the rest of the
     // state above. There is no target to seed: trigger 0 becomes due when
     // worldProgress reaches the row trigger 0 names.
+
+    // THE RANDOM-COLOUR POOL IS LEVEL STATE, so it is rebuilt here with the
+    // rest of it. gameInit calls waveInit after terrainApplyPackage on both the
+    // boot path (src/main.asm) and the level-change path (gsEnterNextLevel), so
+    // the palette this reads is always the resident level's.
+    jmp waveColourPool                  // its rts is ours
+
+// ---------------------------------------------------------------------------
+// waveColourPool — build the set of colours a random-colour wave may use.
+// Entry/exit: nothing preserved; called from waveInit only.
+//
+// FOUR COLOURS ARE FORBIDDEN, and each for a reason a level can change:
+//
+//   BLACK         a black enemy on a dark playfield is an invisible enemy, and
+//                 an enemy the player cannot see is not a difficulty setting.
+//   $d025, $d026  the two SHARED sprite multicolours -- pair 01 and pair 11 of
+//                 every multicolour sprite on the screen. An enemy whose own
+//                 pair-10 colour equals one of them loses the shading or the
+//                 highlight that gives it a shape, and reads as a flat blob.
+//                 See the art note in src/enemy.asm.
+//   the terrain's charset colour, colour RAM's bit pair 11. The busiest colour
+//                 in the playfield: an enemy wearing it disappears into the
+//                 scenery it is flying over.
+//
+// AND THE PLAYER'S COLOUR IS DELIBERATELY NOT ONE OF THEM. An enemy the same
+// colour as the ship is a legible enemy -- it is still a different shape in a
+// different place -- and excluding it would have cost the pool a colour for a
+// confusion that does not happen.
+//
+// READ, NOT ASSUMED. $d025/$d026 come from the registers rather than from
+// SPR_MC_DARK/SPR_MC_LIGHT, and the charset colour from trnCramValue rather than
+// from TERRAIN_CHARACTER_COLOUR, because a compile-time constant is the colour
+// of whatever level the ENGINE was built against -- which is exactly the bug
+// that turned level 2's terrain grey (see terrainInit in src/terrain.asm).
+//
+// $d021, THE BACKGROUND, IS NOT EXCLUDED, and that is a judgement rather than an
+// oversight: bit pair 00 of the terrain art is transparent, so on a detailed
+// playfield the background is mostly covered and removing its colour would take
+// a usable one away. If a level ever appears whose terrain is sparse enough for
+// that to matter, this is the routine that learns about it.
+//
+// THE POOL CANNOT BE SMALLER THAN TWELVE, which the selection below depends on:
+// there are four exclusions, they are masked into 0..15 before use, and
+// duplicates among them only make the pool bigger.
+// ---------------------------------------------------------------------------
+waveColourPool:
+    lda #0
+    sta wvColBan + 0                    // black
+    lda $d025                           // the VIC returns $fx from a colour
+    and #$0f                            // register, so the nibble is masked out
+    sta wvColBan + 1                    // shared multicolour 1, pair 01
+    lda $d026
+    and #$0f
+    sta wvColBan + 2                    // shared multicolour 2, pair 11
+    lda trnCramValue                    // THE RESIDENT LEVEL'S colour-RAM fill:
+    and #$07                            // bit 3 is the multicolour flag, and
+                                        // only three bits are the colour
+    sta wvColBan + 3                    // the terrain's charset colour
+
+    ldx #0                              // eligible colours found so far
+    ldy #0                              // the colour under test
+!colour:
+    tya
+    cmp wvColBan + 0
+    beq !next+
+    cmp wvColBan + 1
+    beq !next+
+    cmp wvColBan + 2
+    beq !next+
+    cmp wvColBan + 3
+    beq !next+
+    sta wvColPool,x                     // eligible: keep it, packed low
+    inx
+!next:
+    iny
+    cpy #16
+    bne !colour-
+    stx wvColCount
+    rts
+
+// ---------------------------------------------------------------------------
+// waveRandomColour — A = one colour from the pool. Entry: nothing. Exit: X
+// preserved, Y clobbered.
+//
+// X IS THE OBJECT SLOT AT THE ONLY CALL SITE, which is why it survives and why
+// Y does not: the caller reloads the wave definition offset it holds anyway.
+//
+// ONE FOLD, NOT A RETRY. A nibble is 0..15 and the pool is 12..15 long, so a
+// value off the end is brought back with a single subtraction -- and one is
+// always enough, because 15 - count < count whenever count exceeds seven. There
+// is no loop here to be unlucky in.
+//
+// THAT FOLD IS SLIGHTLY BIASED and it is meant to be: with a pool of twelve the
+// first four entries come up twice as often as the rest. Removing the bias costs
+// a rejection loop, and the thing being decided is which of a dozen colours a
+// spaceship is.
+// ---------------------------------------------------------------------------
+waveRandomColour:
+    jsr gsRandom8                       // the project's one RNG; X, Y preserved
+    and #$0f
+    cmp wvColCount
+    bcc !pick+
+    sbc wvColCount                      // carry is set by the cmp that got here
+!pick:
+    tay
+    lda wvColPool,y
     rts
 
 // ---------------------------------------------------------------------------
@@ -685,6 +852,18 @@ waveStartNext:
                                         // latched anyway: one unconditional
                                         // copy beats a branch that has to know
                                         // what a species is
+    lda waveTrigFireMode,y              // ...and how THIS appearance aims, which
+    sta wvFireMode,x                    // is an encounter decision exactly like
+                                        // the mask above it: the same formation
+                                        // may arrive silent here and aimed
+                                        // three rows later
+    lda waveTrigColour,y                // ...and how THIS appearance is coloured.
+    sta wvColour,x                      // Latched here rather than read at spawn
+                                        // for the same reason as everything
+                                        // above it, and it is what makes one
+                                        // definition reusable at several
+                                        // colours: the colour belongs to the
+                                        // instance, never to the definition
 
     // The member count comes from the definition, so a wave that is armed is
     // armed completely: nothing below can leave it half-configured.
@@ -1071,15 +1250,18 @@ waveSpawnMember:
                                         // species fires differently by storing
                                         // a different value here
 
-    // THE SPECIES SAYS WHETHER, THE DEFINITION SAYS HOW. A species with no
-    // firing capability at all was already refused above and stays refused; one
-    // that can fire uses its own mode unless the wave definition asks for
-    // aimed, which any of them can do. Kept in this order so that adding a
-    // species with some third capability does not have to know about this.
-    ldy wvDefBase
-    lda waveDefTable + 7,y
-    and #WAVEDEF_FIRE_BITS
-    cmp #WAVEDEF_FIRE_AIMED
+    // THE SPECIES SAYS WHETHER, THE TRIGGER SAYS HOW. A species with no firing
+    // capability at all was already refused above and stays refused; one that
+    // can fire uses its own mode unless THIS APPEARANCE asks for aimed, which
+    // any of them can do. Kept in this order so that adding a species with some
+    // third capability does not have to know about this.
+    //
+    // FROM THE INSTANCE, NOT THE DEFINITION. That is the whole ownership rule:
+    // the mode was latched off the trigger when the wave was armed, so two
+    // triggers playing one reusable definition attack independently.
+    ldy wvInst
+    lda wvFireMode,y
+    cmp #TRIG_FIRE_AIMED
     bne !mayFire+
     lda #ENEMY_FIRE_AIMED
     sta enyFire,x
@@ -1098,10 +1280,35 @@ waveSpawnMember:
     sta logPtr,x
     ldy wvDefBase                       // enemyAnimPtr clobbers Y, so the wave
                                         // definition index is reloaded here
-    lda waveDefTable + 7,y
-    and #WAVEDEF_COLOUR_MASK            // bits 4-5 are the firing mode
+    // ---- THE INDIVIDUAL COLOUR, chosen once and for the whole life ---------
+    // FROM THE INSTANCE, NOT FROM THE DEFINITION. This is the whole of the
+    // ownership rule: the byte was latched off the trigger when the wave was
+    // armed, so two triggers playing the same reusable definition colour their
+    // enemies independently and neither can change the other.
+    //
+    // ONE COLOUR PER ENEMY, DECIDED HERE. A random appearance rolls per MEMBER
+    // rather than per wave, so its members differ from each other; the roll
+    // happens at spawn and the result is stored, so nothing downstream can
+    // repeat it. It lands in wmBaseCol as well as logCol for the ordinary
+    // reason -- that is the colour enemyBaseColour restores a hit flash to -- and
+    // that is also what makes the choice survive being shot at. The animation
+    // changes which FRAME is shown and never touches either byte.
+    ldy wvInst
+    lda wvColour,y
+    and #TRIG_COL_RANDOM
+    beq !fixed+
+    jsr waveRandomColour                // X preserved; Y is not
+    jmp !chosen+
+!fixed:
+    lda wvColour,y
+    and #TRIG_COL_MASK                  // bit 4 is the mode, not the colour
+!chosen:
     sta logCol,x
     sta wmBaseCol,x                     // what a hit flash returns to
+    ldy wvDefBase                       // both paths above clobber Y, so the
+                                        // definition offset is reloaded here --
+                                        // the same thing enemyAnimPtr needed
+                                        // above, for the same reason
 
     // ---- movement ----------------------------------------------------------
     // The launch heading and the first stage record, and then src/movement.asm
@@ -1256,6 +1463,8 @@ wvScratch:  .byte 0                     // waveDefBase's partial product
 .label waveTrigSpecies = LEVELPKG_TRIG + 3 * LEVELPKG_TRIG_SLOTS
 .label waveTrigFire    = LEVELPKG_TRIG + 4 * LEVELPKG_TRIG_SLOTS
 .label waveTrigSide    = LEVELPKG_TRIG + 5 * LEVELPKG_TRIG_SLOTS
+.label waveTrigColour  = LEVELPKG_TRIG + 6 * LEVELPKG_TRIG_SLOTS
+.label waveTrigFireMode = LEVELPKG_TRIG + 7 * LEVELPKG_TRIG_SLOTS
 
 .if (WAVE_TRIGGERS > LEVELPKG_TRIG_SLOTS) {
     .error "more authored triggers than the level package reserves room for"

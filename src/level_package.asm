@@ -206,7 +206,7 @@ levelDefsEnd2:
 // ---------------------------------------------------------------------------
 // THE ABSOLUTE TRIGGER LIST, above the definitions.
 //
-// SIX PARALLEL COLUMNS, each LEVELPKG_TRIG_SLOTS bytes long whatever this level
+// SEVEN PARALLEL COLUMNS, each LEVELPKG_TRIG_SLOTS bytes long whatever this level
 // authors, because the engine addresses them as fixed bases: a column that
 // shrank with the trigger count would move every column above it and the
 // engine's labels would point at the wrong data. The unused tail of each column
@@ -234,6 +234,16 @@ levelTrigStart:
 }
 .for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
     .byte t < WAVE_TRIGGERS ? trigSide.get(t) : 0
+}
+// THIS APPEARANCE'S COLOUR: the C64 colour in bits 0-3 and TRIG_COL_RANDOM in
+// bit 4. See src/encounter_format.asm.
+.for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
+    .byte t < WAVE_TRIGGERS ? trigColour.get(t) : 0
+}
+// ...AND HOW IT ATTACKS: TRIG_FIRE_DOWN or TRIG_FIRE_AIMED. Read only for the
+// members trigFire admits and only for a species that can shoot at all.
+.for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
+    .byte t < WAVE_TRIGGERS ? trigFireMode.get(t) : 0
 }
 levelTrigEnd:
 

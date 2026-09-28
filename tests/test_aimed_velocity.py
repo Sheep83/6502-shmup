@@ -34,9 +34,16 @@ sym = symbols(SYM)
 MAX_OBJECTS = 16
 TYPE_EBULLET = 2
 PORT = 6602
-WAVEDEF_SIZE, WD_COLOUR = 10, 7
-FIRE_AIMED, COLOUR_MASK, WAVE_DEFS = 0x10, 0x0F, 7
+# HOW A WAVE FIRES IS A TRIGGER FIELD. It used to be bits 4-5 of the wave
+# DEFINITION's byte 7, and this file forced the mode by poking that byte; byte 7
+# is now reserved and zero, and the mode lives in the trigger list's own
+# trigFireMode column (src/encounter_format.asm). Poking the old place stopped
+# doing anything, which is exactly what this note exists to stop happening
+# silently again.
+LEVELPKG_TRIGN = 0xFF92       # the live trigger count; see src/levelpkg.asm
+TRIG_FIRE_DOWN, TRIG_FIRE_AIMED = 0, 1
 EBULLET_VX_MAX = 2
+EBULLET_VY_MAX = 3            # src/ebullet.asm: the fastest a bolt ever falls
 EXPECTED_VY = {0: 3, 1: 3, 2: 2}        # src/ebullet.asm ebulletAimVY
 TICKS = 600
 POSITIONS = (32, 150, 300)              # far left, middle, far right
@@ -58,9 +65,8 @@ def flights_at(player_x):
     try:
         v = Vice(PORT, PRG, boot="exact")
         mon = v.mon
-        for d in range(WAVE_DEFS):
-            a = sym["waveDefTable"] + d * WAVEDEF_SIZE + WD_COLOUR
-            poke(mon, a, (rd1(mon, a) & COLOUR_MASK) | FIRE_AIMED)
+        for t in range(rd1(mon, LEVELPKG_TRIGN)):
+            poke(mon, sym["waveTrigFireMode"] + t, TRIG_FIRE_AIMED)
 
         def hold_ship():
             poke(mon, sym["plyX"], player_x & 0xFF)
@@ -101,12 +107,28 @@ def flights_at(player_x):
         if v:
             v.close()
 
+    # A LIVE BOLT NEVER HAS objVY ZERO. ebulletSpawn writes EBULLET_VY or the
+    # steep 2 before the slot is activated (src/ebullet.asm ebulletAimVY), so a
+    # sample carrying zero is a slot that has been freed and not yet refilled --
+    # not a projectile that stopped. Dropping those is what stops a dead slot
+    # being reported as a bolt moving 0 pixels a frame.
+    for s in list(seq):
+        seq[s] = [r for r in seq[s] if r[3] != 0]
+
     out = []
     for s, rows in seq.items():
+        if not rows:
+            continue
         cur = [rows[0]]
         for a, b in zip(rows, rows[1:]):
-            # a slot reused by a new bolt restarts higher up, or changes slope
-            if b[1] < a[1] or b[2] != a[2]:
+            # A SLOT REUSED BY A NEW BOLT restarts higher up, changes slope --
+            # or restarts LOWER DOWN, which the first two tests miss. A bolt
+            # falls at most EBULLET_VY pixels a frame, so a larger gap is a
+            # different projectile in the same slot and not a teleport. That
+            # case only began appearing once this file drove every authored
+            # appearance into aimed fire, which put far more bolts through the
+            # same few slots.
+            if b[1] < a[1] or b[2] != a[2] or (b[1] - a[1]) > EBULLET_VY_MAX:
                 out.append(cur)
                 cur = [b]
             else:

@@ -29,7 +29,8 @@
 //   4 startY     spawn line
 //   5 xStep      signed, added to X per member
 //   6 yStep      signed, added to Y per member
-//   7 colour     every member of a wave shares one
+//   7 reserved   always zero. Enemy colour and firing mode are
+//                TRIGGER fields, not definition fields
 //   8 heading    launch heading, 0..WM_HEAD_LEN-1
 //   9 program    a program INDEX here; src/level_package.asm emits it as
 //                that program's BYTE OFFSET via progAt
@@ -40,7 +41,7 @@
     0, 0,                     // startX = 0, nine bits split low/high
     64,                       // startY
     0, 20,                    // xStep, yStep -- signed, per member
-    26,                       // colour (low nibble) + firing mode AIMED
+    0,                        // reserved -- must be zero
     0,                        // launch heading
     PROG_SWEEP)               // movement program INDEX
 
@@ -49,7 +50,7 @@
     90, 0,                    // startX = 90, nine bits split low/high
     30,                       // startY
     28, 0,                    // xStep, yStep -- signed, per member
-    3,                        // colour
+    0,                        // reserved -- must be zero
     12,                       // launch heading
     PROG_S)                   // movement program INDEX
 
@@ -58,7 +59,7 @@
     120, 0,                   // startX = 120, nine bits split low/high
     30,                       // startY
     36, 0,                    // xStep, yStep -- signed, per member
-    7,                        // colour
+    0,                        // reserved -- must be zero
     10,                       // launch heading
     PROG_LINGER)              // movement program INDEX
 
@@ -67,7 +68,7 @@
     70, 0,                    // startX = 70, nine bits split low/high
     30,                       // startY
     50, 0,                    // xStep, yStep -- signed, per member
-    13,                       // colour
+    0,                        // reserved -- must be zero
     8,                        // launch heading
     PROG_LOOP)                // movement program INDEX
 
@@ -76,7 +77,7 @@
     70, 0,                    // startX = 70, nine bits split low/high
     30,                       // startY
     50, 0,                    // xStep, yStep -- signed, per member
-    13,                       // colour
+    0,                        // reserved -- must be zero
     8,                        // launch heading
     PROG_LOOP)                // movement program INDEX
 
@@ -85,7 +86,7 @@
     175, 0,                   // startX = 175, nine bits split low/high
     0,                        // startY
     35, 0,                    // xStep, yStep -- signed, per member
-    1,                        // colour
+    0,                        // reserved -- must be zero
     0,                        // launch heading
     PROG_DIVE_BOMB)           // movement program INDEX
 
@@ -94,7 +95,7 @@
     0, 0,                     // startX = 0, nine bits split low/high
     200,                      // startY
     0, 0,                     // xStep, yStep -- signed, per member
-    1,                        // colour
+    0,                        // reserved -- must be zero
     0,                        // launch heading
     PROG_UP_N_OVER)           // movement program INDEX
 
@@ -133,5 +134,19 @@
 // INDEX, bit 0 the first member sent, and zero for a formation that does
 // not shoot at all.
 .var trigFire     = List().add(%00000101, %00000010, %00000101, %00000000, %00000101, %00001111, %00110111, %00001111, %00000000, %00000000, %00000000, %00110111)
+
+// HOW THIS APPEARANCE IS COLOURED -- bits 0-3 the C64 colour every
+// member wears, bit 4 (TRIG_COL_RANDOM) set if each enemy instead picks
+// its own eligible colour once, at spawn. On the TRIGGER and not on the
+// definition, so the same reusable formation can arrive in a different
+// colour at every row it is used.
+.var trigColour   = List().add(TRIG_COL_RANDOM + 10, 3, TRIG_COL_RANDOM + 7, TRIG_COL_RANDOM + 13, TRIG_COL_RANDOM + 13, TRIG_COL_RANDOM + 1, TRIG_COL_RANDOM + 1, TRIG_COL_RANDOM + 1, TRIG_COL_RANDOM + 13, TRIG_COL_RANDOM + 13, TRIG_COL_RANDOM + 13, TRIG_COL_RANDOM + 1)
+
+// HOW THIS APPEARANCE ATTACKS -- TRIG_FIRE_DOWN or TRIG_FIRE_AIMED.
+// On the TRIGGER and not on the definition, so the same reusable
+// formation can arrive silent at one row and aimed at another. Read
+// only for the members trigFire admits, and only for a species that
+// can shoot at all.
+.var trigFireMode = List().add(TRIG_FIRE_AIMED, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN)
 
 .const WAVE_TRIGGERS          = 12

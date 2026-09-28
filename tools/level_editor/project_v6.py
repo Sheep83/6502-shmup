@@ -185,21 +185,41 @@ class WaveDefinition:
     start_y: int = 0
     x_step: int = 0
     y_step: int = 0
-    colour: int = 1
     heading: int = 0
     movement_program: str = ""
-    # HOW this wave's enemies shoot. "DOWN" is the historical behaviour and the
-    # default, so a definition written before aimed fire existed keeps meaning
-    # exactly what it meant. See contract_v2.FIRE_MODES.
-    fire_mode: str = "DOWN"
+
+    # ---- NOT AUTHORING DATA. Migration input only. -----------------------
+    # A DEFINITION NO LONGER OWNS A COLOUR OR A FIRING MODE. It used to own the
+    # colour, the Fixed/Random mode and how its enemies aimed, which made the
+    # same reusable formation identically coloured and identically armed
+    # everywhere it was used; all three now live on the TRIGGER. These fields
+    # exist so that opening a project written before those moves can carry the
+    # author's choices onto the triggers that reference it -- see
+    # resolve_trigger_encounter_fields -- and for nothing else.
+    #
+    # THEY ARE NOT EMITTED BY to_dict, which is what removes the obsolete
+    # ownership from disk the first time a migrated project is saved. Because
+    # to_dict drops them, a to_dict/from_dict copy would drop them too, so the
+    # library copies definitions with `copy()` below instead.
+    legacy_colour: int = None
+    legacy_colour_mode: str = None
+    legacy_fire_mode: str = None
+
+    def copy(self):
+        """A real copy, migration fields included.
+
+        The library used to duplicate definitions by round-tripping them
+        through to_dict, which is exactly the thing that cannot carry a field
+        to_dict deliberately omits.
+        """
+        return replace(self)
 
     def to_dict(self):
         return {"id": self.id, "count": self.count, "interval": self.interval,
                 "startX": self.start_x, "startY": self.start_y,
                 "xStep": self.x_step, "yStep": self.y_step,
-                "colour": self.colour, "heading": self.heading,
-                "movementProgram": self.movement_program,
-                "fireMode": self.fire_mode}
+                "heading": self.heading,
+                "movementProgram": self.movement_program}
 
     @staticmethod
     def from_dict(raw, path):
@@ -211,15 +231,19 @@ class WaveDefinition:
             interval=_int_or_zero(raw.get("interval")),
             start_x=_int_or_zero(raw.get("startX")),
             start_y=_int_or_zero(raw.get("startY")),
-            x_step=_int_or_zero(raw.get("xStep")),
             y_step=_int_or_zero(raw.get("yStep")),
-            colour=_int_or_zero(raw.get("colour")),
+            x_step=_int_or_zero(raw.get("xStep")),
             heading=_int_or_zero(raw.get("heading")),
             movement_program=str(raw.get("movementProgram", "")),
-            # ABSENT MEANS DOWN. Every definition authored before aimed fire
-            # existed omits the key, and must go on firing the way it always
-            # did rather than silently acquiring a new behaviour.
-            fire_mode=str(raw.get("fireMode", "DOWN")),
+            # READ, NEVER WRITTEN BACK. Whatever colour or firing ownership this
+            # file still carries is picked up here so the triggers can inherit
+            # it, and is gone from the document the next time it is saved.
+            legacy_fire_mode=(str(raw["fireMode"])
+                              if "fireMode" in raw else None),
+            legacy_colour=(_int_or_zero(raw["colour"])
+                           if "colour" in raw else None),
+            legacy_colour_mode=(str(raw["colourMode"])
+                                if "colourMode" in raw else None),
         )
 
 
@@ -245,6 +269,39 @@ class Trigger:
     fire_mask: list = field(default_factory=list)
     dropper_side: str = "LEFT"
 
+    # ---- how THIS appearance is coloured ---------------------------------
+    # OWNED HERE, NOT BY THE DEFINITION. Two triggers may play the same
+    # reusable `sweep` and arrive cyan, yellow and mixed; changing one must not
+    # touch the others. See contract_v2.COLOUR_MODES.
+    #
+    # None MEANS "NOT AUTHORED YET", not "black". A project written before
+    # colour moved here says nothing about it, and the answer has to come from
+    # the wave definition it references -- which is not visible from inside a
+    # single trigger. resolve_trigger_encounter_fields fills them in once the
+    # document and its vocabulary are both loaded; until then the resolved_*
+    # properties below stand in, so nothing downstream ever sees a None.
+    colour: int = None
+    colour_mode: str = None
+
+    # ---- ...and how it attacks -------------------------------------------
+    # OWNED HERE TOO, and by the same argument: the same `sweep` should be
+    # usable silent at one row and aimed at another. `fire_mask` beside it says
+    # WHICH members shoot; this says HOW the ones that do aim. None means "not
+    # authored yet", exactly as above.
+    fire_mode: str = None
+
+    @property
+    def resolved_colour(self):
+        return C.DEFAULT_TRIGGER_COLOUR if self.colour is None else self.colour
+
+    @property
+    def resolved_colour_mode(self):
+        return "FIXED" if self.colour_mode is None else self.colour_mode
+
+    @property
+    def resolved_fire_mode(self):
+        return "DOWN" if self.fire_mode is None else self.fire_mode
+
     @property
     def fire_bits(self):
         bits = 0
@@ -254,11 +311,17 @@ class Trigger:
         return bits
 
     def to_dict(self):
+        # THE RESOLVED VALUES, always concrete. Saving a document is the point
+        # at which the migration becomes permanent: whatever the trigger
+        # inherited from its definition is written here as the trigger's own.
         return {"worldProgress": self.world_progress,
                 "waveDefinition": self.wave_definition,
                 "species": self.species,
                 "fireMask": list(self.fire_mask),
-                "dropperSide": self.dropper_side}
+                "dropperSide": self.dropper_side,
+                "colour": self.resolved_colour,
+                "colourMode": self.resolved_colour_mode,
+                "fireMode": self.resolved_fire_mode}
 
     @staticmethod
     def from_dict(raw, path):
@@ -270,7 +333,75 @@ class Trigger:
             species=str(raw.get("species", "RING")),
             fire_mask=_fire_mask(raw.get("fireMask")),
             dropper_side=str(raw.get("dropperSide", "LEFT")),
+            # ABSENT MEANS "ASK THE DEFINITION", not "use a default". The two
+            # are different: a pre-migration project really does have an
+            # authored colour, it is just recorded in the wrong place.
+            colour=(_int_or_zero(raw["colour"]) if "colour" in raw else None),
+            colour_mode=(str(raw["colourMode"])
+                         if "colourMode" in raw else None),
+            fire_mode=(str(raw["fireMode"]) if "fireMode" in raw else None),
         )
+
+
+def resolve_trigger_encounter_fields(project):
+    """Give every trigger its own colour and firing mode, inheriting once.
+
+    THE ONE-WAY MOVE FROM DEFINITION OWNERSHIP TO TRIGGER OWNERSHIP, and the
+    only place it happens. A project written before the move records colour,
+    Fixed/Random and the firing mode on the wave definition; a trigger that
+    says nothing about them therefore means "whatever my definition said", and
+    this copies those answers onto it. Afterwards, changing one trigger cannot
+    affect another using the same definition, because they no longer share a
+    value.
+
+    IT IS DELIBERATELY NOT A RESET TO DEFAULTS. A definition currently set to
+    Random, or to AIMED, migrates its triggers to Random and to AIMED.
+    Migration preserves what was authored; it does not have an opinion about
+    it. That matters here: Level 1 was left with most definitions on Random
+    after the colour visual test, and `sweep` has been AIMED since aimed fire
+    was added.
+
+    THE FIRE MASK IS NOT TOUCHED. It was already a trigger field and already
+    says which members shoot; only HOW they aim is arriving.
+
+    IDEMPOTENT, and it has to be: it runs on every load path, and a document
+    may be loaded before its vocabulary is attached and again afterwards. A
+    trigger that already has a value is never overwritten.
+
+    IT DOES NOTHING WHEN THERE IS NO VOCABULARY TO ASK. The controller loads a
+    document first and installs the shared library second, so resolving against
+    an empty definition list would answer every question with the default
+    before the real answer had arrived. Returns the triggers it resolved.
+    """
+    by_id = {d.id: d for d in project.wave_definitions}
+    if not by_id:
+        return []
+    done = []
+    for t in project.triggers:
+        if (t.colour is not None and t.colour_mode is not None
+                and t.fire_mode is not None):
+            continue
+        source = by_id.get(t.wave_definition)
+        if source is None:
+            continue            # dangling; validation reports it by name
+        if t.colour is None:
+            t.colour = (C.DEFAULT_TRIGGER_COLOUR if source.legacy_colour is None
+                        else source.legacy_colour)
+        if t.colour_mode is None:
+            t.colour_mode = (source.legacy_colour_mode
+                             if source.legacy_colour_mode in C.COLOUR_MODES
+                             else "FIXED")
+        if t.fire_mode is None:
+            t.fire_mode = (source.legacy_fire_mode
+                           if source.legacy_fire_mode in C.FIRE_MODES
+                           else "DOWN")
+        done.append(t)
+    return done
+
+
+# The name this was called while colour was the only field that had moved.
+# Kept so an external caller does not break on the rename.
+resolve_trigger_colours = resolve_trigger_encounter_fields
 
 
 def _fire_mask(raw):

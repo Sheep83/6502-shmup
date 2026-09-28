@@ -241,8 +241,10 @@ ebulletInit:
 // enemy's own position TELLS the player where the danger will be, which is what
 // makes the formation itself the threat rather than the projectile.
 //
-// So aimed enemy fire is an AUTHORING CHOICE, per wave definition, and it is
-// opt-in: see WAVEDEF_FIRE_BITS in src/waves.asm. A wave that does not ask for
+// So aimed enemy fire is an AUTHORING CHOICE, PER TRIGGER, and it is opt-in:
+// see TRIG_FIRE_AIMED in src/encounter_format.asm. It moved there from the wave
+// definition because the same reusable formation should be able to arrive
+// silent at one row and aimed at another. An appearance that does not ask for
 // it fires exactly as it always did.
 // ---------------------------------------------------------------------------
 ebulletSpawnDown:

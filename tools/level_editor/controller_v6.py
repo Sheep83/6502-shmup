@@ -358,7 +358,14 @@ class EditorController:
         if library is not None:
             for note in library.reconcile(project, path.name):
                 notices.append(_LibraryNotice(note))
-            library.install_into(project)
+            library.install_into(project)   # resolves trigger colours with it
+
+        # AND AGAIN FOR THE NO-LIBRARY CASE. A document that carried its own
+        # definitions was resolved by the loader; one given a shared library was
+        # resolved by install_into. This catches the third case -- a v1..v5
+        # migration that produced definitions in the document and no library at
+        # all -- and is a no-op whenever either of the other two already ran.
+        project_v6.resolve_trigger_encounter_fields(project)
 
         return cls(project, path=path, notices=notices,
                    from_version=result.from_version,
@@ -753,7 +760,8 @@ class EditorController:
         return "RING"
 
     def add_trigger(self, world_progress=None, wave_definition=None,
-                    species=None, fire_mask=None, dropper_side="LEFT"):
+                    species=None, fire_mask=None, dropper_side="LEFT",
+                    colour=None, colour_mode=None, fire_mode=None):
         """Author one moment. Returns its index after sorting."""
         if len(self.project.triggers) >= C.MAX_TRIGGERS:
             raise ControllerError(
@@ -772,7 +780,13 @@ class EditorController:
             wave_definition=str(wave_definition),
             species=species or self.suggested_species(),
             fire_mask=list(fire_mask or []),
-            dropper_side=dropper_side)
+            dropper_side=dropper_side,
+            # A NEW TRIGGER IS CONCRETE FROM THE START. None on a loaded
+            # trigger means "inherit from the definition", which is a migration
+            # state and not something a freshly authored one should be in.
+            colour=C.DEFAULT_TRIGGER_COLOUR if colour is None else int(colour),
+            colour_mode="FIXED" if colour_mode is None else str(colour_mode),
+            fire_mode="DOWN" if fire_mode is None else str(fire_mode))
         self.project.triggers.append(t)
         self.sort_triggers()
         return self.trigger_index_of(t)
@@ -801,6 +815,17 @@ class EditorController:
             t.dropper_side = str(fields["dropper_side"])
         if "fire_mask" in fields:
             t.fire_mask = sorted({int(m) for m in fields["fire_mask"]})
+        # COLOUR IS THIS TRIGGER'S, so setting it here cannot reach any other
+        # trigger playing the same wave definition. The fixed colour is kept
+        # when the mode is RANDOM: switching back must return what was chosen.
+        if "colour" in fields:
+            t.colour = int(fields["colour"])
+        if "colour_mode" in fields:
+            t.colour_mode = str(fields["colour_mode"])
+        # HOW THIS APPEARANCE ATTACKS is this trigger's too, so setting it here
+        # cannot reach another trigger playing the same wave definition.
+        if "fire_mode" in fields:
+            t.fire_mode = str(fields["fire_mode"])
         self.sort_triggers()
         return self.trigger_index_of(t)
 
@@ -818,7 +843,10 @@ class EditorController:
             wave_definition=src.wave_definition,
             species=src.species,
             fire_mask=list(src.fire_mask),
-            dropper_side=src.dropper_side)
+            dropper_side=src.dropper_side,
+            colour=src.resolved_colour,
+            colour_mode=src.resolved_colour_mode,
+            fire_mode=src.resolved_fire_mode)
 
     def trigger_members(self, index):
         """How many members the trigger's wave actually sends, or 0 if dangling."""
@@ -887,12 +915,11 @@ class EditorController:
                 raise ControllerError("use rename_wave_definition to change an id")
             if not hasattr(d, key):
                 raise ControllerError(f"a wave definition has no field {key!r}")
-            # TWO STRING FIELDS NOW, not one. fire_mode is a symbolic name like
-            # the movement program it sits beside -- coercing it with int()
-            # would turn "AIMED" into a ValueError at the point of typing it.
+            # movement_program is the only string field a definition still
+            # has: fire_mode and colour_mode moved to the trigger, where
+            # update_trigger coerces them.
             setattr(d, key,
-                    str(value) if key in ("movement_program", "fire_mode")
-                    else int(value))
+                    str(value) if key == "movement_program" else int(value))
         self.resync_semantic_programs()
         return index
 
@@ -939,7 +966,7 @@ class EditorController:
         clone = project_v6.WaveDefinition(
             id=ident, count=src.count, interval=src.interval,
             start_x=src.start_x, start_y=src.start_y, x_step=src.x_step,
-            y_step=src.y_step, colour=src.colour, heading=src.heading,
+            y_step=src.y_step, heading=src.heading,
             movement_program=src.movement_program)
         self.project.wave_definitions.append(clone)
         self.resync_semantic_programs()
