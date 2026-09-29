@@ -176,11 +176,12 @@ def port_owner(port):
     return pids[0] if pids else None
 
 
-# HOW FAR INTO THE STAGE boot="exact" is allowed to arrive. The first authored
-# encounter is at coarse row 48 and one coarse row is eight displayed frames, so
-# a handful of rows of slack would already be dozens of frames of gameplay the
-# caller did not ask for. Four is generous for a boot that steps single frames
-# and still an order of magnitude clear of row 48.
+# HOW FAR INTO THE STAGE boot="exact" is allowed to arrive. One coarse row is
+# eight displayed frames, so a handful of rows of slack would already be dozens
+# of frames of gameplay the caller did not ask for. Four is generous for a boot
+# that steps single frames and leaves any plausible authored schedule ahead of
+# the arrival point -- it is deliberately NOT expressed relative to whatever row
+# the first encounter happens to sit at today.
 BOOT_EXACT_MAX_ROW = 4
 
 

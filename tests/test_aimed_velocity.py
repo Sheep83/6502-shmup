@@ -25,6 +25,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
+import campaign_data as CD                                       # noqa: E402
 from harness import (PRG, SYM, symbols, Vice, rd1, poke, set_bp,  # noqa: E402
                      read16,
                      check, report)
@@ -40,7 +41,7 @@ PORT = 6602
 # trigFireMode column (src/encounter_format.asm). Poking the old place stopped
 # doing anything, which is exactly what this note exists to stop happening
 # silently again.
-LEVELPKG_TRIGN = 0xFF92       # the live trigger count; see src/levelpkg.asm
+LEVELPKG_TRIGN = CD.TRIGN_ADDR   # the live trigger count; src/levelpkg.asm
 TRIG_FIRE_DOWN, TRIG_FIRE_AIMED = 0, 1
 EBULLET_VX_MAX = 2
 EBULLET_VY_MAX = 3            # src/ebullet.asm: the fastest a bolt ever falls

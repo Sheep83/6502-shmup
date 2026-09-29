@@ -169,13 +169,26 @@ try:
     _t0 = app.controller.project.triggers[0]
     _wave0 = next(d for d in app.controller.project.wave_definitions
                   if d.id == _t0.wave_definition)
-    _mask0 = list(_t0.fire_mask)
+    # A SPARE MEMBER IS MADE, NOT FOUND. `next(m for m in range(count)
+    # if m not in mask)` raised a StopIteration the day the authored mask covered
+    # every member of its wave -- which is a perfectly legal thing to author. The
+    # widget's contract is that ticking a box writes the member and unticking it
+    # removes it, so member 0 is cleared first and the box row re-read: the test
+    # then has a box it knows is empty whatever the level says.
+    _restore_mask = list(_t0.fire_mask)
+    _canonical = app.controller.to_json()
+    app.controller.update_trigger(0, fire_mask=[m for m in _restore_mask
+                                                if m != 0])
+    w._refresh_trigger_detail()
+    _mask0 = list(app.controller.project.triggers[0].fire_mask)
     check("the fire boxes match the referenced wave's member count",
           len(w._fire_vars) == _wave0.count,
           f"{len(w._fire_vars)} boxes for a wave of {_wave0.count}")
-    check("...and reflect the authored mask",
+    check("...and reflect the mask now on the trigger",
           [m for m, v in w._fire_vars if v.get()] == _mask0, str(_mask0))
-    _spare = next(m for m in range(_wave0.count) if m not in _mask0)
+    check("...so there is a member with no bit set, to tick",
+          0 not in _mask0, f"mask {_mask0} of {_wave0.count} members")
+    _spare = 0
     before = app.controller.to_json()
     dict(w._fire_vars)[_spare].set(1)
     w._fire_changed()
@@ -184,6 +197,15 @@ try:
           str(app.controller.project.triggers[0].fire_mask))
     app._undo()
     check("...and it is undoable", app.controller.to_json() == before)
+    # PUT THE SETUP BACK. The mask was cleared directly on the controller rather
+    # than through a GUI action, so no undo step covers it; the later
+    # "clean again" and "Save As writes the canonical bytes" checks are about the
+    # whole session and would otherwise be failed by this file's own scaffolding.
+    app.controller.update_trigger(0, fire_mask=_restore_mask)
+    w._refresh_trigger_detail()
+    check("the fire-mask scaffolding is fully reverted",
+          app.controller.to_json() == _canonical,
+          f"mask back to {app.controller.project.triggers[0].fire_mask}")
 
     # =====================================================================
     # a rename from the workspace updates references and is one undo step

@@ -28,10 +28,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,  # noqa: E402
-                     step_n, read16, check, report, LAUNCHED_PIDS)
+                     level_const, step_n, read16, check, report, LAUNCHED_PIDS)
+import campaign_data as CD                                       # noqa: E402
 
 sym = symbols(SYM)
 PORT = 6613
+
+# ---------------------------------------------------------------------------
+# WHAT EACH LEVEL LOOKS LIKE IS THE LEVEL'S OWN BUSINESS. This file used to say
+# `glyphCount == 80 and bg == 12 and turretCount == 5` for level 1 and
+# `128 ... 5 ... 0` for level 2 -- six literals that are none of them engine
+# properties. Re-skinning a level, adding a glyph or moving a turret would have
+# failed a campaign-transition test. The claim that matters is that the resident
+# package MATCHES THE LEVEL IT CLAIMS TO BE and DIFFERS FROM THE OTHER ONE, so
+# the numbers are read from each level's own stage_config.asm and turret list.
+# ---------------------------------------------------------------------------
+CAMPAIGN, _NAME_LEN = CD.campaign()            # ("LEVEL1", "LEVEL2"), 6
+LAST_LEVEL = len(CAMPAIGN) - 1
+
+
+def look(name):
+    """(glyph count, background colour, turret count) as the level authors it."""
+    d = name.lower()
+    return (level_const("TERRAIN_GLYPH_COUNT", d),
+            level_const("TERRAIN_BACKGROUND_COLOUR", d),
+            CD.level(d).turret_count())
 
 JOY_RIGHT = 0b00001000          # active low
 MAX_OBJECTS = 16
@@ -261,9 +282,10 @@ def main():
         mon = v.mon
         set_bp(mon, sym["gameFrame"])
 
-        names = bytes(rd(mon, sym["cmpLevelNames"], 12)).decode("ascii")
+        names = bytes(rd(mon, sym["cmpLevelNames"],
+                         len(CAMPAIGN) * _NAME_LEN)).decode("ascii")
         check("the sequence is a table of filenames, in order",
-              names == "LEVEL1LEVEL2", repr(names))
+              names == "".join(CAMPAIGN), f"{names!r} vs {''.join(CAMPAIGN)!r}")
         check("the run starts on the first level", rd1(mon, sym["cmpLevel"]) == 0)
 
         # ---- dirty the world, so a clean level 2 is provable ---------------
@@ -286,11 +308,12 @@ def main():
         poke(mon, sym["ebCount"], 2)            # pretend bolts are in flight
         poke(mon, sym["trtKills"], 3)
 
-        check("LEVEL 1 is resident and looks like itself",
-              before["glyphCount"] == 80 and before["bg"] == 12
-              and before["turretCount"] == 5,
+        want_first = look(CAMPAIGN[0])
+        check(f"{CAMPAIGN[0]} is resident and looks like ITS OWN stage_config",
+              (before["glyphCount"], before["bg"], before["turretCount"])
+              == want_first,
               f"{before['glyphCount']} glyphs, bg {before['bg']}, "
-              f"{before['turretCount']} turrets")
+              f"{before['turretCount']} turrets; the level authors {want_first}")
         check("...and the world is genuinely dirty before the change",
               before["worldProgress"] > 0,
               f"worldProgress {before['worldProgress']}, "
@@ -332,14 +355,21 @@ def main():
             "speedFrac": rd1(mon, sym["cmpSpeedFrac"]),
         }
 
-        check("the sequence advanced to LEVEL2", after["cmpLevel"] == 1,
+        check(f"the sequence advanced to {CAMPAIGN[1]}", after["cmpLevel"] == 1,
               f"cmpLevel {after['cmpLevel']}")
-        check("LEVEL2 LOADED AND BROUGHT ITS OWN LOOK",
-              after["glyphCount"] == 128 and after["bg"] == 5,
-              f"{after['glyphCount']} glyphs (level 2 authors 128), "
-              f"bg {after['bg']} (level 2 authors 5)")
-        check("...and its own turret list: level 2 has none",
-              after["turretCount"] == 0, f"{after['turretCount']} turrets")
+        want_second = look(CAMPAIGN[1])
+        got_second = (after["glyphCount"], after["bg"], after["turretCount"])
+        check(f"{CAMPAIGN[1]} LOADED AND BROUGHT ITS OWN LOOK",
+              got_second == want_second,
+              f"{got_second} vs the level's own {want_second} "
+              f"(glyphs, background, turrets)")
+        # AND IT IS GENUINELY A DIFFERENT PACKAGE, not the same one re-read. If
+        # the two levels were ever authored to look identical this would say so
+        # rather than passing vacuously.
+        check("...and that look DIFFERS from the level it replaced, so a real "
+              "package load happened",
+              got_second != want_first,
+              f"{CAMPAIGN[0]} {want_first} -> {CAMPAIGN[1]} {want_second}")
 
         # ---- what must NOT survive ------------------------------------------
         for name, got, want in (
@@ -372,7 +402,7 @@ def main():
         # the LAST level and Continue is pressed for real: the only acceptable
         # outcome is the campaign-done state, never a load of a LEVEL3 that is
         # not on the disk and never a wrap to LEVEL1.
-        poke(mon, sym["cmpLevel"], 1)           # the last level in the sequence
+        poke(mon, sym["cmpLevel"], LAST_LEVEL)   # the last level in the sequence
         mon.cmd("delete")
         mon.cmd(f"g {sym['gsUpgradeContinue']:04x}")
         time.sleep(2.0)
@@ -382,8 +412,10 @@ def main():
               end_state == GS_CAMPAIGN_DONE,
               f"gsState {end_state}, expected GS_CAMPAIGN_DONE "
               f"({GS_CAMPAIGN_DONE})")
-        check("...without wrapping to LEVEL1 or reaching for a LEVEL3",
-              end_level == 1, f"cmpLevel {end_level}, expected 1")
+        check(f"...without wrapping to {CAMPAIGN[0]} or reaching for a "
+              f"{len(CAMPAIGN) + 1}th level that is not on the disk",
+              end_level == LAST_LEVEL,
+              f"cmpLevel {end_level}, expected {LAST_LEVEL}")
         check("...and the load error byte was never touched",
               rd1(mon, sym["levelLoadError"]) == 0,
               f"levelLoadError {rd1(mon, sym['levelLoadError'])} "

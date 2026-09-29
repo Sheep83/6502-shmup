@@ -33,6 +33,7 @@ ed.messagebox.showinfo = lambda *a, **k: None
 ed.messagebox.askyesno = lambda *a, **k: True
 import encounters_ui                                            # noqa: E402
 import movement_sim as ms                                       # noqa: E402
+import contract_v2 as C                                          # noqa: E402
 encounters_ui.messagebox.showerror = lambda *a, **k: None
 encounters_ui.messagebox.askyesno = lambda *a, **k: True
 
@@ -60,10 +61,41 @@ w.withdraw()
 app.update()
 p = w.preview
 
-RING = [i for i, t in enumerate(app.controller.project.triggers)
-        if t.species == "RING"]
-DROP = [i for i, t in enumerate(app.controller.project.triggers)
-        if t.species == "DROPPER"]
+# ---------------------------------------------------------------------------
+# THE SPECIMENS, GUARANTEED RATHER THAN HOPED FOR.
+#
+# This was `RING = [... if t.species == "RING"]`, and it came back EMPTY: the
+# ordinary enemy is an identity now and this level's is "RING_3", so `RING[0]`
+# raised an IndexError and the whole file stopped at its second check. Which
+# species a level authors, and how many of each, is authoring -- but the panel
+# needs two previewable triggers and one Dropper to have anything to say.
+#
+# So they are ARRANGED IN MEMORY through the controller if the level does not
+# happen to provide them. The project is never saved; the byte comparison at the
+# end of the file proves it.
+# ---------------------------------------------------------------------------
+_trigs = app.controller.project.triggers
+
+
+def _previewable():
+    return [i for i, t in enumerate(app.controller.project.triggers)
+            if t.species != "DROPPER"]
+
+
+def _droppers():
+    return [i for i, t in enumerate(app.controller.project.triggers)
+            if t.species == "DROPPER"]
+
+
+_ORDINARY = next((t.species for t in _trigs if t.species != "DROPPER"),
+                 C.DEFAULT_ENEMY_IDENTITIES[0])
+while len(_previewable()) < 2:
+    app.controller.update_trigger(_droppers()[0], species=_ORDINARY)
+if not _droppers():
+    app.controller.update_trigger(_previewable()[-1], species="DROPPER")
+RING, DROP = _previewable(), _droppers()
+print(f"  specimens: previewable triggers {RING}, Dropper triggers {DROP} "
+      f"(ordinary species {_ORDINARY!r})")
 
 
 def select_trigger(i):
@@ -79,7 +111,8 @@ try:
     check("the workspace has a preview panel", p is not None)
     select_trigger(RING[0])
     t = app.controller.project.triggers[RING[0]]
-    check("selecting a RING trigger produces a simulation", p.sim is not None)
+    check("selecting an ordinary trigger produces a simulation",
+          p.sim is not None)
     check("...resolved trigger -> wave -> program",
           p.sim.wave_id == t.wave_definition
           and p.sim.program_id == next(

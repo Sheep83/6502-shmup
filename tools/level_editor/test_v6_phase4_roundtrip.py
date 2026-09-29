@@ -179,18 +179,33 @@ assert f".if (progBytes > {C.LEVELPKG_MOVE_MAX})" in progs_text
 ok("the one-byte-cursor guard is carried into the generated file")
 
 for needed in ("#importonce", '#import "encounter_format.asm"',
-               '#import "wave_programs.asm"', ".const WAVEDEF_SIZE = 10",
+               '#import "wave_programs.asm"',
+               f".const WAVEDEF_SIZE = {C.WAVEDEF_SIZE}",
                ".var waveDefs = List()", ".var trigRow", ".var trigDef",
                ".var trigSpecies", ".var trigSide", ".var trigFire",
+               ".var trigColour", ".var trigFireMode", ".var trigSpeed",
                ".const WAVE_TRIGGERS"):
     assert needed in enc_text, needed
-ok("wave_encounters.asm declares all six trigger columns and the definitions")
-assert "SPECIES_RING" in enc_text and "DROP_SIDE_RIGHT" in enc_text
-ok("species and sides are emitted symbolically")
-assert "%00000101" in enc_text
+ok("wave_encounters.asm declares every trigger column and the definitions",
+   f"{C.LEVELPKG_TRIG_COLS} package columns")
+# SYMBOLIC, NOT LITERAL -- WHICHEVER SYMBOLS THE LEVEL HAPPENS TO USE.
+# This asserted `"SPECIES_RING" in enc_text and "DROP_SIDE_RIGHT" in enc_text`,
+# which is a statement about what Level 1 authors: the level no longer sends a
+# right-entering Dropper, so it failed. The claim is that the columns carry NAMES
+# rather than numbers.
+import re as _re
+_sym_cols = {"trigSpecies": "SPECIES_", "trigSide": "DROP_SIDE_",
+             "trigFireMode": "TRIG_FIRE_", "trigSpeed": "TRIG_SPEED_"}
+for _col, _prefix in _sym_cols.items():
+    _line = next(l for l in enc_text.splitlines() if l.startswith(f".var {_col}"))
+    _args = _line.split("add(", 1)[1].rsplit(")", 1)[0].split(",")
+    assert all(a.strip().startswith(_prefix) for a in _args), (_col, _line)
+ok("species, sides, firing modes and speeds are all emitted symbolically",
+   ", ".join(sorted(_sym_cols)))
+assert _re.search(r"%[01]{8}", enc_text)
 ok("fire masks are emitted as binary literals over member index")
 assert f".const WAVE_TRIGGERS          = {len(doc['triggers'])}" in enc_text
-ok("WAVE_TRIGGERS is the LIVE count, not the 180-slot capacity")
+ok(f"WAVE_TRIGGERS is the LIVE count, not the {C.MAX_TRIGGERS}-slot capacity")
 assert "trigRowLo" not in enc_text and "interleav" not in enc_text.lower()
 ok("no seven-byte interleaved record was introduced")
 
@@ -210,24 +225,95 @@ def refuse(label, code, mutate):
     ok(label, code)
 
 
-def big_pool(p):
+# ===========================================================================
+# THE CAPACITY BOUNDARIES, DERIVED, AND TESTED FROM BOTH SIDES
+# ===========================================================================
+# Every number here used to be a literal: 33 programs, a "27th" wave definition,
+# a "181st" trigger. The first two were the right answers for the reservations as
+# they stood; the third had been wrong since the trigger record grew from six
+# columns to nine and the slot count fell from 180 to 120, so "a 181st trigger is
+# refused" was refusing the 181st of 120 -- true, and sixty triggers past the
+# boundary it claimed to be testing.
+#
+# So the limits come from src/levelpkg.asm (through contract_v2, which reads it)
+# and each is tested TWICE: exactly AT the limit must be accepted and exported,
+# and one past it must be refused. A refusal alone cannot tell an off-by-one
+# ceiling from a correct one.
+_PROG_STAGES = 2                                    # STRAIGHT + EXIT
+_PROG_BYTES = _PROG_STAGES * C.WM_STAGE_SIZE
+POOL_FITS = C.LEVELPKG_MOVE_MAX // _PROG_BYTES      # programs the pool holds
+DEF_FITS = C.LEVELPKG_WAVEDEF_SLOTS
+TRIG_FITS = C.MAX_TRIGGERS
+print(f"  derived limits: {POOL_FITS} x {_PROG_BYTES}-byte programs "
+      f"({C.LEVELPKG_MOVE_MAX} pool bytes), {DEF_FITS} wave definitions, "
+      f"{TRIG_FITS} triggers")
+
+
+def _fill_pool(p, n):
     p.movement_programs = [MovementProgram(f"p{i}", [
         MovementStage("STRAIGHT", frames=1, vx=1, vy=1), MovementStage("EXIT")])
-        for i in range(33)]
+        for i in range(n)]
     for d in p.wave_definitions:
         d.movement_program = "p0"
 
 
-refuse("a movement pool over 256 bytes is refused", "movement.pool_overflow", big_pool)
-refuse("a 27th wave definition is refused", "wavedef.too_many",
-       lambda p: p.wave_definitions.extend(
-           WaveDefinition(id=f"x{i}", count=1, interval=1, start_x=0, start_y=0,
-                          colour=1, heading=0, movement_program="sweep")
-           for i in range(23)))
-refuse("a 181st trigger is refused", "trigger.too_many",
-       lambda p: p.triggers.extend(
-           Trigger(200 + i, "sweep", "RING" if i % 2 else "DROPPER", [0])
-           for i in range(177)))
+def _fill_defs(p, n):
+    # A WAVE WIDE ENOUGH FOR EVERY AUTHORED MASK. Pointing the triggers at a
+    # one-member wave arms members the wave never sends, which the validator
+    # rightly rejects as `trigger.fire_member_absent` -- a different rule from
+    # the capacity one under test.
+    widest = max((max(t.fire_mask) + 1 if t.fire_mask else 1)
+                 for t in p.triggers)
+    keep = WaveDefinition(id="fits", count=widest, interval=10, start_x=0,
+                          start_y=40, x_step=0, y_step=8, heading=0,
+                          movement_program=p.movement_programs[0].id)
+    p.wave_definitions = [keep] + [
+        WaveDefinition(id=f"x{i}", count=widest, interval=10, start_x=0,
+                       start_y=40, x_step=0, y_step=8, heading=0,
+                       movement_program=keep.movement_program)
+        for i in range(n - 1)]
+    for t in p.triggers:
+        t.wave_definition = keep.id
+
+
+def _fill_triggers(p, n):
+    wid = p.wave_definitions[0].id
+    ident = C.level_identities(p)[0]
+    for t in p.triggers:
+        t.wave_definition = wid
+    base = min(t.world_progress for t in p.triggers)
+    p.triggers = [Trigger(min(base + i, p.stage.no_spawn_row - 1), wid, ident, [0])
+                  for i in range(n)]
+
+
+def accepts(label, mutate):
+    """AT the limit: validates clean and exports."""
+    p = ProjectV6.load(CANONICAL)
+    mutate(p)
+    r = validate(p)
+    assert r.ok, f"{label}: expected no errors, got {[i.code for i in r.errors]}"
+    export_v6.export_level(p, Path(tmp.name) / "atlimit", level_name="x",
+                           carry_enemies_from=LEVEL)
+    ok(label)
+
+
+accepts(f"a movement pool of exactly {POOL_FITS} programs "
+        f"({POOL_FITS * _PROG_BYTES} of {C.LEVELPKG_MOVE_MAX} bytes) is accepted",
+        lambda p: _fill_pool(p, POOL_FITS))
+refuse(f"...and one more program ({(POOL_FITS + 1) * _PROG_BYTES} bytes) is "
+       f"refused", "movement.pool_overflow",
+       lambda p: _fill_pool(p, POOL_FITS + 1))
+
+accepts(f"exactly {DEF_FITS} wave definitions are accepted",
+        lambda p: _fill_defs(p, DEF_FITS))
+refuse(f"...and a {DEF_FITS + 1}th is refused", "wavedef.too_many",
+       lambda p: _fill_defs(p, DEF_FITS + 1))
+
+accepts(f"exactly {TRIG_FITS} triggers are accepted -- the package's own "
+        f"{C.LEVELPKG_TRIG_COLS} x {TRIG_FITS} reservation",
+        lambda p: _fill_triggers(p, TRIG_FITS))
+refuse(f"...and a {TRIG_FITS + 1}th is refused", "trigger.too_many",
+       lambda p: _fill_triggers(p, TRIG_FITS + 1))
 # DERIVED FROM THE PROJECT, NOT FROM A REMEMBERED ROW NUMBER. These test the
 # noSpawn boundary RULE, so they have to move a trigger to wherever that
 # boundary currently is -- pinning it to 340 made them a test of one level's

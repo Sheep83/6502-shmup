@@ -142,7 +142,33 @@ _ct = CANON["triggers"]
 eq("live triggers", len(trigs), len(_ct))
 eq("trigger rows", [t.world_progress for t in trigs],
    [d["worldProgress"] for d in _ct])
-eq("species sequence", [t.species for t in trigs], [d["species"] for d in _ct])
+# SPECIES: COMPARED AS ENGINE ROWS, NOT AS NAMES.
+#
+# The importer reads the GENERATED ASSEMBLY, which carries a species ROW OFFSET
+# (SPECIES_RING / SPECIES_DROPPER / SPECIES_SQUARE) and cannot know which roster
+# identity the level put in that slot. The project carries the IDENTITY. So the
+# two spell the same enemy differently -- the importer says "SQUARE" where the
+# project says "SPACE_WHISK" -- and comparing the strings failed while the
+# import was byte-perfect (the re-encoding below proves it).
+#
+# What the import must preserve is the row, which is what the package carries.
+# THE IDENTITIES OF THE CANONICAL PROJECT, which is where the identity spelling
+# comes from. (LEVEL1_JSON is the frozen legacy-v5 fixture and predates
+# identities entirely, so it would resolve SPACE_WHISK to None.)
+_identities = [n for n in (CANON.get("enemySlots")
+                          or C.DEFAULT_ENEMY_IDENTITIES)]
+
+
+def _row_of(name):
+    """The engine row a species name resolves to, legacy name or identity."""
+    if name in C.LEGACY_SPECIES_ORDER:
+        return C.LEGACY_SPECIES_ORDER.index(name) * C.ENEMY_ANIM_STEPS
+    return C.identity_row(name, _identities)
+
+
+eq("species sequence, as the ENGINE ROWS both spellings resolve to",
+   [_row_of(t.species) for t in trigs],
+   [_row_of(d["species"]) for d in _ct])
 eq("definition references", [t.wave_definition for t in trigs],
    [d["waveDefinition"] for d in _ct])
 eq("fire masks as member indices", [t.fire_mask for t in trigs],
@@ -164,22 +190,31 @@ ok(f"the {C.MAX_TRIGGERS}-slot zero padding was not imported as encounters")
 print("\n=== the reference re-encoding matches the authoritative package ===")
 pool = I.reference_encode_movement_pool(progs)
 # THE REGION BASES ARE FIXED BY src/levelpkg.asm; the LENGTHS follow the content.
-_POOL_BASE, _DEF_BASE = 0xF532, 0xF632
+_POOL_BASE = 0xF530 + C.LEVELPKG_STAGE_MAX
+_DEF_BASE = _POOL_BASE + C.LEVELPKG_MOVE_MAX
 eq("re-encoded movement pool bytes", len(pool), _records * C.WM_STAGE_SIZE)
 assert pool == region(_POOL_BASE, _POOL_BASE + len(pool) - 1), "movement pool differs"
-ok("*** all 52 movement pool bytes are IDENTICAL to build/level1.prg ***")
+ok(f"*** all {len(pool)} movement pool bytes are IDENTICAL to "
+   f"build/level1.prg ***")
 
 wd = I.reference_encode_wave_definitions(defs, progs)
 eq("re-encoded wave definition bytes", len(wd),
    len(CANON["waveDefinitions"]) * C.WAVEDEF_SIZE)
 assert wd == region(_DEF_BASE, _DEF_BASE + len(wd) - 1), "wave definitions differ"
-ok("*** all 40 wave definition bytes are IDENTICAL ***")
+ok(f"*** all {len(wd)} wave definition bytes are IDENTICAL ***")
 
-tc = I.reference_encode_trigger_columns(trigs, defs)
+tc = I.reference_encode_trigger_columns(trigs, defs,
+                                        identities=_identities)
 eq("re-encoded trigger column bytes", len(tc), C.MAX_TRIGGERS * C.LEVELPKG_TRIG_COLS)
-auth_tc = region(0xF736, 0xFB6D)
+# THE REGION IS DERIVED from the reservation: slots x columns, based where
+# src/levelpkg.asm puts it. `0xF736` and `0xFB6D` were transcribed, and the
+# second of them moves every time a column is added.
+_TRIG_BASE = _DEF_BASE + C.LEVELPKG_WAVEDEF_MAX
+_TRIG_BYTES = C.MAX_TRIGGERS * C.LEVELPKG_TRIG_COLS
+auth_tc = region(_TRIG_BASE, _TRIG_BASE + _TRIG_BYTES - 1)
 assert tc == auth_tc, "trigger columns differ"
-ok("*** all 1080 trigger column bytes are IDENTICAL, padding included ***")
+ok(f"*** all {_TRIG_BYTES} trigger column bytes are IDENTICAL, padding "
+   f"included ***")
 
 # field by field, so a failure says which column
 slots = C.MAX_TRIGGERS
@@ -225,19 +260,32 @@ eq("turrets still", len(project.turrets),
    len([o for o in _V5["objects"] if o.get("type") == "turret"]))
 
 v = validate(project)
-# NO ERRORS, AND NO WARNING THIS FILE CANNOT NAME. The imported `linger`
-# program really does kink 31 degrees either side of its drifting hold -- its
-# hold drifts (0, 1) while the object is travelling (3, 5) -- so the Phase 6B
-# continuity rule reports it, correctly. Still asserting "no warnings at all"
-# would mean deleting a true finding to keep a test quiet; asserting the exact
-# set keeps every other warning a failure.
-_expected = {("movement.discontinuity", "movementPrograms[linger].stages[1]"),
-             ("movement.discontinuity", "movementPrograms[linger].stages[2]")}
-_got = {(i.code, i.path) for i in v.warnings}
-if not v.ok or _got != _expected:
+# NO ERRORS, AND NO WARNING OF A KIND THIS FILE CANNOT ACCOUNT FOR.
+#
+# The exact warning SET used to be frozen here -- two named discontinuities in
+# `linger`, by program id and stage index. Both of those are still true, but the
+# set also picks up a `wavedef.unused` for every shared wave definition the
+# current level does not happen to point a trigger at, and that is authoring:
+# the shared library holds the vocabulary for two levels, so an unreferenced
+# definition is expected and moves about as either level is authored.
+#
+# So the claim is by KIND. No errors at all, and every warning is one of the two
+# advisory kinds an import can legitimately raise about authored shape. A
+# structural warning -- a dangling reference, a budget, a range -- would still
+# fail here, which is what this check is for.
+_ADVISORY = {"movement.discontinuity", "wavedef.unused"}
+_unexpected = [(i.code, i.path) for i in v.warnings if i.code not in _ADVISORY]
+if not v.ok or _unexpected:
     raise AssertionError(f"the populated project does not validate cleanly:\n{v}")
-ok("the populated project validates with no errors, and its only warnings are "
-   "the two real discontinuities in the imported 'linger' program")
+_kinds = sorted({i.code for i in v.warnings})
+ok("the populated project validates with no errors, and every warning is an "
+   f"advisory about authored shape ({', '.join(_kinds) or 'none'})")
+# THE DISCONTINUITY RULE STILL FIRES ON THE IMPORTED PROGRAMS, or the check
+# above would be satisfied by a validator that had quietly stopped looking.
+assert any(i.code == "movement.discontinuity" for i in v.warnings), \
+    "the imported movement programs raised no continuity warning at all"
+ok("...and the continuity rule did run over the imported programs",
+   f"{sum(1 for i in v.warnings if i.code == 'movement.discontinuity')} finding(s)")
 
 # refuses to overwrite silently
 try:
@@ -265,10 +313,32 @@ doc = json.loads(a)
 assert "movementProgram" in doc["waveDefinitions"][0]
 assert isinstance(doc["waveDefinitions"][0]["movementProgram"], str)
 ok("a definition stores a program ID, not an offset")
-assert doc["triggers"][0]["species"] == "RING_3"
-assert doc["triggers"][3]["dropperSide"] == "RIGHT"
-assert doc["triggers"][0]["fireMask"] == [0, 2]
-ok("triggers are stored as semantic objects, not six physical columns")
+# STORED SEMANTICALLY, whatever the values happen to be. These were three
+# literals -- species "RING_3" at index 0, side "RIGHT" at index 3, fire mask
+# [0, 2] at index 0 -- and every one of them is a reading of Level 1. What the
+# JSON must show is that each field is a NAME or a MEMBER LIST rather than the
+# physical byte the package carries.
+_t0 = doc["triggers"][0]
+assert isinstance(_t0["species"], str) and not _t0["species"].isdigit()
+assert all(t["dropperSide"] in C.DROPPER_SIDES for t in doc["triggers"])
+assert all(isinstance(t["fireMask"], list)
+           and all(isinstance(m, int) for m in t["fireMask"])
+           for t in doc["triggers"])
+assert all(t["fireMode"] in C.FIRE_MODES for t in doc["triggers"])
+assert all(t["colourMode"] in C.COLOUR_MODES for t in doc["triggers"])
+assert all(t["speed"] in C.SPEED_CHOICES for t in doc["triggers"])
+ok("triggers are stored as semantic objects, not as the package's nine physical "
+   "columns",
+   f"species {_t0['species']!r}, side {_t0['dropperSide']!r}, "
+   f"mask {_t0['fireMask']}, mode {_t0['fireMode']!r}, speed {_t0['speed']}")
+# AND THE SPEED COLUMN SURVIVES THE ROUND TRIP. It did not: import_triggers
+# ignored trigSpeed entirely, so a level authored at 1.50x re-imported at 1.00x
+# without a word. The engine's own column is the expectation.
+_asm_speed = list(parse_files(
+    [SRC / n for n in I.FORMAT_FILES]
+    + [SRC / I.DEFAULT_LEVEL_DIR / n for n in I.CONTENT_FILES]).list_("trigSpeed"))
+eq("...and every trigger's authored movement speed survived the import",
+   [t["speed"] for t in doc["triggers"]], _asm_speed)
 
 # ---------------------------------------------------------------------------
 print("\n=== malformed source fails loudly ===")
@@ -312,32 +382,91 @@ def rejects(label, expect, **overrides):
 progs_src = BASE["wave_programs.asm"]
 enc_src = BASE["wave_encounters.asm"]
 
+# ---------------------------------------------------------------------------
+# THE CORRUPTION FIXTURES ARE STRUCTURAL, NOT LITERAL.
+#
+# They used to name authored values: `WM_STRAIGHT, 34, 6, 0`, `WAVE_DEF_SWEEP`,
+# `SPECIES_RING`, `.const PROG_LOOP = 3`, `PROG_SWEEP)`. Every one of those is a
+# reading of Level 1 as it stood, and `sub()` asserts its pattern matched -- so
+# re-authoring the level did not weaken these proofs, it stopped them running
+# at all, with an AssertionError from the fixture rather than a result.
+#
+# The helpers below say WHERE rather than WHAT: the first stage record of a kind,
+# the first entry of a named column, the last PROG_* constant. The corruption is
+# identical and the fixture survives any authoring.
+# ---------------------------------------------------------------------------
+def first_record(text, kind):
+    """(whole match, the record's four fields) for the first `kind` record."""
+    m = re.search(rf"\.add\(List\(\)\.add\({kind}, *(-?\w+), *(-?\w+), *(-?\w+)\)\)",
+                  text)
+    assert m, f"no {kind} record in the generated movement pool"
+    return m
+
+
+def break_record(text, kind, new_body, what):
+    """Replace the first `kind` record's whole `.add(...)` body."""
+    m = first_record(text, kind)
+    return sub(text, re.escape(m.group(0)),
+               f".add(List().add({new_body}))", what)
+
+
+def first_column_entry(text, column):
+    """The first argument of `.var <column> = List().add(...)`."""
+    m = re.search(rf"(\.var\s+{column}\s*=\s*List\(\)\.add\()([^,)]+)", text)
+    assert m, f"no {column} column in the generated encounter list"
+    return m
+
+
+def break_column(text, column, value, what):
+    """Replace the first entry of a named trigger column."""
+    m = first_column_entry(text, column)
+    return sub(text, re.escape(m.group(0)), m.group(1) + str(value), what)
+
+
+def last_prog_const(text):
+    """(name, value) of the LAST `.const PROG_* = n`, which always exists."""
+    all_ = re.findall(r"\.const\s+(PROG_\w+)\s*=\s*(\d+)", text)
+    assert all_, "no PROG_* constants in the generated movement pool"
+    return all_[-1][0], int(all_[-1][1])
+
+_LAST_PROG, _LAST_PROG_N = last_prog_const(progs_src)
+
+_S = first_record(progs_src, "WM_STRAIGHT")
 rejects("an unknown movement opcode", "opcode",
-        **{"wave_programs.asm": sub(progs_src, r"WM_STRAIGHT, 34, 6, 0", "9, 34, 6, 0",
-                                    "sweep straight")})
+        **{"wave_programs.asm": break_record(
+            progs_src, "WM_STRAIGHT",
+            f"9, {_S.group(1)}, {_S.group(2)}, {_S.group(3)}",
+            "first STRAIGHT record")})
 rejects("a stage that is not four values", "4 values",
-        **{"wave_programs.asm": sub(progs_src, r"WM_STRAIGHT, 34, 6, 0\)\)",
-                                    "WM_STRAIGHT, 34, 6))", "sweep straight")})
+        **{"wave_programs.asm": break_record(
+            progs_src, "WM_STRAIGHT",
+            f"WM_STRAIGHT, {_S.group(1)}, {_S.group(2)}",
+            "first STRAIGHT record")})
 rejects("a missing PROG_* mapping", "PROG_",
-        **{"wave_programs.asm": sub(progs_src, r"\.const\s+PROG_LOOP\s*=\s*3", "",
-                                    "PROG_LOOP const")})
+        **{"wave_programs.asm": sub(
+            progs_src, rf"\.const\s+{_LAST_PROG}\s*=\s*{_LAST_PROG_N}", "",
+            f"{_LAST_PROG} const")})
 rejects("a duplicate PROG_* value", "ambiguous",
-        **{"wave_programs.asm": sub(progs_src, r"(\.const\s+PROG_LOOP\s*=\s*)3",
-                                    r"\g<1>0", "PROG_LOOP value")})
+        **{"wave_programs.asm": sub(
+            progs_src, rf"(\.const\s+{_LAST_PROG}\s*=\s*){_LAST_PROG_N}",
+            r"\g<1>0", f"{_LAST_PROG} value")})
 rejects("a definition naming a program that does not exist", "movement program index",
-        **{"wave_encounters.asm": sub(enc_src, r"PROG_LOOP\)", "9)",
-                                      "loop definition program ref")})
+        **{"wave_encounters.asm": sub(enc_src, r"PROG_\w+\)", "9)",
+                                      "first definition's program reference")})
 rejects("a trigger naming a definition that does not exist", "wave definition index",
-        **{"wave_encounters.asm": sub(enc_src, r"\.add\(WAVE_DEF_SWEEP,", ".add(9,",
-                                      "trigDef first entry")})
-rejects("an unknown species constant", "species",
-        **{"wave_encounters.asm": sub(enc_src,
-            r"(\.var\s+trigSpecies\s*=\s*List\(\)\.add\()SPECIES_RING,", r"\g<1>3,",
-            "trigSpecies first entry")})
+        **{"wave_encounters.asm": break_column(enc_src, "trigDef", 99,
+                                               "trigDef first entry")})
+rejects("an unknown species constant", "enemy slot",
+        **{"wave_encounters.asm": break_column(enc_src, "trigSpecies", 3,
+                                               "trigSpecies first entry")})
 rejects("an unknown Dropper side", "side",
-        **{"wave_encounters.asm": sub(enc_src,
-            r"(\.var\s+trigSide\s*=\s*List\(\)\.add\()DROP_SIDE_LEFT,", r"\g<1>7,",
-            "trigSide first entry")})
+        **{"wave_encounters.asm": break_column(enc_src, "trigSide", 7,
+                                               "trigSide first entry")})
+# AND THE COLUMN THE IMPORTER USED TO IGNORE. A speed outside the engine's five
+# choices must be refused, not quietly clamped or dropped.
+rejects("a movement speed the engine does not define", "movement speed",
+        **{"wave_encounters.asm": break_column(enc_src, "trigSpeed", 99,
+                                               "trigSpeed first entry")})
 rejects("mismatched trigger column lengths", "same length",
         # DROP THE LAST ROW, whatever the level authors, so the columns disagree.
         **{"wave_encounters.asm": sub(
@@ -352,21 +481,29 @@ rejects("WAVE_DEFS disagreeing with the definition list", "WAVE_DEFS",
                                       "WAVE_DEFS")})
 # The sweep definition's launch heading is its penultimate field, the 0 just
 # before PROG_SWEEP. $ff is legal on an ARC's entry heading and illegal here.
+# The launch heading is a definition's PENULTIMATE field, the one just before
+# its PROG_* reference. $ff is legal on an ARC's entry heading and illegal here.
 rejects("$ff where a launch heading is structurally required", "heading",
-        **{"wave_encounters.asm": sub(enc_src, r"0,(\s*(?://[^\n]*)?\n\s*)PROG_SWEEP\)",
-                                      r"255,\g<1>PROG_SWEEP)", "sweep launch heading")})
+        **{"wave_encounters.asm": sub(
+            enc_src, r"(-?\d+),(\s*(?://[^\n]*)?\n\s*)(PROG_\w+\))",
+            r"255,\g<2>\g<3>", "first definition's launch heading")})
+_A = first_record(progs_src, "WM_ARC")
 rejects("an unknown identifier", "unknown identifier",
-        **{"wave_programs.asm": sub(progs_src, r"WM_ARC, 16, 4, 0", "WM_ARC, WM_NOPE, 4, 0",
-                                    "sweep arc")})
+        **{"wave_programs.asm": break_record(
+            progs_src, "WM_ARC",
+            f"WM_ARC, WM_NOPE, {_A.group(2)}, {_A.group(3)}",
+            "first ARC record")})
 rejects("an expression outside the supported subset", "unsupported character",
         **{"wave_encounters.asm": sub(
             enc_src, r"(\.var\s+trigRow\s*=\s*List\(\)\.add\()(\d+)",
             r"\g<1>\g<2> << 1", "trigRow first entry")})
 rejects("a duplicate declaration", "already defined",
-        **{"wave_encounters.asm": enc_src + "\n.const WAVE_TRIGGERS = 5\n"})
+        **{"wave_encounters.asm": enc_src + "\n.const WAVE_TRIGGERS = 1\n"})
 rejects("a velocity too large for the signed byte it is emitted in", "signed byte",
-        **{"wave_programs.asm": sub(progs_src, r"WM_STRAIGHT, 34, 6, 0",
-                                    "WM_STRAIGHT, 34, 200, 0", "sweep straight")})
+        **{"wave_programs.asm": break_record(
+            progs_src, "WM_STRAIGHT",
+            f"WM_STRAIGHT, {_S.group(1)}, 200, {_S.group(3)}",
+            "first STRAIGHT record")})
 rejects("a trigger row beyond sixteen bits", "sixteen bits",
         **{"wave_encounters.asm": sub(
             enc_src, r"(\.var\s+trigRow\s*=\s*List\(\)\.add\([^)]*), *\d+\)",

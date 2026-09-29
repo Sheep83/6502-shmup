@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import contract_v2 as C                                          # noqa: E402
+import project_v6                                                # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 CANON = HERE / "levels" / "level1" / "level.v6.json"
@@ -112,39 +113,86 @@ def geometry(i, speed):
 
 try:
     # =====================================================================
-    # find two triggers sharing ONE wave definition, neither a Dropper
+    # THE SPECIMEN IS BUILT, NOT BORROWED FROM THE AUTHORED LEVEL
     # =====================================================================
-    # A Dropper is refused by the preview on purpose -- dropperLaunch takes it
-    # off its wave's path the instant it spawns -- so it is the wrong specimen
-    # here and is left alone, as this task requires.
-    trigs = w.controller.project.triggers
-    groups = {}
-    for i, t in enumerate(trigs):
-        if t.species != "DROPPER":
-            groups.setdefault(t.wave_definition, []).append(i)
-    shared = next((v for v in groups.values() if len(v) > 1), None)
-    if shared is None:
-        # The authored level does not happen to share one right now. Point two
-        # ordinary triggers at one definition IN MEMORY -- the project is never
-        # saved, and the byte-comparison at the end proves it.
-        ordinary = [i for i, t in enumerate(trigs) if t.species != "DROPPER"]
-        assert len(ordinary) >= 2, "the level has fewer than two ordinary triggers"
-        a, b = ordinary[0], ordinary[1]
-        w.controller.update_trigger(b, wave_definition=trigs[a].wave_definition)
-        shared = [a, b]
-    A, B = shared[0], shared[1]
-    defn = w.controller.project.triggers[A].wave_definition
-    check(f"two ordinary triggers share the definition {defn!r}", True,
-          f"rows {trigs[A].world_progress} and {trigs[B].world_progress}")
+    # The first version hunted the level for two ordinary triggers sharing one
+    # wave definition. That worked, and then it did not: the shared definition it
+    # found was `linger`, whose program loiters -- STRAIGHT, then a HOLD drifting
+    # at (0, 1), then an arc. Scaling a hold that slow does almost nothing to the
+    # geometry, and the widths came out 70, 51, 44, 53, 66 across the five
+    # speeds. Seven checks failed, and the preview was drawing exactly what the
+    # runtime would fly. The premise "the loop gets steadily wider" is true of a
+    # program whose arc follows a brisk straight leg, and that is a property of
+    # the PROGRAM, not of the engine.
+    #
+    # So the program, the wave and the two triggers are this file's own, added to
+    # the project IN MEMORY. The panel reads the live project, so the real
+    # PreviewPanel still flies them through the real workspace -- which is the
+    # whole point of this file -- and the byte comparison at the end proves
+    # nothing was saved.
+    proj = w.controller.project
+    SPEC_PROG, SPEC_WAVE = "_spec_prog", "_spec_wave"
+    proj.movement_programs.append(project_v6.MovementProgram(SPEC_PROG, [
+        # EAST, THEN A QUARTER TURN TO SOUTH, THEN OUT THROUGH THE BOTTOM.
+        #
+        # The shape is chosen so the measurement means what it says:
+        #
+        #   the straight leg runs EAST, so all of it counts toward the WIDTH and
+        #   its length scales exactly with the speed;
+        #   the arc is a QUARTER turn, whose horizontal extent is its radius --
+        #   and the radius is WM_ARC_SPEED x framesPerStep x headings / 8pi, so
+        #   it scales with the speed while the turn RATE does not;
+        #   the arc ends pointing SOUTH so the EXIT leaves through the BOTTOM.
+        #
+        # That last detail is not decoration. A first attempt turned a full
+        # circle and exited EAST, so the width was dominated by the run to the
+        # right border -- the same distance at every speed -- and the widening
+        # vanished into it. A second turned too far and left the aperture before
+        # the arc closed, truncating the 2.00x path so it came out NARROWER (78
+        # against 93) while the engine was behaving perfectly. The geometry below
+        # stays inside the 320x200 field at 2.00x with room to spare.
+        project_v6.MovementStage("STRAIGHT", frames=20, vx=6, vy=0),
+        project_v6.MovementStage("ARC", steps=16, frames_per_step=2,
+                                 entry_heading=0),
+        project_v6.MovementStage("EXIT"),
+    ]))
+    proj.wave_definitions.append(project_v6.WaveDefinition(
+        id=SPEC_WAVE, count=2, interval=16, start_x=40, start_y=40,
+        x_step=20, y_step=0, heading=0, movement_program=SPEC_PROG))
+    ordinary = next(t.species for t in proj.triggers if t.species != "DROPPER")
+    rows = sorted(t.world_progress for t in proj.triggers)
+    proj.triggers.append(project_v6.Trigger(
+        world_progress=min(rows[-1] + 10, proj.stage.no_spawn_row - 2),
+        wave_definition=SPEC_WAVE, species=ordinary, fire_mask=[],
+        dropper_side="LEFT"))
+    proj.triggers.append(project_v6.Trigger(
+        world_progress=min(rows[-1] + 20, proj.stage.no_spawn_row - 1),
+        wave_definition=SPEC_WAVE, species=ordinary, fire_mask=[],
+        dropper_side="LEFT"))
+    w._refresh_triggers()
+    app.update()
+    trigs = proj.triggers
+    A, B = len(trigs) - 2, len(trigs) - 1
+    defn = SPEC_WAVE
+    check(f"two ordinary triggers share the definition {defn!r}",
+          trigs[A].wave_definition == trigs[B].wave_definition == defn
+          and trigs[A].species != "DROPPER" and trigs[B].species != "DROPPER",
+          f"rows {trigs[A].world_progress} and {trigs[B].world_progress}, "
+          f"species {trigs[A].species}")
 
-    prog = next(p for p in w.controller.project.movement_programs
-                if p.id == next(d for d in w.controller.project.wave_definitions
+    prog = next(p for p in proj.movement_programs
+                if p.id == next(d for d in proj.wave_definitions
                                 if d.id == defn).movement_program)
     turning = [s for s in prog.stages if s.kind in C.ARC_KINDS]
     check(f"...and its program {prog.id!r} actually turns",
           bool(turning),
           f"{len(turning)} arc stage(s), "
           f"{sum(s.steps for s in turning)} heading steps")
+    check("...after a straight leg brisk enough for the arc's radius to show",
+          any(s.kind == "STRAIGHT" and max(abs(s.vx), abs(s.vy)) >= 4
+              for s in prog.stages),
+          "; ".join(f"{s.kind}({s.vx},{s.vy})" for s in prog.stages
+                    if s.kind in ("STRAIGHT", "HOLD")))
 
     # =====================================================================
     # THE REGRESSION: geometry must change with speed

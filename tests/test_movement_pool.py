@@ -22,9 +22,6 @@ sys.path.insert(0, str(ROOT / "tests"))
 from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, call, check, report)
 
 PORT = 6711
-POOL     = 0xf532       # movement programs
-WAVEDEF  = 0xf632       # wave definitions, 10 bytes each
-TRIG     = 0xf736       # the parallel trigger columns
 
 # ---------------------------------------------------------------------------
 # THE LAYOUT IS DERIVED, NOT WRITTEN DOWN. Every number below used to be a
@@ -42,6 +39,16 @@ TRIG     = 0xf736       # the parallel trigger columns
 sys.path.insert(0, str(ROOT / "tools" / "level_editor"))
 import asm_decl                                                  # noqa: E402
 import contract_v2 as C                                          # noqa: E402
+import synth                                                     # noqa: E402
+import campaign_data as CD                                       # noqa: E402
+
+# THE THREE BASE ADDRESSES, RESOLVED FROM src/levelpkg.asm RATHER THAN TYPED.
+# They were `0xf532`, `0xf632` and `0xf736`; the wave-definition one is spelled
+# `$f630` in a comment in levelpkg.asm itself, which is exactly how a
+# transcribed address goes wrong.
+POOL = CD.POOL_BASE             # movement programs
+WAVEDEF = CD.WAVEDEF_BASE       # wave definitions, 10 bytes each
+TRIG = CD.TRIG_BASE             # the parallel trigger columns
 
 TRIG_SLOTS = C.LEVELPKG_TRIG_SLOTS
 TRIG_COLS = ("rowLo", "rowHi", "def", "species", "fire", "side",
@@ -52,7 +59,8 @@ assert len(TRIG_COLS) == C.LEVELPKG_TRIG_COLS, (
 WAVEDEF_SIZE = C.LEVELPKG_WAVEDEF_SIZE
 
 # The authored content, from the level the engine was actually built against.
-_LVL = ROOT / "src" / "level1"
+_LEVEL_NAME = "level1"
+_LVL = ROOT / "src" / _LEVEL_NAME
 _enc = asm_decl.parse_files(
     [ROOT / "src" / n for n in ("movement_format.asm", "encounter_format.asm")]
     + [_LVL / "wave_programs.asm", _LVL / "wave_encounters.asm"])
@@ -89,9 +97,21 @@ def records(mon):
     return [list(raw[i * STAGE:(i + 1) * STAGE]) for i in range(len(raw) // STAGE)]
 
 
-def enter(mon, sym, byte_offset, seed_phase):
+def enter(mon, sym, byte_offset, seed_phase, speed=None):
     """Put slot SLOT on the record at byte_offset with wmPhase = seed_phase,
-    then run the engine's own stage-entry routine and read the result back."""
+    then run the engine's own stage-entry routine and read the result back.
+
+    THE SLOT'S SPEED IS PINNED. wmEnterStage ends `jmp wmApplySpeed`, so the
+    velocity it leaves behind is the heading table's entry SCALED by whatever
+    wmSpeed the slot carries -- and slot 0 carries whatever the live game last
+    put there. Before this line, six checks here compared a scaled velocity
+    against the raw table and failed reporting (9,0) where they wanted (6,0):
+    heading 0 at 1.50x, which is correct behaviour. TRIG_SPEED_1X is bit-exact
+    by construction, so pinning it is what makes the table comparison mean
+    anything. The scaling itself is proved in tests/test_trigger_speed.py.
+    """
+    poke(mon, sym["wmSpeed"] + SLOT,
+         C.TRIG_SPEED_1X if speed is None else speed)
     poke(mon, sym["wmStage"] + SLOT, byte_offset)
     poke(mon, sym["wmPhase"] + SLOT, seed_phase)
     call(mon, sym, "wmEnterStage", x=SLOT)
@@ -111,10 +131,15 @@ def main():
         # ---- the pool really is the package's ----------------------------
         pk = (ROOT / "build/level1.prg").read_bytes()
         base = pk[0] | (pk[1] << 8)
-        want = list(pk[2 + POOL - base: 2 + POOL - base + 52])
-        live = rd(mon, POOL, 52)
-        check("the movement pool in RAM at $f530 matches the built level package byte for byte",
-              live == want, f"{sum(1 for a, b in zip(live, want) if a != b)} mismatches")
+        # THE WHOLE POOL, WHATEVER SIZE IT IS. This read was 52 bytes -- the
+        # length the pool happened to have when four programs existed -- so it
+        # compared the first thirteen records and ignored the rest.
+        want = list(pk[2 + POOL - base: 2 + POOL - base + POOL_BYTES])
+        live = rd(mon, POOL, POOL_BYTES)
+        check(f"the movement pool in RAM at ${POOL:04x} matches the built level "
+              f"package byte for byte, all {POOL_BYTES} of them",
+              live == want,
+              f"{sum(1 for a, b in zip(live, want) if a != b)} mismatches")
 
         check("waveStageTable resolves into the level package, not the engine PRG",
               sym.get("waveStageTable") == POOL,
@@ -124,13 +149,15 @@ def main():
         dup = bytes(want) in prg
         check("the engine PRG carries no second copy of the pool",
               not dup,
-              "a duplicate of the 52 pool bytes is still in the engine binary"
-              if dup else "absent from the engine binary, as intended")
+              f"a duplicate of the {POOL_BYTES} pool bytes is still in the "
+              f"engine binary" if dup
+              else "absent from the engine binary, as intended")
 
         # ---- the wave definitions live in the package too ----------------
         wd_live = rd(mon, WAVEDEF, WAVE_DEFS * WAVEDEF_SIZE)
         wd_want = list(pk[2 + WAVEDEF - base: 2 + WAVEDEF - base + WAVE_DEFS * WAVEDEF_SIZE])
-        check("the wave definitions in RAM at $f630 match the built level package",
+        check(f"the wave definitions in RAM at ${WAVEDEF:04x} match the built "
+              f"level package",
               wd_live == wd_want,
               f"{sum(1 for a, b in zip(wd_live, wd_want) if a != b)} mismatches")
         check("waveDefTable resolves into the level package, not the engine PRG",
@@ -177,9 +204,9 @@ def main():
               WAVE_TRIGGERS <= TRIG_SLOTS,
               f"{WAVE_TRIGGERS} of {TRIG_SLOTS} slots used")
         check("the whole trigger list stays below the package signature",
-              TRIG + len(TRIG_COLS) * TRIG_SLOTS <= 0xfb70,
+              TRIG + len(TRIG_COLS) * TRIG_SLOTS <= CD.SIG_ADDR,
               f"ends at ${TRIG + len(TRIG_COLS) * TRIG_SLOTS:04x}, "
-              f"signature at $fb70")
+              f"signature at ${CD.SIG_ADDR:04x}")
 
         # ---- the cross-reference the whole package rests on ----------------
         # Field 9 of a definition is a BYTE OFFSET into the movement pool. If it
@@ -224,8 +251,23 @@ def main():
 
         explicit = [(i, r) for i, r in arcs if r[3] != WM_HEAD_CONT]
         cont = [(i, r) for i, r in arcs if r[3] == WM_HEAD_CONT]
-        check("exactly one arc asks to CONTINUE, and it is the S-turn's join",
-              len(cont) == 1 and cont[0][0] == 4, f"{[i for i, _ in cont]}")
+        # HOW MANY ARCS CONTINUE IS AUTHORING. This said "exactly one, and it is
+        # at record 4", which was true of the six programs that existed in
+        # August and is not an engine property at all -- an author may write a
+        # second S-turn, or none. What IS an engine property is the split: every
+        # arc either names a heading in range or asks to inherit, and nothing
+        # else is a legal byte 3.
+        want_cont = sum(1 for prog in _PROGS for r in prog
+                        if r[0] in (WM_ARC, WM_ARC_MIRROR) and r[3] == WM_HEAD_CONT)
+        check("the pool's continue-arcs are the ones the level declares",
+              len(cont) == want_cont,
+              f"{len(cont)} at records {[i for i, _ in cont]}, level declares "
+              f"{want_cont}")
+        check("every arc's byte 3 is either a heading in range or WM_HEAD_CONT "
+              "-- there is no third legal value",
+              all(r[3] < HEAD_LEN or r[3] == WM_HEAD_CONT for _i, r in arcs),
+              f"{len(arcs)} arcs, byte 3 values "
+              f"{sorted({r[3] for _i, r in arcs})}")
 
         bad = []
         for idx, rec in explicit:
@@ -240,55 +282,95 @@ def main():
               f"({len(explicit)} arcs x 3 corrupted seeds)",
               not bad, f"{len(bad)} wrong: {bad[:3]}")
 
-        # the three arcs above are reached after STRAIGHT, after HOLD and as a
-        # program's first stage -- name them so a failure says which
-        after = {1: "after STRAIGHT (SWEEP)", 8: "after HOLD (LINGER)",
-                 11: "after STRAIGHT (LOOP)", 3: "as first stage (S-TURN, MIRROR)"}
-        for idx, label in after.items():
+        # ---- THE ENTRY CONTEXT, DERIVED FROM THE PROGRAMS ------------------
+        # This was a hand-written map {1: "after STRAIGHT (SWEEP)", 8: "after
+        # HOLD (LINGER)", 11: "after STRAIGHT (LOOP)", 3: "first stage"}: record
+        # indices and program names from the level as it stood in August. The
+        # CLAIM is that an arc's entry does not depend on what came before it, so
+        # the interesting thing is the PREDECESSOR KIND, and the level's own
+        # programs say which ones occur. If Brian adds a program with a new
+        # context, this covers it automatically.
+        KIND = {WM_STRAIGHT: "after STRAIGHT", WM_ARC: "after ARC",
+                WM_ARC_MIRROR: "after ARC_MIRROR", WM_EXIT: "after EXIT",
+                WM_HOLD: "after HOLD"}
+        contexts = {}
+        for pi, prog in enumerate(_PROGS):
+            for j, rec in enumerate(prog):
+                if rec[0] not in (WM_ARC, WM_ARC_MIRROR) or rec[3] == WM_HEAD_CONT:
+                    continue
+                label = ("as a program's first stage" if j == 0
+                         else KIND.get(prog[j - 1][0], f"after kind {prog[j-1][0]}"))
+                # the pool lays the programs end to end, so the record index is
+                # the program's own offset plus the stage's position in it
+                contexts.setdefault(label, _PROG_OFFSETS[pi] // STAGE + j)
+        check("the level exercises more than one arc entry CONTEXT, so "
+              "'independent of history' is worth asserting",
+              len(contexts) > 1, "; ".join(sorted(contexts)))
+        for label, idx in sorted(contexts.items()):
             rec = recs[idx]
-            if rec[3] == WM_HEAD_CONT:
-                continue
             ph, vx, vy = enter(mon, sym, idx * STAGE, (rec[3] + 9) % HEAD_LEN)
             check(f"ARC entry {label} is deterministic",
                   (ph, vx, vy) == (rec[3], headvx[rec[3]], headvy[rec[3]]),
-                  f"phase {ph} vel ({vx},{vy}), wanted {rec[3]}")
+                  f"record {idx}: phase {ph} vel ({vx},{vy}), wanted {rec[3]}")
 
-        # ---- WM_HEAD_CONT is the one value that inherits -----------------
-        ci, crec = cont[0]
+        # ---- THE PRIMITIVES THEMSELVES, ON SYNTHETIC RECORDS --------------
+        # WM_HEAD_CONT, the clockwise step and the mirror's anticlockwise step
+        # are ENGINE behaviour. They used to be tested on whichever authored
+        # records happened to have the right shape -- `cont[0]`, and the first
+        # WM_ARC_MIRROR in the pool -- so a level with no S-turn or no mirror
+        # would have crashed this file with a StopIteration rather than told
+        # anybody anything. The records are now built, in the spare room the
+        # package reserves and the level does not use, so all three cases always
+        # run and none of them depends on what is authored.
+        pkg = synth.Package(mon, sym, _LEVEL_NAME)
+        HEAD = 20                            # an arbitrary in-range heading
+        syn = pkg.install_program([
+            [WM_ARC, 16, 4, WM_HEAD_CONT],   # 0: inherits
+            [WM_ARC, 16, 4, HEAD],           # 1: clockwise from HEAD
+            [WM_ARC_MIRROR, 16, 4, HEAD],    # 2: anticlockwise from HEAD
+        ])
+        check("three synthetic arc records were installed past the authored pool",
+              syn == POOL_BYTES, f"at pool offset {syn}, pool ends at {POOL_BYTES}")
+
         seen = []
         for seed in (0, 12, 40):
-            ph, vx, vy = enter(mon, sym, ci * STAGE, seed)
+            ph, vx, vy = enter(mon, sym, syn + 0 * STAGE, seed)
             seen.append((seed, ph, vx, vy))
         check("WM_HEAD_CONT continues from whatever heading the object holds",
               all(ph == seed and vx == headvx[seed] and vy == headvy[seed]
                   for seed, ph, vx, vy in seen), f"{seen}")
-        check("...and it is therefore the ONLY arc whose entry depends on history",
-              len(cont) == 1, f"{len(cont)} continue-arcs")
+        # ...AND IT IS THE ONLY VALUE THAT DOES. Asserted over the whole pool
+        # rather than by counting today's S-turns: every arc with an explicit
+        # heading was just shown to ignore wmPhase entirely.
+        check("...and it is the ONLY byte 3 whose entry depends on history -- "
+              "every explicit heading ignored wmPhase above",
+              not bad and all(r[3] < HEAD_LEN or r[3] == WM_HEAD_CONT
+                              for _i, r in arcs),
+              f"{len(explicit)} explicit arcs, {len(cont)} continue-arcs")
 
-        # ---- the mirror turns the other way ------------------------------
-        mi, mrec = next((i, r) for i, r in arcs if r[0] == WM_ARC_MIRROR)
-        poke(mon, sym["wmStage"] + SLOT, mi * STAGE)
-        poke(mon, sym["wmPhase"] + SLOT, 55)
-        call(mon, sym, "wmEnterStage", x=SLOT)
-        start = rd1(mon, sym["wmPhase"] + SLOT)
-        poke(mon, sym["wmTimer"] + SLOT, 1)
-        call(mon, sym, "wmArcStep", x=SLOT)
-        after_mirror = rd1(mon, sym["wmPhase"] + SLOT)
-        check("WM_ARC_MIRROR starts on its named heading and steps ANTICLOCKWISE",
-              start == mrec[3] and after_mirror == (mrec[3] - 1) % HEAD_LEN,
-              f"entered {start} (want {mrec[3]}), stepped to {after_mirror}")
+        def step_once(offset, seed=55):
+            entered = enter(mon, sym, offset, seed)[0]
+            poke(mon, sym["wmTimer"] + SLOT, 1)
+            call(mon, sym, "wmArcStep", x=SLOT)
+            return entered, rd1(mon, sym["wmPhase"] + SLOT)
 
-        ai, arec = next((i, r) for i, r in arcs
-                        if r[0] == WM_ARC and r[3] != WM_HEAD_CONT)
-        poke(mon, sym["wmStage"] + SLOT, ai * STAGE)
-        poke(mon, sym["wmPhase"] + SLOT, 55)
-        call(mon, sym, "wmEnterStage", x=SLOT)
-        poke(mon, sym["wmTimer"] + SLOT, 1)
-        call(mon, sym, "wmArcStep", x=SLOT)
-        after_arc = rd1(mon, sym["wmPhase"] + SLOT)
-        check("WM_ARC steps CLOCKWISE from the same explicit contract",
-              after_arc == (arec[3] + 1) % HEAD_LEN,
-              f"stepped to {after_arc}, wanted {(arec[3] + 1) % HEAD_LEN}")
+        start, moved = step_once(syn + 1 * STAGE)
+        check("WM_ARC starts on its named heading and steps CLOCKWISE",
+              start == HEAD and moved == (HEAD + 1) % HEAD_LEN,
+              f"entered {start} (want {HEAD}), stepped to {moved}")
+        start, moved = step_once(syn + 2 * STAGE)
+        check("WM_ARC_MIRROR starts on the SAME named heading and steps "
+              "ANTICLOCKWISE",
+              start == HEAD and moved == (HEAD - 1) % HEAD_LEN,
+              f"entered {start} (want {HEAD}), stepped to {moved}")
+        # THE WRAP, at both ends, which no authored record need ever visit.
+        for kind, off, at, want in ((WM_ARC, 1, HEAD_LEN - 1, 0),
+                                    (WM_ARC_MIRROR, 2, 0, HEAD_LEN - 1)):
+            edge = pkg.install_program([[kind, 16, 4, at]])
+            _s, moved = step_once(edge)
+            check(f"{'WM_ARC' if kind == WM_ARC else 'WM_ARC_MIRROR'} wraps "
+                  f"{at} -> {want} rather than running off the table",
+                  moved == want, f"stepped to {moved}")
     finally:
         v.close()
     return report("level-package encounter data + deterministic ARC entry")

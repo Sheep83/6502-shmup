@@ -250,12 +250,24 @@ def import_wave_definitions(src, programs):
     return out
 
 
-def import_triggers(src, definitions):
-    """The eight authored columns -> v6 Triggers, live entries only."""
+def import_triggers(src, definitions, identities=None):
+    """Every authored column -> v6 Triggers, live entries only.
+
+    THE COLUMN LIST IS CHECKED against src/levelpkg.asm at the end, because it
+    went stale silently: trigSpeed was added to the package, the exporter and the
+    engine, and this reader went on ignoring it -- so a re-import of a level
+    authored at 1.50x came back at 1.00x with nothing said. Two rowLo/rowHi
+    halves make one column, hence the +1.
+    """
     live = src.const("WAVE_TRIGGERS")
     columns = {name: src.list_(name) for name in
                ("trigRow", "trigDef", "trigSpecies", "trigFire", "trigSide",
-                "trigColour", "trigFireMode")}
+                "trigColour", "trigFireMode", "trigSpeed")}
+    if len(columns) + 1 != C.LEVELPKG_TRIG_COLS:
+        raise EncounterImportError(
+            f"this reader consumes {len(columns) + 1} trigger columns and "
+            f"src/levelpkg.asm declares {C.LEVELPKG_TRIG_COLS}; a column has "
+            f"been added to the package and not to the importer")
     lengths = {n: len(v) for n, v in columns.items()}
     if len(set(lengths.values())) != 1:
         raise EncounterImportError(
@@ -265,13 +277,20 @@ def import_triggers(src, definitions):
         raise EncounterImportError(
             f"WAVE_TRIGGERS is {live} but the columns hold only {authored} entries")
 
-    # THE ENGINE'S SPECIES VALUE IS A SLOT, NOT AN ENEMY. Which identity sits
-    # in a slot is recorded in the level's stage_enemies.asm, which this reader
-    # does not consume -- it reads the encounter tables. So a slot maps back to
-    # the DEFAULT identity for that slot, which is what a level that never
-    # chose otherwise carries. Re-importing a level whose stage_enemies names
-    # different identities will need them set again in the editor.
-    species_of = {i * C.ENEMY_ANIM_STEPS: C.DEFAULT_ENEMY_IDENTITIES[i]
+    # THE ENGINE'S SPECIES VALUE IS A SLOT, NOT AN ENEMY. Which identity sits in
+    # a slot is recorded in the level's stage_enemies.asm, which this reader does
+    # not consume -- it reads the encounter tables.
+    #
+    # SO THE CALLER SUPPLIES THE SLOTS when it knows them. import_encounters has
+    # the target project and therefore its `enemySlots`, and passing them is what
+    # makes export -> import -> export a real fixed point: without them a slot
+    # came back as the DEFAULT identity for that position, so a level holding
+    # Space Whisk re-imported as "SQUARE" and then re-exported as species row 0,
+    # silently changing which enemy the trigger sends. Falling back to the
+    # defaults is what a level that never chose otherwise carries.
+    _ids = list(identities or C.DEFAULT_ENEMY_IDENTITIES)
+    species_of = {i * C.ENEMY_ANIM_STEPS: _ids[i] if i < len(_ids)
+                  else C.DEFAULT_ENEMY_IDENTITIES[i]
                   for i in range(C.ENEMY_SLOTS)}
     side_of = {v: k for k, v in C.DROPPER_SIDES.items()}
     fire_of = {v: k for k, v in C.FIRE_MODES.items()}
@@ -304,6 +323,12 @@ def import_triggers(src, definitions):
             raise EncounterImportError(
                 f"{what} names firing mode {fmode!r}, which is not one of "
                 f"{sorted(C.FIRE_MODES.items())}")
+        speed = columns["trigSpeed"][i]
+        if not isinstance(speed, int) or not (
+                C.TRIG_SPEED_MIN <= speed <= C.TRIG_SPEED_MAX):
+            raise EncounterImportError(
+                f"{what} names movement speed {speed!r}, which is not one of "
+                f"{sorted(C.SPEED_CHOICES)}")
         out.append(Trigger(
             world_progress=row,
             wave_definition=definitions[d_index].id,
@@ -312,20 +337,26 @@ def import_triggers(src, definitions):
             dropper_side=side_of[side],
             colour=colour & C.TRIG_COL_MASK,
             colour_mode=("RANDOM" if colour & C.TRIG_COL_RANDOM else "FIXED"),
-            fire_mode=fire_of[fmode]))
+            fire_mode=fire_of[fmode],
+            speed=speed))
     return out, authored
 
 
 # ---------------------------------------------------------------------------
 # the import
 # ---------------------------------------------------------------------------
-def read_encounters(src_dir, level_dir=None):
-    """Read the authoritative encounter data. Does not touch any project."""
+def read_encounters(src_dir, level_dir=None, identities=None):
+    """Read the authoritative encounter data. Does not touch any project.
+
+    `identities` are the three enemy identities the destination level holds, so a
+    species SLOT can be spelled back as the enemy that is actually in it.
+    """
     src, names = read_engine_source(src_dir, level_dir)
     result = ImportResult(source_files=names)
     result.movement_programs = import_movement_programs(src)
     result.wave_definitions = import_wave_definitions(src, result.movement_programs)
-    result.triggers, authored = import_triggers(src, result.wave_definitions)
+    result.triggers, authored = import_triggers(src, result.wave_definitions,
+                                                identities=identities)
 
     records = sum(len(p.stages) for p in result.movement_programs)
     result.note(f"{len(result.movement_programs)} movement program(s): "
@@ -363,7 +394,8 @@ def import_encounters(project, src_dir, *, level_dir=None, replace=False):
             f"{len(project.triggers)} trigger(s)). Pass replace=True to overwrite "
             f"them from the engine source.")
 
-    result = read_encounters(src_dir, level_dir)
+    result = read_encounters(src_dir, level_dir,
+                             identities=C.level_identities(project))
     project.movement_programs = result.movement_programs
     project.wave_definitions = result.wave_definitions
     project.triggers = result.triggers
@@ -424,18 +456,48 @@ def reference_encode_wave_definitions(definitions, programs):
     return bytes(out)
 
 
-def reference_encode_trigger_columns(triggers, definitions, slots=None):
-    """The six parallel columns, zero-padded to `slots` as the package emits them."""
+def _species_row(name, identities):
+    """The engine species row for an identity name OR a legacy species name."""
+    if name in C.LEGACY_SPECIES_ORDER:
+        return C.LEGACY_SPECIES_ORDER.index(name) * C.ENEMY_ANIM_STEPS
+    row = C.identity_row(name, identities)
+    if row is None:
+        raise EncounterImportError(
+            f"{name!r} is in none of this level's slots {list(identities)} and "
+            f"is not a legacy species name either")
+    return row
+
+
+def reference_encode_trigger_columns(triggers, definitions, slots=None,
+                                    identities=None):
+    """Every parallel column, padded to `slots` as src/level_package.asm emits it.
+
+    ONE COLUMN PER FIELD, AND THE COUNT IS CHECKED against src/levelpkg.asm at
+    the end: this function said "the six parallel columns" and emitted eight,
+    and after the movement-speed column landed it emitted eight of nine. The
+    package was 1,080 bytes and the reference encoding 960, so a byte-for-byte
+    comparison against build/level1.prg could not even be attempted.
+
+    `identities` is the level's own three enemy identities. It defaulted to
+    C.DEFAULT_ENEMY_IDENTITIES, which resolves any identity the level has
+    actually chosen -- Space Whisk, say -- to None and then to row 0, silently
+    encoding the wrong species. Callers that have the project should pass them.
+    """
     slots = C.MAX_TRIGGERS if slots is None else slots
     index_of = {d.id: i for i, d in enumerate(definitions)}
     n = len(triggers)
-    _ids = list(C.DEFAULT_ENEMY_IDENTITIES)
+    _ids = list(identities or C.DEFAULT_ENEMY_IDENTITIES)
     cols = [
         [t.world_progress & 0xFF for t in triggers],
         [(t.world_progress >> 8) & 0xFF for t in triggers],
         [index_of[t.wave_definition] for t in triggers],
-        # identity -> the slot this level put it in
-        [(C.identity_row(t.species, _ids) or 0) for t in triggers],
+        # identity -> the slot this level put it in. A LEGACY SPECIES NAME is
+        # accepted too: read_encounters maps a slot row back to the default
+        # identity for that slot, because it reads the encounter tables and not
+        # stage_enemies.asm, so an imported trigger can legitimately still be
+        # spelled "SQUARE" where the project says "SPACE_WHISK". Both must encode
+        # to the same row, or a re-encoding comparison fails on a spelling.
+        [_species_row(t.species, _ids) for t in triggers],
         [t.fire_bits for t in triggers],
         [C.DROPPER_SIDES[t.dropper_side] for t in triggers],
         # THE SEVENTH COLUMN: this appearance's colour and colour mode.
@@ -444,5 +506,16 @@ def reference_encode_trigger_columns(triggers, definitions, slots=None):
          for t in triggers],
         # ...AND THE EIGHTH: how it attacks.
         [C.FIRE_MODES[t.resolved_fire_mode] for t in triggers],
+        # ...AND THE NINTH: how fast it crosses the playfield.
+        [t.resolved_speed for t in triggers],
     ]
-    return bytes(b for col in cols for b in (col + [0] * (slots - n)))
+    if len(cols) != C.LEVELPKG_TRIG_COLS:
+        raise AssertionError(
+            f"the reference encoder emits {len(cols)} trigger columns and "
+            f"src/levelpkg.asm reserves room for {C.LEVELPKG_TRIG_COLS}")
+    # THE PADDING IS PER COLUMN. Every column pads with zero except the speed,
+    # which pads with TRIG_SPEED_1X -- a zero there would be a multiplier of
+    # nothing. src/level_package.asm says the same thing beside the same column.
+    pad = [0] * (len(cols) - 1) + [C.TRIG_SPEED_1X]
+    return bytes(b for col, fill in zip(cols, pad)
+                 for b in (col + [fill] * (slots - n)))

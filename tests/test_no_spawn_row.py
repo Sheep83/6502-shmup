@@ -10,6 +10,20 @@ Everything here drives worldProgress deliberately rather than waiting for it,
 and every case holds stageHold so the stage cannot END during the window --
 otherwise lvlPhase would leave LP_LEVEL and the pre-existing end-of-level gate
 would suppress the wave instead of the one being tested.
+
+THE SCHEDULE IS SYNTHETIC AND THE THRESHOLD IS THE LEVEL'S OWN.
+
+The gate is a comparison between worldProgress and a package byte. It has
+nothing to say about how many encounters a level authors or where they sit, so
+the cases below install ONE disposable trigger at a low row (tests/synth.py,
+package RAM only) and drive the world around the threshold. Before that change
+this file restated Level 1's schedule as `WAVE_TRIGGERS = 4` and
+`TRIG_ROWS = [48, 52, 90, 126]`; the level was re-authored to five triggers and
+three checks failed reporting a cursor of 5, which was the correct answer.
+
+What is still read from the real level is the threshold itself and the authored
+rows -- not to freeze them, but to prove the EXPORTER put every row below the
+threshold, which is a genuine safety invariant over whatever is authored.
 """
 import sys
 from pathlib import Path
@@ -18,16 +32,23 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 from harness import (level_const, PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
                      step_n, call, check, report)
+import campaign_data as CD                                       # noqa: E402
+import synth                                                     # noqa: E402
 
 PORT = 6715
 # READ FROM THE LEVEL, NOT RESTATED. This was 340 with a comment pointing at
 # the file that actually defines it; the level was re-authored to 725 and the
 # test failed seven checks about an engine that was behaving correctly.
 NO_SPAWN = level_const("STAGE_NO_SPAWN_ROW")    # src/level1/stage_config.asm
-NOSPAWN_ADDR = 0xf530           # the stage header in the LOADED package
-WAVE_TRIGGERS = 4
-TRIG_ROWS = [48, 52, 90, 126]
+NOSPAWN_ADDR = CD.NOSPAWN_ADDR  # the stage header in the LOADED package
 LP_LEVEL = 0
+
+# THE SYNTHETIC SCHEDULE. One trigger, at a row far below any plausible
+# threshold, so "a trigger is due" is true whenever the world is above it -- and
+# the cursor's terminal value is therefore 1, derived from the count this file
+# installed rather than from what Level 1 happens to author.
+SYN_TRIGGERS = 1
+SYN_ROW = 8
 
 
 def w16(mon, sym, n):
@@ -89,6 +110,36 @@ def main():
               "immediate -- so a level ships its own and a test can move it",
               live == NO_SPAWN, f"package says {live}, stage_config says {NO_SPAWN}")
 
+        # ---- THE INVARIANT OVER THE REAL AUTHORED SCHEDULE ----------------
+        # Not "the rows are 48, 52, 90 and 126" -- that is content. What must
+        # hold for ANY authoring is that the exporter put every live row STRICTLY
+        # below the threshold, because a row at or beyond it could never start
+        # and would be an encounter the author wrote and the engine silently ate.
+        # src/waves.asm refuses to assemble one; this is the same claim measured
+        # on the package that actually shipped.
+        n_live = rd1(mon, CD.TRIGN_ADDR)
+        lo = rd(mon, sym["waveTrigRowLo"], max(n_live, 1))
+        hi = rd(mon, sym["waveTrigRowHi"], max(n_live, 1))
+        authored = [lo[i] | (hi[i] << 8) for i in range(n_live)]
+        check("EVERY authored trigger row is below the threshold -- no authored "
+              "encounter is unreachable",
+              all(r < NO_SPAWN for r in authored),
+              f"{n_live} rows {authored}, threshold {NO_SPAWN}")
+        check("...and they are non-decreasing, as a forward-only cursor requires",
+              all(b >= a for a, b in zip(authored, authored[1:])), str(authored))
+
+        # ---- THE SYNTHETIC SCHEDULE THE CASES BELOW USE -------------------
+        pkg = synth.Package(mon, sym)
+        pkg.only_trigger(row=SYN_ROW,
+                         definition=rd1(mon, sym["waveTrigDef"] + 0))
+        pkg.set_no_spawn_row(NO_SPAWN)          # only_trigger opened it; put it back
+        check("one disposable trigger is installed, well below the threshold",
+              rd1(mon, CD.TRIGN_ADDR) == SYN_TRIGGERS
+              and (rd1(mon, sym["waveTrigRowLo"])
+                   | (rd1(mon, sym["waveTrigRowHi"]) << 8)) == SYN_ROW,
+              f"{rd1(mon, CD.TRIGN_ADDR)} trigger(s) at row {SYN_ROW}, "
+              f"threshold still {rd1(mon, NOSPAWN_ADDR) | (rd1(mon, NOSPAWN_ADDR + 1) << 8)}")
+
         # ---- BOUNDARY ----------------------------------------------------
         arm(mon, sym, NO_SPAWN - 1)
         started, cursor = run(mon, sym)
@@ -100,18 +151,21 @@ def main():
         check("EXACTLY AT the threshold, no authored trigger starts",
               started == 0, f"wvStarted={started}")
         check("...and the cursor is left terminally exhausted",
-              cursor == WAVE_TRIGGERS, f"wvNextTrig={cursor}")
+              cursor == SYN_TRIGGERS, f"wvNextTrig={cursor}")
 
         arm(mon, sym, NO_SPAWN + 30)
         started, cursor = run(mon, sym)
         check("BEYOND the threshold, no authored trigger starts",
               started == 0, f"wvStarted={started}")
 
-        # the high byte must genuinely discriminate: 255 is below a 340 threshold
+        # THE HIGH BYTE MUST GENUINELY DISCRIMINATE. The probe is the largest
+        # world position whose high byte is zero, and it is below the threshold
+        # because the threshold is above 255 (checked above) -- so a compare that
+        # dropped the high byte would suppress here and must not.
         arm(mon, sym, 255)
         started, _ = run(mon, sym)
-        check("row 255 is below a 340 threshold: the high byte is not ignored",
-              started > 0, f"wvStarted={started}")
+        check(f"row 255 is below a {NO_SPAWN} threshold: the high byte is not "
+              f"ignored", started > 0, f"wvStarted={started}")
 
         # ---- EXHAUSTION IS TERMINAL --------------------------------------
         arm(mon, sym, NO_SPAWN)
@@ -120,7 +174,7 @@ def main():
         poke(mon, sym["worldProgressHi"], 0)
         started, cursor = run(mon, sym, 40)
         check("a suppressed schedule never reopens, even if the world is wound back",
-              started == 0 and cursor == WAVE_TRIGGERS,
+              started == 0 and cursor == SYN_TRIGGERS,
               f"wvStarted={started}, cursor={cursor}")
 
         # ---- TOKEN HOLD ---------------------------------------------------
@@ -137,7 +191,7 @@ def main():
         started, cursor = run(mon, sym, 30)
         check("...and once the world crossed the threshold while it was held, "
               "releasing the hold does NOT start it",
-              started == 0 and cursor == WAVE_TRIGGERS,
+              started == 0 and cursor == SYN_TRIGGERS,
               f"wvStarted={started}, cursor={cursor}")
 
         # the same sequence WITHOUT crossing the threshold must still fire, or
@@ -151,7 +205,7 @@ def main():
 
         # ---- ACTIVE ENCOUNTER CONTINUITY ----------------------------------
         # a wave that started before the threshold must go on sending members
-        arm(mon, sym, TRIG_ROWS[0])
+        arm(mon, sym, SYN_ROW)
         poke(mon, sym["wvSpawned"], 0)
         run(mon, sym, 6)
         active_before = [rd1(mon, sym["wvActive"] + i) for i in range(2)]

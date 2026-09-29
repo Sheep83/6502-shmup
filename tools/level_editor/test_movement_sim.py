@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import contract_v2 as C                                     # noqa: E402
+import fixtures_v6                                          # noqa: E402
 import migration_v6                                         # noqa: E402
 import movement_sim as ms                                   # noqa: E402
 import project_v6                                           # noqa: E402
@@ -312,15 +313,18 @@ check("...and each walks the whole program independently",
       all(p[-1].stage_kind == "EXIT" for p in sim.paths))
 
 # A nine-bit fan-out that crosses 256, which the authored content never does.
+# NO `colour=` ANY MORE: colour became a TRIGGER field, and WaveDefinition
+# stopped accepting it. This constructor raised a TypeError and took the rest of
+# the file with it.
 wide = project_v6.WaveDefinition(id="wide", count=4, interval=5, start_x=200,
-                                 start_y=30, x_step=40, y_step=0, colour=1,
+                                 start_y=30, x_step=40, y_step=0,
                                  heading=0, movement_program="sweep")
 check("the fan-out carries into the ninth bit of X",
       [ms.member_start(wide, m)[0] | (ms.member_start(wide, m)[1] << 8)
        for m in range(4)] == [200, 240, 280, 320])
 narrow = project_v6.WaveDefinition(id="narrow", count=3, interval=5,
                                    start_x=20, start_y=30, x_step=-30,
-                                   y_step=0, colour=1, heading=0,
+                                   y_step=0, heading=0,
                                    movement_program="sweep")
 check("...and borrows out of it going the other way",
       [ms.member_start(narrow, m)[0] for m in range(3)] == [20, 246, 216],
@@ -394,25 +398,25 @@ def refuses(label, fn, fragment):
 
 
 bad = project_v6.WaveDefinition(id="bad", count=2, interval=10, start_x=10,
-                                start_y=10, x_step=0, y_step=0, colour=1,
+                                start_y=10, x_step=0, y_step=0,
                                 heading=0, movement_program="nope")
 refuses("a wave naming a movement program that does not exist is refused",
         lambda: ms.simulate_wave(proj, bad), "does not exist")
 
 bad2 = project_v6.WaveDefinition(id="b2", count=0, interval=10, start_x=10,
-                                 start_y=10, x_step=0, y_step=0, colour=1,
+                                 start_y=10, x_step=0, y_step=0,
                                  heading=0, movement_program="sweep")
 refuses("a wave that sends no enemies is refused",
         lambda: ms.simulate_wave(proj, bad2), "sends no enemies")
 
 bad3 = project_v6.WaveDefinition(id="b3", count=2, interval=0, start_x=10,
-                                 start_y=10, x_step=0, y_step=0, colour=1,
+                                 start_y=10, x_step=0, y_step=0,
                                  heading=0, movement_program="sweep")
 refuses("an interval of zero is refused",
         lambda: ms.simulate_wave(proj, bad3), "interval of 0")
 
 bad4 = project_v6.WaveDefinition(id="b4", count=1, interval=5, start_x=10,
-                                 start_y=10, x_step=0, y_step=0, colour=1,
+                                 start_y=10, x_step=0, y_step=0,
                                  heading=99, movement_program="sweep")
 refuses("a launch heading outside 0..63 is refused",
         lambda: ms.simulate_wave(proj, bad4), "not a heading")
@@ -427,7 +431,7 @@ class _P:
 
 
 W = project_v6.WaveDefinition(id="w", count=1, interval=5, start_x=10,
-                              start_y=10, x_step=0, y_step=0, colour=1,
+                              start_y=10, x_step=0, y_step=0,
                               heading=0, movement_program="p")
 refuses("a program that does not end in EXIT is refused",
         lambda: ms.simulate_wave(_P([S("STRAIGHT", frames=5, vx=1, vy=0)]), W),
@@ -459,25 +463,50 @@ refuses("an empty program is refused",
 # =======================================================================
 # 12. trigger resolution, and the Dropper refusal
 # =======================================================================
-ring = [i for i, t in enumerate(proj.triggers) if t.species == "RING"]
-drop = [i for i, t in enumerate(proj.triggers) if t.species == "DROPPER"]
-# ONE OF EACH IS WHAT THIS SECTION NEEDS. It used to require exactly two of
-# each, which is a fact about how Level 1 happened to be authored rather than
-# anything the simulator depends on.
-check("the canonical level has both RING and DROPPER triggers",
-      len(ring) >= 1 and len(drop) >= 1,
-      f"{len(ring)} RING, {len(drop)} DROPPER")
-sim = ms.simulate_trigger(proj, ring[0])
-check("a RING trigger resolves through its wave to its movement program",
-      sim.wave_id == proj.triggers[ring[0]].wave_definition
-      and sim.program_id == waves[sim.wave_id].movement_program,
+# BUILT, NOT LOOKED FOR. This section used to hunt the canonical level for a
+# "RING" trigger and a "DROPPER" one. Both assumptions have since failed: the
+# ordinary enemy is an IDENTITY now and Level 1's is "RING_3", so the RING list
+# came back empty and `ring[0]` raised an IndexError. Whether a level contains a
+# Dropper at all is authoring; that an ordinary trigger resolves and a Dropper is
+# refused is the simulator's own contract, so the specimen is a fixture.
+fx = fixtures_v6.shared_wave()
+fx.triggers[-1] = fixtures_v6.trigger(144, "straight", species="DROPPER")
+ordinary, dropper = 0, len(fx.triggers) - 1
+check("the fixture has an ordinary trigger and a Dropper",
+      fx.triggers[ordinary].species != "DROPPER"
+      and fx.triggers[dropper].species == "DROPPER",
+      f"{fx.triggers[ordinary].species} and {fx.triggers[dropper].species}")
+sim = ms.simulate_trigger(fx, ordinary)
+fxwaves = {w.id: w for w in fx.wave_definitions}
+check("an ordinary trigger resolves through its wave to its movement program",
+      sim.wave_id == fx.triggers[ordinary].wave_definition
+      and sim.program_id == fxwaves[sim.wave_id].movement_program,
       f"{sim.wave_id} -> {sim.program_id}")
 refuses("a DROPPER trigger is REFUSED rather than drawn as an ordinary wave",
-        lambda: ms.simulate_trigger(proj, drop[0]), "not previewed")
-refuses("...and says why", lambda: ms.simulate_trigger(proj, drop[0]),
+        lambda: ms.simulate_trigger(fx, dropper), "not previewed")
+refuses("...and says why", lambda: ms.simulate_trigger(fx, dropper),
         "taken off its wave's authored path")
 refuses("no trigger selected is refused cleanly",
-        lambda: ms.simulate_trigger(proj, 99), "no trigger selected")
+        lambda: ms.simulate_trigger(fx, 99), "no trigger selected")
+
+# AND THE SAME ON THE REAL LEVEL, structurally: whatever is authored, every
+# trigger either resolves to a program or is refused for a reason the simulator
+# names. That is the invariant over real campaign data; which species sit where
+# is not.
+unresolved = []
+for i, t in enumerate(proj.triggers):
+    try:
+        got = ms.simulate_trigger(proj, i)
+        if got.program_id not in progs:
+            unresolved.append((i, t.species, got.program_id))
+    except ms.SimulationError as exc:
+        if "not previewed" not in str(exc):
+            unresolved.append((i, t.species, str(exc)[:40]))
+check("every trigger in the canonical level either resolves to a program or is "
+      "refused for a named reason",
+      not unresolved, str(unresolved) if unresolved
+      else f"{len(proj.triggers)} triggers, species "
+           f"{sorted({t.species for t in proj.triggers})}")
 
 
 # =======================================================================

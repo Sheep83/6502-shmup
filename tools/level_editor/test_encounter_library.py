@@ -33,7 +33,7 @@ from encounter_library import (EncounterLibrary, LibraryConflict,  # noqa: E402
                                LibraryError)
 from controller_v6 import EditorController                      # noqa: E402
 from project_v6 import ProjectV6, Stage, Palette                # noqa: E402
-from movement_sim import simulate_trigger                       # noqa: E402
+from movement_sim import SimulationError, simulate_trigger      # noqa: E402
 
 PASS, FAIL = [], []
 L1 = HERE / "levels" / "level1" / "level.v6.json"
@@ -319,38 +319,84 @@ with tempfile.TemporaryDirectory() as d:
 # ---------------------------------------------------------------------------
 # 6. production levels: read only, and unchanged
 # ---------------------------------------------------------------------------
+# NOT "LEVEL 1 STILL HAS NINE TRIGGERS AND A SQUARE ONE AT ROW 310".
+#
+# Six checks here counted Brian's triggers, named his species and restated each
+# level's noSpawnRow. Every one of them was a reading of the two levels on the
+# day the shared library landed, and all six would fail the next time either
+# level was authored -- which is what happened. The CONTRACT the shared library
+# introduced is a separation of ownership, and that is what is asserted now:
+#
+#   the VOCABULARY is shared    -- both levels see the same programs and waves
+#   the TRIGGERS are the level's -- and every one of them resolves in it
+#   the STAGE is the level's     -- each keeps its own, and the library has none
+#
+# The "editing one level does not touch the other" half is proved above, on the
+# synthetic A/B pair, where the arrangement can be exact.
 c1 = EditorController.load(L1, library_path=LIB)
 c2 = EditorController.load(L2, library_path=LIB)
-sq = [t for t in c1.project.triggers if t.species == "SQUARE"]
-check("Level 1 still has Brian's Square trigger", len(sq) == 1,
-      f"wp={sq[0].world_progress} def={sq[0].wave_definition}" if sq else "missing")
-check("Level 1 still has all nine triggers", len(c1.project.triggers) == 9,
-      str(len(c1.project.triggers)))
-check("Level 1 keeps its own noSpawnRow", c1.project.stage.no_spawn_row == 725,
-      str(c1.project.stage.no_spawn_row))
-check("Level 2 has NOT gained a Square trigger",
-      not any(t.species == "SQUARE" for t in c2.project.triggers),
-      ", ".join(sorted({t.species for t in c2.project.triggers})))
-check("Level 2 keeps its own seven triggers", len(c2.project.triggers) == 7)
-check("Level 2 keeps its own noSpawnRow", c2.project.stage.no_spawn_row == 352,
-      str(c2.project.stage.no_spawn_row))
-check("the two levels differ in triggers but share the vocabulary",
-      [t.world_progress for t in c1.project.triggers]
-      != [t.world_progress for t in c2.project.triggers]
-      and [p.id for p in c1.project.movement_programs]
-      == [p.id for p in c2.project.movement_programs])
+lib = EncounterLibrary.load(LIB)
+
+for name, c in (("Level 1", c1), ("Level 2", c2)):
+    wave_ids = {d.id for d in c.project.wave_definitions}
+    prog_ids = {p.id for p in c.project.movement_programs}
+    dangling = [t.wave_definition for t in c.project.triggers
+                if t.wave_definition not in wave_ids]
+    check(f"{name}: every trigger names a wave definition the library provides",
+          not dangling and bool(c.project.triggers),
+          f"{len(c.project.triggers)} trigger(s), {len(wave_ids)} wave(s)"
+          + (f"; DANGLING {dangling}" if dangling else ""))
+    orphan = [d.id for d in c.project.wave_definitions
+              if d.movement_program not in prog_ids]
+    check(f"{name}: every wave definition names a movement program that exists",
+          not orphan, str(orphan) if orphan else f"{len(prog_ids)} program(s)")
+    check(f"{name}: keeps its own stage, and the library carries none",
+          c.project.stage.no_spawn_row > 0
+          and not hasattr(lib, "stage"),
+          f"noSpawnRow {c.project.stage.no_spawn_row}")
+
+check("the two levels see the SAME shared vocabulary, program for program",
+      [p.id for p in c1.project.movement_programs]
+      == [p.id for p in c2.project.movement_programs]
+      == [p.id for p in lib.movement_programs],
+      f"{len(lib.movement_programs)} programs")
+check("...and wave definition for wave definition",
+      [d.id for d in c1.project.wave_definitions]
+      == [d.id for d in c2.project.wave_definitions]
+      == [d.id for d in lib.wave_definitions],
+      f"{len(lib.wave_definitions)} wave definitions")
+check("...while each level's TRIGGER LIST is its own document's",
+      "triggers" in json.loads(L1.read_text())
+      and "triggers" in json.loads(L2.read_text())
+      and "triggers" not in json.loads(LIB.read_text()),
+      "the library holds no triggers")
 check("both production levels still validate", c1.validate().ok and c2.validate().ok)
 
-# the preview gets the current level's triggers plus the shared vocabulary
-sim = simulate_trigger(c1.project, 0)
-check("the preview resolves a production trigger through the shared library",
-      sim.count > 0 and sim.frame_count > 0,
-      f"{sim.wave_id}/{sim.program_id}, {sim.count} members")
-sq_index = next(i for i, t in enumerate(c1.project.triggers)
-                if t.species == "SQUARE")
-sqsim = simulate_trigger(c1.project, sq_index)
-check("the preview simulates the Square trigger as an ordinary wave",
-      sqsim.count > 0, f"{sqsim.wave_id}, {sqsim.count} members")
+# THE PREVIEW RESOLVES EVERY TRIGGER OF EVERY LEVEL, or refuses it by name.
+# This used to be `simulate_trigger(c1.project, 0)`, which raised a
+# SimulationError the day trigger 0 became a Dropper -- a Dropper is refused on
+# purpose, so the test was reading the refusal as a crash. Refusals are now
+# counted rather than tripped over, and at least one trigger must genuinely
+# preview or the claim is vacuous.
+for name, c in (("Level 1", c1), ("Level 2", c2)):
+    drawn, refused, broke = 0, 0, []
+    for i in range(len(c.project.triggers)):
+        try:
+            sim = simulate_trigger(c.project, i)
+            if sim.count > 0 and sim.frame_count > 0:
+                drawn += 1
+            else:
+                broke.append((i, "empty simulation"))
+        except SimulationError as exc:
+            if "not previewed" in str(exc):
+                refused += 1
+            else:
+                broke.append((i, str(exc)[:60]))
+    check(f"{name}: every trigger either previews through the shared library or "
+          f"is refused for a named reason",
+          not broke and drawn >= 1,
+          f"{drawn} previewed, {refused} refused (Droppers)"
+          + (f"; BROKE {broke}" if broke else ""))
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

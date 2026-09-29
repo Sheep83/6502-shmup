@@ -279,15 +279,33 @@ try:
 except ControllerError as e:
     check("a duplicate wave id is refused", "already exists" in str(e))
 
-moved = c.rename_wave_definition(0, "sweep_v2")
+# A WAVE THAT IS ACTUALLY REFERENCED, FOUND RATHER THAN ASSUMED TO BE INDEX 0.
+# Both checks below used index 0 -- `sweep` -- and passed for as long as a
+# trigger happened to name it. The level was re-authored, no trigger names
+# `sweep` any more, so "renaming updates every trigger that names it" reported
+# zero references and "deleting a referenced wave is refused" found nothing to
+# refuse. Which wave the author points a trigger at is content; that a rename
+# follows its references and a delete refuses them is the controller's contract.
+_used = {t.wave_definition for t in c.project.triggers}
+_ref = next(i for i, d in enumerate(c.project.wave_definitions)
+            if d.id in _used)
+_ref_id = c.project.wave_definitions[_ref].id
+_users = sum(1 for t in c.project.triggers if t.wave_definition == _ref_id)
+check(f"a referenced wave definition was found to operate on",
+      _users >= 1, f"{_ref_id!r} at index {_ref}, {_users} trigger(s) name it")
+
+moved = c.rename_wave_definition(_ref, _ref_id + "_v2")
 check("renaming a wave updates every trigger that names it",
-      moved == 1 and c.project.triggers[0].wave_definition == "sweep_v2",
-      f"{moved} reference(s)")
+      moved == _users
+      and all(t.wave_definition == _ref_id + "_v2"
+              for t in c.project.triggers
+              if t.wave_definition.startswith(_ref_id)),
+      f"{moved} of {_users} reference(s) followed")
 check("...and leaves no dangling reference", "trigger.dangling_definition" not in codes(c))
-c.rename_wave_definition(0, "sweep")
+c.rename_wave_definition(_ref, _ref_id)
 
 try:
-    c.delete_wave_definition(0)
+    c.delete_wave_definition(_ref)
     check("deleting a referenced wave is refused", False, "allowed")
 except ControllerError as e:
     check("deleting a referenced wave is refused, naming the users",

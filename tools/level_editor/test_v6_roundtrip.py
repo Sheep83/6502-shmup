@@ -70,13 +70,30 @@ if lines[0] != "{" or not lines[1].startswith('  "formatVersion"'):
     raise AssertionError(f"unexpected opening: {lines[:2]}")
 ok("indentation is two spaces and formatVersion leads the file")
 
-order = [k for k in json.loads(text).keys()]
-expected_head = ["formatVersion", "name", "stage", "palette", "glyphs",
-                 "metatileDefs", "map", "turrets", "movementPrograms",
-                 "waveDefinitions", "triggers"]
-if order[:len(expected_head)] != expected_head:
-    raise AssertionError(f"key order drifted: {order}")
-ok("top-level key order is stable", " -> ".join(order[:5]) + " ...")
+# KEY ORDER: STABLE, NOT FROZEN.
+#
+# A literal list of eleven key names used to live here, and it drifted the moment
+# a key was added to the schema: `enemySlots` now sits after `palette` and the
+# check failed listing a perfectly correct document. What the format actually
+# promises is that a save is DETERMINISTIC and diffable -- formatVersion leads so
+# a reader can tell the version before parsing the rest, and the order does not
+# move between saves -- and that is what is asserted. The exact sequence comes
+# from the writer, which is the only thing entitled to decide it.
+order = list(json.loads(text).keys())
+if order[0] != "formatVersion":
+    raise AssertionError(f"formatVersion must lead the file, got {order[0]!r}")
+_again = list(json.loads(ProjectV6.from_json(text).to_json()).keys())
+if _again != order:
+    raise AssertionError(f"key order moved across a round trip: {order} -> {_again}")
+_declared = list(ProjectV6.from_json(text).to_dict().keys())
+if _declared != order:
+    raise AssertionError(
+        f"the serialised order is not the writer's own: {order} vs {_declared}")
+if len(set(order)) != len(order):
+    raise AssertionError(f"a key appears twice: {order}")
+ok("top-level key order is the writer's, stable across a round trip, and "
+   "formatVersion leads",
+   " -> ".join(order[:5]) + f" ... ({len(order)} keys)")
 
 for banned in (str(HERE), "/Users/", "/tmp/", "20", "T00:"):
     if banned == "20":
@@ -104,14 +121,22 @@ ok("Level 2 migrated", f"{p2.stage.metatile_rows} rows, "
 
 print("\n=== symbolic enums survive ===")
 p = load_any(LEVEL1).project
-p.triggers = [Trigger(10, "w", "RING", [0, 2], "LEFT"),
-              Trigger(20, "w", "DROPPER", [1], "RIGHT")]
+# THE IDENTITIES THIS LEVEL ACTUALLY HOLDS, not the legacy species names. The
+# triggers here were built with "RING", which load normalises to the level's slot-0
+# identity ("RING_3") -- correct migration behaviour, and it made the fixed-point
+# check below fail on the normalisation rather than on any defect. The legacy
+# spelling gets its own case underneath, where the normalisation is the subject.
+_IDS = C.level_identities(p)
+p.triggers = [Trigger(10, "w", _IDS[0], [0, 2], "LEFT"),
+              Trigger(20, "w", _IDS[1], [1], "RIGHT")]
 doc = json.loads(p.to_json())
-if doc["triggers"][0]["species"] != "RING" or doc["triggers"][1]["species"] != "DROPPER":
+if (doc["triggers"][0]["species"] != _IDS[0]
+        or doc["triggers"][1]["species"] != _IDS[1]):
     raise AssertionError("species were not written as names")
 if doc["triggers"][1]["dropperSide"] != "RIGHT":
     raise AssertionError("dropperSide was not written as a name")
-ok("species and side are stored as symbolic names, not numbers")
+ok("species and side are stored as symbolic names, not numbers",
+   f"{_IDS[0]} / {_IDS[1]}")
 if doc["triggers"][0]["fireMask"] != [0, 2]:
     raise AssertionError("fire mask is not a member-index list")
 ok("the fire mask is a list of member indices")
@@ -131,6 +156,21 @@ ok("an integer fire mask loads as member indices and normalises")
 if loaded.to_json() != p.to_json():
     raise AssertionError("a normalised bitmask did not converge on the same JSON")
 ok("...and converges on identical JSON")
+
+# A LEGACY SPECIES NAME MIGRATES, ONCE, AND THEN HOLDS STILL. "RING" predates
+# enemy identities and is not a species any more; load must turn it into the
+# identity this level's slot 0 holds, and a second save must then be a fixed
+# point. Anything else is either a lost migration or an endlessly churning file.
+_legacy = json.loads(p.to_json())
+_legacy["triggers"][0]["species"] = C.LEGACY_SPECIES_ORDER[0]
+_migrated = ProjectV6.from_dict(_legacy)
+if _migrated.triggers[0].species != _IDS[0]:
+    raise AssertionError(
+        f"a legacy species name did not migrate: "
+        f"{_migrated.triggers[0].species!r}, expected {_IDS[0]!r}")
+ok(f"a legacy {C.LEGACY_SPECIES_ORDER[0]!r} migrates to this level's slot-0 "
+   f"identity", _IDS[0])
+roundtrip(_migrated, "...and the migrated project is then a fixed point")
 
 print("\n=== the pre-v5 migration path still works ===")
 v5 = json.loads(LEVEL1.read_text(encoding="utf-8"))

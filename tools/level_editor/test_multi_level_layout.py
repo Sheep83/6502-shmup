@@ -24,6 +24,7 @@ artwork.
     python3 tools/level_editor/test_multi_level_layout.py
 """
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -50,6 +51,17 @@ SRC_L2 = REPO / "src" / "level2"
 def check(label, ok, extra=""):
     (PASS if ok else FAIL).append(label)
     print(f"  {'ok  ' if ok else 'FAIL'} {label}{' -- ' + extra if extra else ''}")
+
+def _campaign_sequence():
+    """The levels the run actually plays, from src/campaign.asm.
+
+    THE SEQUENCE IS ENGINE DATA and the directory listing is authoring; keeping
+    them separate is what lets a fourth level be started without failing a test
+    about the campaign.
+    """
+    src = (REPO / "src" / "campaign.asm").read_text(encoding="utf-8")
+    body = src.split("cmpLevelNames:", 1)[1].split("cmpLevelNamesEnd", 1)[0]
+    return re.findall(r'\.text\s+"([^"]*)"', body)
 
 
 def _synthetic(name, rows=8, bg=2):
@@ -152,17 +164,45 @@ with tempfile.TemporaryDirectory() as d:
     text = (fresh / export_v6.ENEMIES_NAME).read_text(encoding="utf-8")
     check("the generated slot symbols are level-NEUTRAL, not L1_*",
           "LVL_SLOT_RING" in text and "L1_SLOT" not in text)
-    for sp, slot in C.DEFAULT_ENEMY_SLOTS.items():
-        check(f"...and declare {sp} at the canonical slot {slot}",
-              f"LVL_SLOT_{sp}" in text and f"= {slot}" in text)
+    # ONE SYMBOL PER ENGINE SPECIES SLOT, AND ITS VALUE IS THE BLOCK THE ARTWORK
+    # WAS LOADED AT. `C.DEFAULT_ENEMY_SLOTS` no longer exists and a "canonical
+    # slot" no longer does either: since a slot holds any roster identity, its
+    # window offset is the sum of the frame counts before it. The structural
+    # claims are that every species is declared exactly once, that the offsets
+    # are the running total of the chosen artwork's frame counts, and that the
+    # whole window fits the engine's budget.
+    ids = C.level_identities(EditorController(_synthetic("brand_new")).project)
+    running, want_slots = 0, {}
+    for sp, ident in zip(C.SPECIES_ORDER, ids):
+        want_slots[sp] = running
+        running += C.ROSTER_FRAMES[ident]
+    decls = dict(re.findall(r"\.const\s+LVL_SLOT_(\w+)\s*=\s*(\d+)", text))
+    check("every engine species slot is declared exactly once",
+          set(decls) == set(C.SPECIES_ORDER),
+          f"{sorted(decls)} vs {sorted(C.SPECIES_ORDER)}")
+    check("...at the window offset its chosen artwork's frame counts imply",
+          {k: int(v) for k, v in decls.items()} == want_slots,
+          f"{decls} vs {want_slots} for identities {ids}")
+    check("...and the whole window fits the engine's sprite budget",
+          running <= C.LEVEL_SPRITE_BLOCKS,
+          f"{running} of {C.LEVEL_SPRITE_BLOCKS} blocks")
 
-    # A hand-authored file is kept, never clobbered.
-    (fresh / export_v6.ENEMIES_NAME).write_text(
-        ".const LVL_SLOT_RING = 8\n.const LVL_SLOT_DROPPER = 12\n", encoding="utf-8")
-    keep = (fresh / export_v6.ENEMIES_NAME).read_bytes()
+    # stage_enemies.asm AND stage_sprites.asm ARE REGENERATED EVERY EXPORT.
+    # This check used to assert the opposite -- "a hand-authored one survives" --
+    # which was the behaviour before a slot could hold any roster identity.
+    # export_v6.export_level says so in as many words: carrying an old one
+    # forward would ship the previous level's animation table against this
+    # level's sprite window. So the claim is now that a stale copy is REPLACED,
+    # which is what protects the level from a silently wrong animation table.
+    stale = ".const LVL_SLOT_RING = 99   // stale, from another level\n"
+    for name in (export_v6.ENEMIES_NAME, export_v6.SPRITES_NAME):
+        (fresh / name).write_text(stale, encoding="utf-8")
     EditorController(_synthetic("brand_new")).export(fresh, carry_enemies_from=fresh)
-    check("a hand-authored stage_enemies.asm survives a re-export",
-          (fresh / export_v6.ENEMIES_NAME).read_bytes() == keep)
+    for name in (export_v6.ENEMIES_NAME, export_v6.SPRITES_NAME):
+        got = (fresh / name).read_text(encoding="utf-8")
+        check(f"a stale {name} is REGENERATED, not carried forward",
+              got != stale and "99" not in got,
+              f"{len(got)} bytes, regenerated")
 
 # Export must FAIL LOUDLY rather than leave an incomplete package behind.
 with tempfile.TemporaryDirectory() as d:
@@ -225,9 +265,20 @@ check("no generated ASM lives under the editor's level directories",
 stray = sorted(p.relative_to(REPO).as_posix()
                for p in LEVELS.rglob("*.json") if p.name != "level.v6.json")
 check("levels/ holds ONLY level.v6.json documents", not stray, ", ".join(stray))
-check("exactly two levels are present",
-      sorted(p.name for p in LEVELS.iterdir() if p.is_dir()) == ["level1", "level2"],
-      ", ".join(sorted(p.name for p in LEVELS.iterdir() if p.is_dir())))
+# HOW MANY LEVELS EXIST IS AUTHORING. This said `== ["level1", "level2"]` and
+# duly failed the day a third level was started. What must hold is that every
+# directory under levels/ really is a level document, and that every level the
+# CAMPAIGN sequence names is one of them -- a dangling campaign entry is a run
+# that reaches for a package that is not on the disk.
+_dirs = sorted(p.name for p in LEVELS.iterdir() if p.is_dir())
+check("every directory under levels/ holds a level document",
+      _dirs and all((LEVELS / n / "level.v6.json").is_file() for n in _dirs),
+      ", ".join(_dirs))
+_seq = [n.lower() for n in _campaign_sequence()]
+check("every level the campaign sequence names exists as a document",
+      set(_seq) <= set(_dirs), f"campaign {_seq}, present {_dirs}")
+check("...and the campaign's generated packages are all under src/",
+      all((REPO / "src" / n).is_dir() for n in _seq), ", ".join(_seq))
 check("no level JSON has leaked under src/", not list((REPO / "src").rglob("*.json")))
 check("the frozen v5 fixtures are out of levels/ and under fixtures/",
       (HERE / "fixtures" / "legacy_v5" / "level1" / "level.json").is_file()
@@ -240,7 +291,8 @@ check("the frozen v5 fixtures are out of levels/ and under fixtures/",
 # every time the level is authored further. The hash proof against the
 # pre-change snapshot lives in the task report.
 d1 = c1.project.to_dict()
-check("level1 still declares its authored shape",
+check("level1 still declares a self-consistent shape -- whatever is authored, "
+      "the map, metatile and glyph counts agree with their headers",
       d1["stage"]["metatileCols"] == C.METATILES_PER_ROW
       and len(d1["map"]) == d1["stage"]["metatileRows"]
       and len(d1["metatileDefs"]) >= 1

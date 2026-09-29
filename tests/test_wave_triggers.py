@@ -11,10 +11,21 @@ It replaces a delta-coded schedule whose cursor WRAPPED, so Level 1's four
 authored moments recurred every 126 coarse rows -- thirteen times over the
 production stage and fifty-two times over the 420-row proof.
 
+NOTHING HERE FREEZES THE AUTHORED SCHEDULE. It used to: PROD_ROWS, PROD_DEF,
+PROD_SPECIES, PROD_FIRE, PROD_SIDE and `WAVE_TRIGGERS = 4` were literals, and
+when Level 1 was re-authored to five triggers this file reported twelve failures
+about an engine that was behaving perfectly. The authored table is now READ from
+the loaded package, and what is asserted of it is structure -- every reference
+resolves, every field is in range, the rows only go forwards -- not its values.
+The behavioural cases run on DISPOSABLE schedules poked into the row columns,
+which they always did.
+
 What this proves
 ----------------
-* the four authored rows are the ones the delta schedule actually produced for
-  its first cycle -- 48, 52, 90, 126 -- so Level 1 is spatially unchanged;
+* whatever is authored, every live trigger resolves: a definition that exists, a
+  legal species row, a legal side, a fire mask no wider than its wave, a legal
+  colour byte, a legal firing mode and a legal speed;
+* the rows are non-decreasing, as a forward-only cursor requires;
 * each fires EXACTLY ONCE, at EXACTLY its row, in cursor order;
 * the cursor stops on WAVE_TRIGGERS and stays there, and the world may then run
   for hundreds of rows with the production schedule loaded and nothing fires;
@@ -46,22 +57,26 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
                      free_run, pc_of, check, report)
+import campaign_data as CD                                       # noqa: E402
 
 sym = symbols(SYM)
 PORT = 6693
 
-WAVE_TRIGGERS = 4
-LEVELPKG_NOSPAWN = 0xf530     # the stage header in the loaded package
+LEVELPKG_NOSPAWN = CD.NOSPAWN_ADDR    # the stage header in the loaded package
 GS_PLAYING = 1
 LP_LEVEL = 0
 
-# The authored production schedule, restated here so a silent edit to
-# src/waves.asm is a failure in this file rather than a surprise in play.
-PROD_ROWS    = [48, 52, 90, 126]
-PROD_DEF     = [0, 1, 2, 3]
-PROD_SPECIES = [0, 8, 0, 8]          # SPECIES_RING / SPECIES_DROPPER
-PROD_FIRE    = [0b0101, 0b0010, 0b0101, 0b0000]
-PROD_SIDE    = [0, 0, 0, 1]
+# THE AUTHORED SCHEDULE IS READ AT RUNTIME, from the package the engine loaded.
+# WAVE_TRIGGERS and the five PROD_* lists used to be literals here; they are
+# filled in by read_authored() below so that adding a trigger, changing a
+# species or moving a row is an authoring change and not a test failure.
+WAVE_TRIGGERS = None
+PROD_ROWS = PROD_DEF = PROD_SPECIES = PROD_FIRE = PROD_SIDE = None
+
+# The generated level, for the export-consistency check only: the package in RAM
+# must carry what the level the engine was BUILT from declares. That is a real
+# contract between exporter and engine, and it holds for any content.
+L1 = CD.level("level1")
 
 OLD_PERIOD = 126                     # the delta schedule's repeat, now retired
 FAR = 0xF000                         # a row the stage can never reach
@@ -281,6 +296,27 @@ def approach(mon, target, margin=40):
         mon.cmd("r")                     # resynchronise and try again
 
 
+def read_authored(mon):
+    """The authored trigger table, as the LOADED PACKAGE holds it.
+
+    Fills the module-level PROD_* so the rest of the file can talk about "the
+    authored rows" without any of them being written down here.
+    """
+    global WAVE_TRIGGERS, PROD_ROWS, PROD_DEF, PROD_SPECIES, PROD_FIRE, PROD_SIDE
+    WAVE_TRIGGERS = rd1(mon, CD.TRIGN_ADDR)
+    n = max(WAVE_TRIGGERS, 1)
+    lo = rd(mon, sym["waveTrigRowLo"], n)
+    hi = rd(mon, sym["waveTrigRowHi"], n)
+    PROD_ROWS = [lo[i] | (hi[i] << 8) for i in range(WAVE_TRIGGERS)]
+    PROD_DEF = list(rd(mon, sym["waveTrigDef"], n))[:WAVE_TRIGGERS]
+    PROD_SPECIES = list(rd(mon, sym["waveTrigSpecies"], n))[:WAVE_TRIGGERS]
+    PROD_FIRE = list(rd(mon, sym["waveTrigFire"], n))[:WAVE_TRIGGERS]
+    PROD_SIDE = list(rd(mon, sym["waveTrigSide"], n))[:WAVE_TRIGGERS]
+    return {"colour": list(rd(mon, sym["waveTrigColour"], n))[:WAVE_TRIGGERS],
+            "fireMode": list(rd(mon, sym["waveTrigFireMode"], n))[:WAVE_TRIGGERS],
+            "speed": list(rd(mon, sym["waveTrigSpeed"], n))[:WAVE_TRIGGERS]}
+
+
 def open_the_approach(mon):
     """Push STAGE_NO_SPAWN_ROW out of the way for a synthetic schedule.
 
@@ -299,10 +335,42 @@ def open_the_approach(mon):
     poke_checked(mon, LEVELPKG_NOSPAWN + 1, 0xff)
 
 
+def boundaries_above(here, count=4, margin=8):
+    """`count` rows straddling 8-bit boundaries, all comfortably above `here`.
+
+    Returns e.g. [511, 512, 767, 768] -- pairs of (256k - 1, 256k), which is what
+    makes the sixteen-bit compare the thing under test: the low byte wraps between
+    the two members of every pair and the high byte does not.
+
+    THE MARGIN IS SMALL ON PURPOSE. approach() returns immediately when the
+    target is already close and the collector then simply waits at the
+    breakpoint, so the only hard requirement is that the first boundary is
+    strictly AHEAD of the world -- and keeping the margin tight is what lets the
+    255/256 pair still be chosen when the authored schedule ends just below it,
+    which is the case on the committed level (it ends at row 240).
+    """
+    k = (here + margin) // 256 + 1
+    out = []
+    while len(out) < count:
+        out += [256 * k - 1, 256 * k]
+        k += 1
+    return out[:count]
+
+
 def arm_schedule(mon, rows):
-    """Poke a DISPOSABLE schedule into the row columns and rewind the cursor."""
+    """Poke a DISPOSABLE schedule into the row columns and rewind the cursor.
+
+    THE LIVE COUNT IS SET TO len(rows) AS WELL. It was not, and that only worked
+    while the level happened to author exactly as many triggers as a boundary
+    pair needs: the level now authors five, so a four-row schedule left a fifth
+    authored trigger live behind it, the terminal cursor was 4 rather than
+    WAVE_TRIGGERS, and two checks failed on an engine that had consumed exactly
+    what it was given. The count is package data like the rows; Part 6 puts both
+    back and re-checks them.
+    """
     for i, r in enumerate(rows):
         poke16(mon, sym["waveTrigRowLo"] + i, sym["waveTrigRowHi"] + i, r)
+    poke_checked(mon, CD.TRIGN_ADDR, len(rows))
     open_the_approach(mon)
     poke_checked(mon, sym["wvNextTrig"], 0)
     poke_checked(mon, sym["wvStarted"], 0)
@@ -322,18 +390,66 @@ def main():
         # ==================================================================
         # PART 1 -- the authored table, and the state the migration removed
         # ==================================================================
-        lo = rd(mon, sym["waveTrigRowLo"], WAVE_TRIGGERS)
-        hi = rd(mon, sym["waveTrigRowHi"], WAVE_TRIGGERS)
-        rows = [lo[i] | (hi[i] << 8) for i in range(WAVE_TRIGGERS)]
-        check("the authored rows are the ones the delta schedule produced for "
-              "its first cycle", rows == PROD_ROWS, f"{rows}")
-        check("...in non-decreasing order, as a forward-only cursor requires",
+        extra = read_authored(mon)
+        rows = PROD_ROWS
+        print(f"  info the authored schedule: {WAVE_TRIGGERS} trigger(s) at "
+              f"rows {rows}, definitions {PROD_DEF}, species {PROD_SPECIES}")
+        check("the level authors at least one trigger and no more than the "
+              "package reserves slots for",
+              0 < WAVE_TRIGGERS <= CD.TRIG_SLOTS,
+              f"{WAVE_TRIGGERS} of {CD.TRIG_SLOTS} slots")
+        check("the authored rows are in non-decreasing order, as a forward-only "
+              "cursor requires",
               all(rows[i] >= rows[i - 1] for i in range(1, len(rows))), str(rows))
-        for name, want in (("Def", PROD_DEF), ("Species", PROD_SPECIES),
-                           ("Fire", PROD_FIRE), ("Side", PROD_SIDE)):
-            got = rd(mon, sym[f"waveTrig{name}"], WAVE_TRIGGERS)
-            check(f"waveTrig{name} is unchanged by the migration",
-                  got == want, f"{got} wanted {want}")
+
+        # ---- EVERY REFERENCE RESOLVES, EVERY FIELD IS IN RANGE -------------
+        # This replaces four "waveTrigX is unchanged by the migration" checks
+        # that compared the columns against literal copies of Level 1's August
+        # content. What matters is not that a species is 0 or 8 but that it names
+        # a slot the engine has; not that a mask is %0101 but that it does not
+        # arm a member the wave never sends.
+        wd = rd(mon, sym["waveDefTable"], L1.n_defs * CD.WAVEDEF_SIZE)
+        counts = [wd[d * CD.WAVEDEF_SIZE + CD.WD_COUNT] for d in range(L1.n_defs)]
+        slot_rows = {i * CD.C.ENEMY_ANIM_STEPS for i in range(CD.C.ENEMY_SLOTS)}
+        bad = []
+        for i in range(WAVE_TRIGGERS):
+            d = PROD_DEF[i]
+            if d >= L1.n_defs:
+                bad.append((i, "definition", d))
+                continue
+            if PROD_SPECIES[i] not in slot_rows:
+                bad.append((i, "species row", PROD_SPECIES[i]))
+            if PROD_SIDE[i] > 1:
+                bad.append((i, "dropper side", PROD_SIDE[i]))
+            if PROD_FIRE[i] >> counts[d]:
+                bad.append((i, f"fire mask arms past member {counts[d] - 1}",
+                            bin(PROD_FIRE[i])))
+            if extra["colour"][i] > CD.C.TRIG_COL_MASK + CD.C.TRIG_COL_RANDOM:
+                bad.append((i, "colour byte", hex(extra["colour"][i])))
+            if extra["fireMode"][i] > CD.TRIG_FIRE_MAX:
+                bad.append((i, "firing mode", extra["fireMode"][i]))
+            if not (CD.C.TRIG_SPEED_MIN <= extra["speed"][i]
+                    <= CD.C.TRIG_SPEED_MAX):
+                bad.append((i, "speed", extra["speed"][i]))
+        check("EVERY live trigger resolves: a definition that exists, a legal "
+              "species slot, side, fire mask, colour, firing mode and speed",
+              not bad, str(bad) if bad else
+              f"{WAVE_TRIGGERS} triggers x 7 fields checked against "
+              f"{L1.n_defs} definitions")
+
+        # ---- THE EXPORTER AND THE ENGINE AGREE ----------------------------
+        # A contract between two programs, and true for any content: the package
+        # in RAM carries what the generated level the engine was built from
+        # declares. If the exporter dropped or reordered a column this fails.
+        check("the package's trigger columns are what the generated level "
+              "declares -- exporter and engine agree",
+              (WAVE_TRIGGERS, PROD_ROWS, PROD_DEF, PROD_SPECIES, PROD_FIRE,
+               PROD_SIDE, extra["colour"], extra["fireMode"], extra["speed"])
+              == (L1.n_triggers, L1.trig_row, L1.trig_def, L1.trig_species,
+                  L1.trig_fire, L1.trig_side, L1.trig_colour, L1.trig_fire_mode,
+                  L1.trig_speed),
+              f"{WAVE_TRIGGERS} triggers, all nine columns compared")
+
         check("the run begins before the first authored row",
               wp(mon) < PROD_ROWS[0], f"worldProgress {wp(mon)}")
         check("the cursor starts on trigger 0 with nothing to seed",
@@ -347,6 +463,23 @@ def main():
         for n in CATASTROPHIC:
             poke(mon, sym[n], 0)
 
+        # WHERE AN OVERRUN HAPPENS, NOT JUST THAT ONE DID. gameOverrun counts
+        # displayed frames the main thread did not prepare one for, and it MUST
+        # read zero. This file drives the world two thousand coarse rows under
+        # warp, halting the machine on a breakpoint and resuming it hundreds of
+        # times, so an assertion at the end alone cannot say whether a non-zero
+        # count came from ordinary gameplay or from the probing. Sampling it at
+        # each phase boundary makes the answer readable in the output.
+        overrun_marks = []
+
+        def mark(where):
+            overrun_marks.append((where, rd1(mon, sym["gameOverrun"]),
+                                  wp(mon)))
+            print(f"  info gameOverrun = {overrun_marks[-1][1]} after {where} "
+                  f"(worldProgress {overrun_marks[-1][2]})")
+
+        mark("the authored-table reads, before the world is driven")
+
         # ==================================================================
         # PART 2 -- the first cycle, preserved exactly
         # ==================================================================
@@ -354,17 +487,18 @@ def main():
         total_firings += len(fired)
         got_rows = [r for _, r in fired]
         got_cursors = [c for c, _ in fired]
-        check("exactly four triggers were consumed",
+        check(f"exactly the {WAVE_TRIGGERS} authored triggers were consumed",
               len(fired) == WAVE_TRIGGERS,
               f"{len(fired)} firings at rows {got_rows}")
         check("...each at EXACTLY its authored row",
               got_rows == PROD_ROWS, f"{got_rows} wanted {PROD_ROWS}")
-        check("...in cursor order 0,1,2,3, each consumed once",
+        check("...in cursor order, each consumed once",
               got_cursors == list(range(WAVE_TRIGGERS)), str(got_cursors))
         check("the cursor is exhausted on WAVE_TRIGGERS",
               rd1(mon, sym["wvNextTrig"]) == WAVE_TRIGGERS,
               f"wvNextTrig = {rd1(mon, sym['wvNextTrig'])}")
 
+        mark("part 2 -- the authored schedule, collected at a breakpoint")
         check("nothing was dropped for want of an instance",
               rd1(mon, sym["wvDropped"]) == 0,
               f"wvDropped = {rd1(mon, sym['wvDropped'])}")
@@ -374,15 +508,45 @@ def main():
         # ==================================================================
         # PART 3 -- the compare is genuinely sixteen bit
         # ==================================================================
-        # THIS RUNS BEFORE ANY LONG ADVANCE, and the ordering is forced: row 255
-        # is only 129 rows past the last authored trigger, so it stops being
-        # reachable the moment the world is allowed to run on. The world only
-        # moves forward, and there is no safe way to rewind it -- poking
-        # worldProgress would desynchronise the scroller's own invariant.
-        # Each pair straddles an 8-bit boundary: a compare that dropped the high
-        # byte would fire 256 rows early, and one that tested only the high byte
-        # could not tell 255 from 256 at all.
-        for pair in ([255, 256, 511, 512], [1023, 1024, 1535, 1536]):
+        # THE BOUNDARIES ARE CHOSEN FROM WHERE THE WORLD IS, not written down.
+        #
+        # Each pair straddles an 8-bit boundary, because that is the whole point:
+        # a compare that dropped the high byte would fire 256 rows early, and one
+        # that tested only the high byte could not tell 255 from 256 at all. But
+        # the pairs were the literals [255, 256, 511, 512] and
+        # [1023, 1024, 1535, 1536], and 255 is only reachable while the authored
+        # schedule ends below it -- the world only moves forward and there is no
+        # safe way to rewind it, since poking worldProgress would desynchronise
+        # the scroller's own invariant.
+        #
+        # Measured on a tree whose Level 1 was legally re-authored to end at row
+        # 270: four checks failed with "the approach stopped short of row 255 --
+        # approach ended at 270". The engine was right; the constant was not.
+        #
+        # boundaries_above() therefore picks the next 8-bit boundaries ABOVE the
+        # current position, so the case is exercised wherever the author has left
+        # the world, and it is still exactly the case it claims to be.
+        here_now = wp(mon)
+        groups = [boundaries_above(here_now, 4),
+                  boundaries_above(here_now + 900, 4)]
+        print(f"  info 8-bit boundary pairs chosen from worldProgress "
+              f"{here_now}: {groups[0]} then {groups[1]}")
+        # THE PROPERTY, NOT THE NUMBERS. Whichever rows were chosen, they must be
+        # ahead of the world, must come in (256k-1, 256k) pairs so the LOW byte
+        # wraps inside each pair, and must span more than one high byte -- which is
+        # exactly what a sixteen-bit compare has to get right.
+        every = groups[0] + groups[1]
+        check("the chosen rows are all ahead of the world and straddle 8-bit "
+              "boundaries: the low byte wraps inside every pair",
+              all(r > here_now for r in every)
+              and all((every[i] + 1) == every[i + 1]
+                      and every[i] % 256 == 255
+                      for i in range(0, len(every), 2)),
+              str(every))
+        check("...and they span more than one high byte",
+              len({r >> 8 for r in every}) > 1,
+              f"high bytes {sorted({r >> 8 for r in every})}")
+        for pair in groups:
             here = wp(mon)
             check(f"the disposable schedule {pair} is armed ahead of the world",
                   here < pair[0], f"worldProgress {here} < {pair[0]}")
@@ -409,9 +573,10 @@ def main():
                   f"{len(fired)} firings, cursors {cur}")
             check("...each at EXACTLY its row, across the 8-bit boundary",
                   got == pair, f"{got} wanted {pair}")
-            check("...and the cursor exhausted again",
-                  rd1(mon, sym["wvNextTrig"]) == WAVE_TRIGGERS,
-                  f"wvNextTrig = {rd1(mon, sym['wvNextTrig'])}")
+            check("...and the cursor exhausted again, on the disposable "
+                  "schedule's own length",
+                  rd1(mon, sym["wvNextTrig"]) == len(pair),
+                  f"wvNextTrig = {rd1(mon, sym['wvNextTrig'])} of {len(pair)}")
 
         # ---- a row the stage never reaches simply never fires --------------
         here = wp(mon)
@@ -423,6 +588,8 @@ def main():
               f"wvStarted = {rd1(mon, sym['wvStarted'])}, cursor = "
               f"{rd1(mon, sym['wvNextTrig'])} at worldProgress {wp(mon)} "
               f"vs row ${FAR:04x}")
+
+        mark("parts 3 and 4 -- the eight boundary rows, with long approaches")
 
         # ==================================================================
         # PART 5 -- a trigger held by a token encounter is not lost
@@ -464,6 +631,8 @@ def main():
               f"wvStarted = {rd1(mon, sym['wvStarted'])}, "
               f"cursor = {rd1(mon, sym['wvNextTrig'])}")
 
+        mark("part 5 -- the token hold, stepped frame by frame")
+
         # ==================================================================
         # PART 6 -- NO WRAP: the production schedule, exhausted, runs on
         # ==================================================================
@@ -474,12 +643,16 @@ def main():
         # table, the cursor stays where Part 2 left it, and the world runs on.
         for i, r in enumerate(PROD_ROWS):
             poke16(mon, sym["waveTrigRowLo"] + i, sym["waveTrigRowHi"] + i, r)
+        poke_checked(mon, CD.TRIGN_ADDR, WAVE_TRIGGERS)       # ...and the count
         poke_checked(mon, sym["wvNextTrig"], WAVE_TRIGGERS)   # as Part 2 left it
         poke_checked(mon, sym["wvStarted"], 0)
         lo = rd(mon, sym["waveTrigRowLo"], WAVE_TRIGGERS)
         hi = rd(mon, sym["waveTrigRowHi"], WAVE_TRIGGERS)
-        check("the production rows are restored after the disposable schedules",
-              [lo[i] | (hi[i] << 8) for i in range(WAVE_TRIGGERS)] == PROD_ROWS)
+        check("the production rows and the live count are restored after the "
+              "disposable schedules",
+              [lo[i] | (hi[i] << 8) for i in range(WAVE_TRIGGERS)] == PROD_ROWS
+              and rd1(mon, CD.TRIGN_ADDR) == WAVE_TRIGGERS,
+              f"{WAVE_TRIGGERS} triggers at {PROD_ROWS}")
 
         here = wp(mon)
         end = approach(mon, here + 3 * OLD_PERIOD + 20, margin=0)
@@ -491,13 +664,59 @@ def main():
 
         # EVERY FIRING IN THE WHOLE RUN IS ACCOUNTED FOR: four production
         # triggers, eight boundary triggers, one released from the hold.
+        # THE BUDGET IS DERIVED: the authored schedule once, the eight boundary
+        # rows, and the one trigger released from the token hold. It was
+        # `4 + 8 + 1` and the 4 was Level 1's trigger count.
+        want_firings = WAVE_TRIGGERS + 8 + 1
         check("every trigger consumed over the whole run was one an armed "
               "schedule authorised -- no wraparound anywhere",
-              total_firings == 4 + 8 + 1,
-              f"{total_firings} firings over {end} coarse rows "
-              f"({end // OLD_PERIOD} old periods)")
+              total_firings == want_firings,
+              f"{total_firings} firings (wanted {want_firings} = "
+              f"{WAVE_TRIGGERS} authored + 8 boundary + 1 released) over {end} "
+              f"coarse rows ({end // OLD_PERIOD} old periods)")
 
+        mark("part 6 -- three more old periods of free running")
+        print("  info gameOverrun by phase: "
+              + "; ".join(f"{v} after {w}" for w, v, _r in overrun_marks))
+
+        # ---- gameOverrun IS ASSERTED WHERE THE INSTRUMENT CAN MEASURE IT ----
+        #
+        # It counts displayed frames the main thread did not prepare one for, and
+        # in ordinary running it must be zero. But approach() deliberately
+        # resumes the machine with a 0.05 s deadline, sleeps while it runs and
+        # then HALTS IT AGAIN with a read, hundreds of times over a thousand
+        # coarse rows -- and a halt across a frame boundary is indistinguishable,
+        # to this counter, from a frame the game failed to prepare.
+        #
+        # The staged marks above show exactly that. It is 0 through the whole
+        # authored schedule and 240 coarse rows of real gameplay, every increment
+        # lands inside parts 3 and 4, and the total varies run to run with wall
+        # clock (3 on one run, 4 on the next) -- which a deterministic engine
+        # miss would not. tests/test_flight_paths.py watches 1,300 frames of the
+        # same engine without the bursts and reads 0.
+        #
+        # So it is ASSERTED over the phases that run normally and REPORTED over
+        # the probing phases, in the same way this file already treats
+        # publishSkip and schedBuildDefer. Silently accepting any value would
+        # lose a real regression; asserting across the bursts fails on the
+        # measurement rather than on the engine.
+        _before_bursts = overrun_marks[1][1]        # after part 2
+        _after_bursts = overrun_marks[2][1]         # after parts 3 and 4
+        _after_hold = overrun_marks[3][1]           # after part 5
+        _final = overrun_marks[4][1]
+        check("gameOverrun is zero through the authored schedule and 240 coarse "
+              "rows of ordinary gameplay",
+              _before_bursts == 0, f"{_before_bursts} after part 2")
+        check("...and the monitor-driven parts 5 and 6 add none of their own",
+              _final == _after_bursts and _after_hold == _after_bursts,
+              f"{_after_bursts} -> {_after_hold} -> {_final}")
+        print(f"  info gameOverrun rose by "
+              f"{_after_bursts - _before_bursts} across parts 3 and 4's "
+              f"approach bursts (measured, not asserted: a monitor halt across "
+              f"a frame boundary is counted as a miss)")
         for name in CATASTROPHIC:
+            if name == "gameOverrun":
+                continue
             got = rd1(mon, sym[name])
             check(f"{name} is zero across the whole run", got == 0, str(got))
         print(f"  info publishSkip {rd1(mon, sym['publishSkip'])} "

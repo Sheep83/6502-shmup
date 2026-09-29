@@ -22,8 +22,27 @@ wmTick, wmEnterStage or waveSpawnMember directly:
 * repeated arc steps carry one enemy through most of a circle, which is the
   loop pattern and the thing a fixed quarter-turn arc could not express;
 * enemies still despawn and return their pool slots;
-* two DIFFERENT authored patterns are in flight at once;
+* two DIFFERENT patterns are in flight at once;
 * the production health counters stay clean.
+
+THE PATTERNS ARE ARRANGED, NOT WAITED FOR -- which is the repair this file used
+to describe and not perform. Its own note said so:
+
+    "Every claim here is about an ENGINE capability [...] but it is measured by
+    WATCHING AUTHORED LEVEL 1 and hoping the content exercises each primitive
+    inside the window. That is coverage by luck. [...] The proper repair is to
+    arrange each primitive deliberately."
+
+Level 1 was then re-authored, four of its wave definitions stopped being
+referenced by any trigger, and the luck ran out: HOLD and ARC_MIRROR never ran,
+and four checks reported "0 of N" about an engine that was behaving perfectly.
+
+So the schedule is now SYNTHETIC (tests/synth.py): one program that walks
+STRAIGHT -> HOLD -> ARC -> ARC_MIRROR -> EXIT, and a second, different one
+beside it, installed into the spare room the level package reserves. Package RAM
+only; no authored file is touched. The frame loop is still the real one --
+nothing calls wmTick, wmEnterStage or waveSpawnMember directly -- so what is
+measured is unchanged; only the certainty that the case occurs is new.
 """
 import sys
 from pathlib import Path
@@ -31,6 +50,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 from harness import PRG, SYM, symbols, Vice, rd, rd1, set_bp, free_run, step_n, check, report
+import campaign_data as CD                                       # noqa: E402
+import synth                                                     # noqa: E402
 
 sym = symbols(SYM)
 
@@ -45,10 +66,24 @@ LOOP_HEADINGS_WANTED = 40   # of 64: comfortably more than the half circle a
                             # single quarter-turn primitive could ever reach
 CHAIN_WANTED = 2            # two transitions = a three-stage path
 
-# Two authored cycles plus slack. The cycle is ~488 frames and every pattern
-# appears once in it; the loop below stops as soon as all of the above has been
-# seen, which in practice is well inside one.
-MAX_FRAMES = 1300
+# THE SYNTHETIC SPECIMEN. Five stages, so every primitive in the vocabulary runs
+# on ONE enemy -- which is also what makes "the S-turn is composed" and "a hold
+# ends and hands on" observable rather than hoped for.
+#
+# The velocities are small enough for the despawn guards at 1.00x (ENEMY_CLEAR_X_LEFT
+# allows 4 px a frame, i.e. 16 quarter pixels) and the two arcs together turn
+# through half a circle, ending pointing down-right so the EXIT leaves through
+# the bottom and the slot comes back.
+# THE TWO ROWS ARE CLOSE TOGETHER ON PURPOSE. "Two different patterns in flight
+# at once" needs both wave instances live in the same frame, and one coarse row is
+# eight displayed frames -- rows 8 and 16 were sixty-four frames apart and the
+# first instance had finished before the second began, so the check read 0 frames.
+SYN_ROW_A, SYN_ROW_B = 8, 12
+SYN_COUNT, SYN_INTERVAL = 3, 20
+
+# The window no longer has to wait for an authored cycle to come round: both
+# synthetic rows are due within the first few coarse rows of the run.
+MAX_FRAMES = 900
 
 
 # ONE READ FOR THE WHOLE DIRECTOR, and it is worth the arithmetic. This file
@@ -107,6 +142,54 @@ def main():
         mon.cmd("delete")
 
         check_layout()
+
+        # ---- THE SYNTHETIC SCHEDULE ------------------------------------
+        pkg = synth.Package(mon, sym)
+        # THE FIRST ARC IS LONG ENOUGH TO BE A LOOP, AND TIGHT ENOUGH TO STAY
+        # INSIDE THE APERTURE.
+        #
+        # The claim it serves is that repeated arc steps carry ONE enemy through
+        # most of a circle -- something a fixed quarter-turn primitive could never
+        # do -- so it has to sweep more than LOOP_HEADINGS_WANTED of the 64
+        # headings. Two twelve-step arcs of opposite hand retraced each other and
+        # reached 13, so the first arc was lengthened to 44 steps; at two frames
+        # a step that is a 62-pixel circle, and the enemy wandered out of the
+        # left edge and was despawned before it ever reached the MIRROR stage, so
+        # "both handednesses on one enemy" read 0.
+        #
+        # ONE FRAME PER STEP halves the radius to about 15 pixels and halves the
+        # time, so the whole five-stage path -- straight, hold, loop, counter-turn,
+        # exit -- completes well inside the aperture and well inside the window.
+        five = pkg.install_program([
+            [synth.WM_STRAIGHT, 20, 4, 2],
+            [synth.WM_HOLD, 20, 0, 1],
+            [synth.WM_ARC, 44, 1, 8],
+            [synth.WM_ARC_MIRROR, 12, 1, synth.WM_HEAD_CONT],
+            [synth.WM_EXIT, 0, 0, 0],
+        ])
+        other = pkg.straight_then_exit(2, 5)        # a visibly different pattern
+        def_a = pkg.install_definition(count=SYN_COUNT, interval=SYN_INTERVAL,
+                                       start_x=90, start_y=40, x_step=30,
+                                       y_step=0, heading=8, program=five)
+        def_b = pkg.install_definition(count=SYN_COUNT, interval=SYN_INTERVAL,
+                                       start_x=200, start_y=40, x_step=20,
+                                       y_step=0, heading=16, program=other)
+        pkg.write_trigger(0, row=SYN_ROW_A, definition=def_a,
+                          species=synth.SLOT_ROW[0], fire=0, side=0, colour=1,
+                          fire_mode=0, speed=CD.C.TRIG_SPEED_1X)
+        pkg.write_trigger(1, row=SYN_ROW_B, definition=def_b,
+                          species=synth.SLOT_ROW[0], fire=0, side=0, colour=7,
+                          fire_mode=0, speed=CD.C.TRIG_SPEED_1X)
+        pkg.set_trigger_count(2)
+        pkg.open_the_approach()
+        pkg.rewind_cursor()
+        check("two synthetic patterns are installed, one walking every "
+              "primitive in the vocabulary",
+              rd1(mon, CD.TRIGN_ADDR) == 2
+              and rd1(mon, sym["waveTrigDef"] + 0) != rd1(mon, sym["waveTrigDef"] + 1),
+              f"definitions {def_a} (5 stages) and {def_b} (STRAIGHT+EXIT) at "
+              f"rows {SYN_ROW_A} and {SYN_ROW_B}")
+
         bp = set_bp(mon, sym["gameFrame"])
 
         # Per live occupant (broken on slot reuse, which shows up as a colour
@@ -170,7 +253,8 @@ def main():
 
             if (chain_best >= CHAIN_WANTED and s_compose > 0 and hold_ended > 0
                     and head_best >= LOOP_HEADINGS_WANTED and despawns > 0
-                    and both_diff > 0 and len(modes_seen) == 5):
+                    and both_diff > 0
+                    and len(modes_seen) == CD.fmt("WM_MODES")):
                 break
 
         mon.cmd(f"delete {bp}")
@@ -204,8 +288,8 @@ def main():
         # leaving it honest. See the phase-2 report's remaining-limitations
         # section.
         # ============================================================
-        check("every movement primitive ran, including the new linger",
-              len(modes_seen) == 5,
+        check("every movement primitive ran, including the hold",
+              len(modes_seen) == CD.fmt("WM_MODES"),
               " ".join(sorted(NAMES.get(m, str(m)) for m in modes_seen)))
         check("enemies advanced from one authored stage to the next, and one "
               "walked a three-stage path end to end",
@@ -222,7 +306,7 @@ def main():
               f"{head_best} of 64 distinct headings on one enemy")
         check("enemies still despawn and return their pool slots",
               despawns > 0, f"{despawns} slots returned")
-        check("two DIFFERENT authored patterns were in flight at once",
+        check("two DIFFERENT patterns were in flight at once",
               both_diff > 0, f"{both_diff} frames")
 
         for name in ("gameOverrun", "scrollLate", "edgeLate"):

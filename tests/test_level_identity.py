@@ -29,6 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
+import campaign_data as CD                                  # noqa: E402
 from harness import (SYM, symbols, Vice, rd, rd1, set_bp,  # noqa: E402
                      step_n, check, report, LAUNCHED_PIDS)
 
@@ -71,9 +72,11 @@ def snapshot(mon):
     for n in ("trnBgColour", "trnCramValue", "trnGlyphCount", "turretCount",
               "wvNextTrig", "scrollFine"):
         s[n] = rd1(mon, sym[n])
-    s["LEVELPKG_TRIGN"] = rd1(mon, 0xFF92)
-    s["pkg signature"] = h(rd(mon, 0xFB70, 4))
-    s["pkg palette"] = list(rd(mon, 0xFF74, 4))
+    # THE PACKAGE ADDRESSES COME FROM src/levelpkg.asm, not from a comment.
+    s["LEVELPKG_TRIGN"] = rd1(mon, CD.TRIGN_ADDR)
+    s["pkg signature"] = h(rd(mon, CD.SIG_ADDR, 4))
+    s["pkg palette"] = list(rd(mon, CD.pkg("LEVELPKG_PAL"),
+                               CD.pkg("LEVELPKG_PAL_MAX")))
     s["charset $0b00 (1K)"] = h(rd(mon, TERRAIN_GLYPHS, 1024))
     # THE PLAYFIELD'S COLOUR RAM, NOT ALL OF IT. The top rows carry the HUD,
     # whose cells depend on the score, the lives and the P count -- all of which
@@ -86,8 +89,9 @@ def snapshot(mon):
     s["playfield cRAM all == fill"] = all(c == fill for c in play)
     s["playfield cRAM fill value"] = fill
     s["trTiles (1K)"] = h(rd(mon, TRTILES, 1024))
-    s["metatile defs"] = h(rd(mon, 0xF130, 1024))
-    s["map first 256"] = h(rd(mon, 0xE000, 256))
+    s["metatile defs"] = h(rd(mon, CD.pkg("LEVELPKG_DEFS"),
+                              CD.pkg("LEVELPKG_DEFS_MAX")))
+    s["map first 256"] = h(rd(mon, CD.pkg("LEVELPKG_MAP"), 256))
     s["enemy window (1280)"] = h(rd(mon, 0x2C00, 1280))
     s["boss cells (256)"] = h(rd(mon, 0x3580, 256))
     return s

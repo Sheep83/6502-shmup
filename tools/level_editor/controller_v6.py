@@ -767,7 +767,7 @@ class EditorController:
         return None
 
     def suggested_species(self, at_index=None):
-        """The species a NEW trigger starts as. Always RING.
+        """The species a NEW trigger starts as: this level's FIRST identity.
 
         IT USED TO ALTERNATE, because src/waves.asm asserted that consecutive
         authored waves differed and a new trigger that repeated the last one
@@ -775,11 +775,16 @@ class EditorController:
         safety -- so Add Trigger no longer guesses. A predictable default an
         author changes is better than a clever one they have to notice.
 
-        RING is the plain case: it has no side, no token, no encounter behind it,
-        and it is what a level is mostly made of. Duplicate is the operation that
-        inherits the selected trigger's species.
+        AND IT USED TO RETURN THE LITERAL "RING", which stopped being a species
+        the moment a slot could hold any roster identity: validation_v6 checks a
+        trigger's species against THIS LEVEL'S identities, so Add Trigger was
+        quietly producing a trigger that failed validation with
+        `trigger.species` -- "unknown enemy 'RING'". Slot 0 is the plain case in
+        every level: no side, no token, no encounter behind it, and what a level
+        is mostly made of. Duplicate is still the operation that inherits the
+        selected trigger's species.
         """
-        return "RING"
+        return C.level_identities(self.project)[0]
 
     def add_trigger(self, world_progress=None, wave_definition=None,
                     species=None, fire_mask=None, dropper_side="LEFT",

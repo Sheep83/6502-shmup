@@ -20,10 +20,24 @@ So this measures the two things that are actually defined:
   * the per-frame displacement of one enemy, which must equal that velocity
     integrated in quarter pixels.
 
+THE WAVE IT FLIES IS SYNTHETIC, AND THAT IS THE POINT.
+
+The first version leant on the authored level: `SWEEP_VX = 6  # the opening
+STRAIGHT of sweep`, and "trigger 0 is due at ~160", and "every authored trigger
+is 1.00x". All three were readings of Level 1 in August. The level has since been
+re-authored -- it no longer opens with `sweep` and it authors four different
+speeds -- and eleven checks failed about an engine that was entirely correct.
+
+So the velocity under test is one this file WRITES: a STRAIGHT leg of a known
+magnitude, in a wave definition of its own, on a trigger of its own, at a row
+the world reaches immediately. Everything installed goes into the SPARE ROOM the
+package reserves and no level uses (tests/synth.py) -- package RAM only, never
+the disk, so no authored level is edited to make a test pass.
+
 Constraint #4: production code, free-running. The only things poked are the
-package's own trigger columns -- speed, and in the last section the definition
-index -- which are authored data, the technique tests/test_aimed_fire.py
-already uses on the firing mode.
+package's own movement pool, definition table and trigger columns, all of which
+are authored data -- the technique tests/test_aimed_fire.py already uses on the
+firing mode and tests/test_wave_triggers.py on the rows.
 
 Six VICE launches, each short.
 """
@@ -35,17 +49,31 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,  # noqa: E402
                      read16, step_n, call, check, report)
+import campaign_data as CD                                       # noqa: E402
+import synth                                                     # noqa: E402
 
 sym = symbols(SYM)
 
 PORT = 6680
 MAX_OBJECTS = 16
 TYPE_ENEMY = 1
-LEVELPKG_TRIGN = 0xFF92                 # the live trigger count; src/levelpkg.asm
-SPEED_CHOICES = (4, 5, 6, 7, 8)
-LABEL = {4: "1.00x", 5: "1.25x", 6: "1.50x", 7: "1.75x", 8: "2.00x"}
-SWEEP_VX = 6                            # the opening STRAIGHT of `sweep`
-WATCH = 340                             # frames: trigger 0 is due at ~160
+LEVELPKG_TRIGN = CD.TRIGN_ADDR          # the live trigger count; src/levelpkg.asm
+SPEED_CHOICES = tuple(CD.C.SPEED_CHOICES)
+LABEL = dict(CD.C.SPEED_LABELS)
+
+# THE SYNTHETIC SPECIMEN. A STRAIGHT leg of this velocity, flown by a wave of
+# this size, from a trigger at this row. Nothing here is read off a level.
+#
+# SYN_VX IS CHOSEN SO THE FIVE SCALINGS ARE FIVE DISTINCT VALUES -- 6, 7, 9, 10
+# and 12 quarter pixels -- otherwise "the velocity changed with the speed" could
+# pass while two speeds quietly produced the same number. It is also small
+# enough that 2.00x stays inside the despawn guard: 12 quarter pixels is 3 whole
+# pixels a frame and ENEMY_CLEAR_X_LEFT allows 4.
+SYN_VX, SYN_VY = 6, 0
+SYN_ROW = 8                             # boot="exact" arrives below row 4
+SYN_ROW_B = 24                          # the second trigger of the shared pair
+SYN_COUNT, SYN_INTERVAL = 3, 10
+WATCH = 200                             # frames: the row above is due at once
 
 
 def s8(b):
@@ -107,13 +135,36 @@ def runs(seq):
     return [r for r in out if len(r) >= 6]
 
 
-def observe(speed):
-    """One short launch with every trigger at `speed`. Returns its runs."""
+def install_specimen(mon, sym, *, speed, vx=None, vy=None, arc=False):
+    """Replace the schedule with ONE synthetic wave of known velocity.
+
+    Returns (pkg, definition index, program byte offset). `arc=True` appends an
+    ARC after the straight leg so the arc magnitude can be observed in the same
+    run -- the arc carries no authored velocity of its own, which is exactly why
+    it has to be watched rather than computed.
+    """
+    vx = SYN_VX if vx is None else vx
+    vy = SYN_VY if vy is None else vy
+    pkg = synth.Package(mon, sym)
+    stages = [[synth.WM_STRAIGHT, 120, vx & 0xFF, vy & 0xFF]]
+    if arc:
+        stages.append([synth.WM_ARC, 32, 4, 0])      # clockwise from east
+    stages.append([synth.WM_EXIT, 0, 0, 0])
+    prog = pkg.install_program(stages)
+    defn = pkg.install_definition(count=SYN_COUNT, interval=SYN_INTERVAL,
+                                  start_x=80, start_y=50, x_step=0, y_step=18,
+                                  heading=0, program=prog)
+    pkg.only_trigger(row=SYN_ROW, definition=defn, speed=speed)
+    return pkg, defn, prog
+
+
+def observe(speed, *, arc=False):
+    """One short launch flying the SYNTHETIC wave at `speed`. Returns its runs."""
     v = None
     try:
         v = Vice(PORT + speed, PRG, boot="exact")
         mon = v.mon
-        set_all_speeds(mon, speed)
+        install_specimen(mon, sym, speed=speed, arc=arc)
         return runs(watch(mon, WATCH))
     finally:
         if v:
@@ -130,14 +181,27 @@ try:
     v = Vice(PORT, PRG, boot="exact")
     mon = v.mon
     n = rd1(mon, LEVELPKG_TRIGN)
-    col = rd(mon, sym["waveTrigSpeed"], n)
+    col = list(rd(mon, sym["waveTrigSpeed"], n))
     check("every authored trigger carries a movement speed", len(col) == n,
           f"{n} triggers")
-    check("...and every one of them is 1.00x", set(col) == {4},
-          str(sorted(set(col))))
+    # WHAT THE AUTHOR CHOSE IS NOT THIS FILE'S BUSINESS. This check used to be
+    # `set(col) == {4}` -- "every one of them is 1.00x" -- which was a reading of
+    # the level on the day the migration ran, and became false the moment Brian
+    # used the feature. The invariant is that every byte is one the engine can
+    # multiply by.
+    check("...and every one is a speed the engine defines",
+          all(CD.C.TRIG_SPEED_MIN <= c <= CD.C.TRIG_SPEED_MAX for c in col),
+          f"{sorted(set(col))} within "
+          f"{CD.C.TRIG_SPEED_MIN}..{CD.C.TRIG_SPEED_MAX} "
+          f"({', '.join(LABEL[c] for c in sorted(set(col)))})")
     check("the padding past the live triggers is 1.00x, not zero -- a zero "
           "would be a multiplier of nothing",
-          rd1(mon, sym["waveTrigSpeed"] + n) == 4)
+          rd1(mon, sym["waveTrigSpeed"] + n) == CD.C.TRIG_SPEED_1X,
+          f"slot {n} = {rd1(mon, sym['waveTrigSpeed'] + n)}")
+    check("...and so is every slot to the end of the column, not just the first",
+          set(rd(mon, sym["waveTrigSpeed"] + n, CD.TRIG_SLOTS - n))
+          == {CD.C.TRIG_SPEED_1X},
+          f"{CD.TRIG_SLOTS - n} padding slots")
 finally:
     if v:
         v.close()
@@ -146,8 +210,11 @@ finally:
 # 2. THE SCALED VELOCITY, MEASURED, AT ALL FIVE SPEEDS
 # ===========================================================================
 print("\n=== the velocity the engine computes, per speed ===")
+print(f"       the specimen: a STRAIGHT leg of ({SYN_VX}, {SYN_VY}) quarter "
+      f"pixels, on a synthetic wave of {SYN_COUNT} at row {SYN_ROW}")
+seen_vx = {}
 for n in SPEED_CHOICES:
-    rs = observe(n)
+    rs = observe(n, arc=True)
     by_speed[n] = rs
     if not rs:
         check(f"{LABEL[n]}: enemies were seen", False)
@@ -155,13 +222,14 @@ for n in SPEED_CHOICES:
     check(f"{LABEL[n]}: every enemy carries it on the OBJECT",
           all(r[0][5] == n for r in rs),
           f"{len(rs)} lifetimes, speeds {sorted({r[0][5] for r in rs})}")
-    # THE OPENING LEG OF `sweep` IS A KNOWN STRAIGHT: vx = SWEEP_VX, vy = 0.
-    # It is the first wave the level sends, so a short window always has it.
-    want = scale(SWEEP_VX, n)
+    # THE STRAIGHT LEG IS THE ONE THIS FILE WROTE, so the expected velocity is
+    # arithmetic on SYN_VX and not a reading of anybody's level.
+    want = scale(SYN_VX, n)
     opening = [r for r in rs if r[0][3] == want and r[0][5] == n]
-    check(f"...and its straight leg runs at the scaled velocity {want}",
-          bool(opening),
-          f"opening vx seen: {sorted({r[0][3] for r in rs})}, wanted {want}")
+    seen_vx[n] = sorted({r[0][3] for r in rs})
+    check(f"...and the synthetic straight leg runs at the scaled velocity "
+          f"{want}", bool(opening),
+          f"opening vx seen: {seen_vx[n]}, wanted {want}")
     # ...AND THE POSITION ACTUALLY MOVES AT THAT VELOCITY. Reading wmVX only
     # proves the scaler ran; differencing logX proves the integrator used it.
     if opening:
@@ -175,18 +243,30 @@ for n in SPEED_CHOICES:
                   f"{dx} px in {frames} frames, expected "
                   f"{frames * want // 4}")
 
-check("1.00x is bit-identical to the engine's own authored velocity",
-      any(r[0][3] == SWEEP_VX for r in by_speed.get(4, [])),
-      f"wmVX = {SWEEP_VX} quarter pixels, unscaled")
-check("2.00x is exactly double",
-      scale(SWEEP_VX, 8) == 2 * SWEEP_VX
-      and any(r[0][3] == 2 * SWEEP_VX for r in by_speed.get(8, [])))
+check("1.00x is bit-identical to the authored velocity -- the multiplier is a "
+      "no-op, not a rounding",
+      SYN_VX in (by_speed.get(CD.C.TRIG_SPEED_1X) and
+                 [r[0][3] for r in by_speed[CD.C.TRIG_SPEED_1X]] or []),
+      f"wmVX = {SYN_VX} quarter pixels, unscaled")
+top = max(SPEED_CHOICES)
+check(f"{LABEL[top]} is exactly double",
+      scale(SYN_VX, top) == 2 * SYN_VX
+      and any(r[0][3] == 2 * SYN_VX for r in by_speed.get(top, [])))
+check("the five speeds produced FIVE DISTINCT straight-leg velocities -- no two "
+      "of them quietly agree",
+      len({scale(SYN_VX, n) for n in SPEED_CHOICES}) == len(SPEED_CHOICES)
+      and all(scale(SYN_VX, n) in seen_vx.get(n, []) for n in SPEED_CHOICES),
+      "; ".join(f"{LABEL[n]}={scale(SYN_VX, n)}" for n in SPEED_CHOICES))
 
 print("\n=== arcs scale too, though they carry no authored velocity ===")
+# WM_ARC_SPEED IS AN ENGINE CONSTANT, read from the movement format rather than
+# written as a 6. The ARC stage is part of the synthetic program above, so this
+# no longer depends on the authored level containing a turn at all.
+ARC_SPEED = CD.WM_ARC_SPEED
 for n in SPEED_CHOICES:
     rs = by_speed.get(n) or []
     mags = {max(abs(s[3]), abs(s[4])) for r in rs for s in r}
-    want = scale(6, n)                  # WM_ARC_SPEED at this speed
+    want = scale(ARC_SPEED, n)
     check(f"{LABEL[n]}: a velocity of the scaled arc magnitude {want} appears",
           want in mags, f"magnitudes seen {sorted(mags)}")
 
@@ -235,30 +315,37 @@ check("...and it is exactly antisymmetric: scale(-v) == -scale(v)",
 # ===========================================================================
 # 3. TWO TRIGGERS, ONE DEFINITION, TWO SPEEDS
 # ===========================================================================
-# THE CLAIM THE FEATURE EXISTS FOR. Level 1 does reuse definitions across
-# triggers, but its shared pairs sit at world rows 205 and 310 -- frames 1640
-# and 2480 -- and stepping that far through the monitor costs minutes for one
-# assertion. So two EARLY triggers are pointed at one definition instead:
-# trigDef is authored data exactly like trigSpeed, and the thing being proved
-# is a runtime property of sharing, not of where the author put the rows.
+# THE CLAIM THE FEATURE EXISTS FOR, BUILT RATHER THAN LOOKED FOR. An earlier
+# version pointed authored trigger 1 at authored trigger 0's definition and
+# depended on trigger 1's row being early enough to reach; the rows moved and
+# the observation window stopped containing it. Both triggers, the definition
+# they share and the rows they sit at are now this file's own -- so "one
+# definition, two speeds" is a property of the engine and not of the schedule.
 print("\n=== two triggers on ONE definition, at two speeds ===")
+SLOW, FAST = CD.C.TRIG_SPEED_1X, max(SPEED_CHOICES)
 v = None
 seen = {}
 try:
     v = Vice(PORT + 20, PRG, boot="exact")
     mon = v.mon
-    set_all_speeds(mon, 4)
-    shared = rd1(mon, sym["waveTrigDef"] + 0)       # whatever trigger 0 plays
-    poke(mon, sym["waveTrigDef"] + 1, shared)       # trigger 1 now plays it too
-    poke(mon, sym["waveTrigSpeed"] + 0, 4)
-    poke(mon, sym["waveTrigSpeed"] + 1, 8)
-    check("two early triggers now share one definition",
-          rd1(mon, sym["waveTrigDef"] + 0) == rd1(mon, sym["waveTrigDef"] + 1),
-          f"definition {shared}")
-    check("...at 1.00x and 2.00x",
+    pkg = synth.Package(mon, sym)
+    prog = pkg.straight_then_exit(SYN_VX, SYN_VY)
+    shared = pkg.install_definition(count=SYN_COUNT, interval=SYN_INTERVAL,
+                                    start_x=80, start_y=50, x_step=0,
+                                    y_step=18, heading=0, program=prog)
+    pkg.pair_on_one_definition(rows=(SYN_ROW, SYN_ROW_B), definition=shared,
+                               speeds=(SLOW, FAST))
+    check("two synthetic triggers share ONE definition",
+          rd1(mon, sym["waveTrigDef"] + 0) == rd1(mon, sym["waveTrigDef"] + 1)
+          == shared, f"definition {shared}")
+    check(f"...at {LABEL[SLOW]} and {LABEL[FAST]}",
           (rd1(mon, sym["waveTrigSpeed"] + 0),
-           rd1(mon, sym["waveTrigSpeed"] + 1)) == (4, 8))
-    rs = runs(watch(mon, 620))          # far enough for trigger 1 (row 52)
+           rd1(mon, sym["waveTrigSpeed"] + 1)) == (SLOW, FAST))
+    check("...and the definition itself carries no speed to conflict with -- "
+          "byte 7 is reserved and zero",
+          rd1(mon, sym["waveDefTable"] + shared * CD.WAVEDEF_SIZE
+              + CD.WD_RESERVED) == 0)
+    rs = runs(watch(mon, 400))          # both synthetic rows are within reach
     for r in rs:
         sp = r[0][5]
         seen.setdefault(sp, set()).update(abs(s[3]) for s in r if s[3])
@@ -267,13 +354,15 @@ finally:
         v.close()
 
 check("enemies from BOTH appearances were observed in one run",
-      {4, 8} <= set(seen), f"speeds seen {sorted(seen)}")
-if {4, 8} <= set(seen):
+      {SLOW, FAST} <= set(seen), f"speeds seen {sorted(seen)}")
+if {SLOW, FAST} <= set(seen):
     check("ONE DEFINITION PRODUCED ENEMIES AT TWO DIFFERENT VELOCITIES",
-          scale(SWEEP_VX, 4) in seen[4] and scale(SWEEP_VX, 8) in seen[8],
-          f"1.00x |vx| {sorted(seen[4])}; 2.00x |vx| {sorted(seen[8])}")
+          scale(SYN_VX, SLOW) in seen[SLOW]
+          and scale(SYN_VX, FAST) in seen[FAST],
+          f"{LABEL[SLOW]} |vx| {sorted(seen[SLOW])}; "
+          f"{LABEL[FAST]} |vx| {sorted(seen[FAST])}")
     check("...and the fast one's maximum is twice the slow one's",
-          max(seen[8]) == 2 * max(seen[4]),
-          f"{max(seen[4])} -> {max(seen[8])} quarter pixels a frame")
+          max(seen[FAST]) == 2 * max(seen[SLOW]),
+          f"{max(seen[SLOW])} -> {max(seen[FAST])} quarter pixels a frame")
 
 sys.exit(report(__name__))

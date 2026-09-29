@@ -173,11 +173,15 @@ with tempfile.TemporaryDirectory() as td:
 # ===========================================================================
 print("\n=== 7. any species order is authorable ===")
 # ---------------------------------------------------------------------------
+# THE SEQUENCES ARE BUILT FROM THIS LEVEL'S OWN IDENTITIES. They were spelled
+# "RING" and "DROPPER" -- the engine's legacy species names -- and "RING" stopped
+# being a species the moment a slot could hold any roster identity, so three of
+# these five cases failed with `trigger.species` while the thing under test (the
+# retired alternation assertion) was perfectly fine.
+_ids = C.level_identities(fresh())
+A, B = _ids[0], _ids[1]
 wave = fresh().wave_definitions[0].id
-for seq in (["RING", "RING"], ["RING", "RING", "RING"],
-            ["DROPPER", "DROPPER"],
-            ["RING", "DROPPER", "DROPPER", "RING"],
-            ["DROPPER", "DROPPER", "DROPPER", "DROPPER"]):
+for seq in ([A, A], [A, A, A], [B, B], [A, B, B, A], [B, B, B, B]):
     q = fresh()
     q.triggers = [Trigger(10 * (i + 1), wave, s, []) for i, s in enumerate(seq)]
     check("-".join(seq) + " is accepted", validate(q).ok, str(codes(q)))
@@ -190,14 +194,20 @@ check("...and neither does the validator", "trigger.repeated_species" not in v_s
 # Add Trigger's default is deterministic, Duplicate still inherits
 from controller_v6 import EditorController                           # noqa: E402
 c = EditorController.canonical(HERE)
-check("Add Trigger defaults to RING whatever precedes it",
-      c.suggested_species() == "RING" and c.suggested_species(1) == "RING")
+_slot0 = C.level_identities(c.project)[0]
+check("Add Trigger defaults to this level's FIRST identity whatever precedes it",
+      c.suggested_species() == _slot0 == c.suggested_species(1), _slot0)
 _before = len(c.project.triggers)
 i = c.add_trigger(world_progress=c.project.triggers[-1].world_progress + 5)
 t = c.project.triggers[i]
-check("...a new trigger is RING, unarmed and side LEFT",
-      t.species == "RING" and t.fire_mask == [] and t.dropper_side == "LEFT",
+check("...a new trigger wears that identity, unarmed and side LEFT",
+      t.species == _slot0 and t.fire_mask == [] and t.dropper_side == "LEFT",
       f"{t.species}, mask {t.fire_mask}, side {t.dropper_side}")
+# AND THE PROJECT IS STILL VALID AFTERWARDS. This is what the literal "RING"
+# broke: Add Trigger produced a trigger the validator rejected as an unknown
+# enemy, and no test noticed because none of them validated after adding one.
+check("...and the project still validates after Add Trigger",
+      c.validate().ok, str({i.code for i in c.validate().errors}))
 check("...and it references a real wave definition",
       t.wave_definition in {d.id for d in c.project.wave_definitions})
 c2 = EditorController.canonical(HERE)
@@ -271,9 +281,27 @@ else:
     w.withdraw()
     w.geometry("1200x760")
     w.update()
-    species = [t.species for t in w.controller.project.triggers]
-    if "RING" in species and "DROPPER" in species:
-        ring, drop = species.index("RING"), species.index("DROPPER")
+    # A PREVIEWABLE TRIGGER AND A DROPPER, ARRANGED IF THE LEVEL LACKS EITHER.
+    # This was `if "RING" in species and "DROPPER" in species` and silently
+    # SKIPPED -- "RING" is not a species any more, so the geometry regression it
+    # exists for stopped being tested at all while still reporting an `ok` line.
+    # A skip that can be arranged away is a hole, so it is arranged away: the
+    # change is in memory and the file's own byte comparison covers it.
+    def _species():
+        return [t.species for t in w.controller.project.triggers]
+
+    _plain = next((s for s in _species() if s != "DROPPER"),
+                  C.level_identities(w.controller.project)[0])
+    if "DROPPER" not in _species():
+        w.controller.update_trigger(len(_species()) - 1, species="DROPPER")
+    if all(s == "DROPPER" for s in _species()):
+        w.controller.update_trigger(0, species=_plain)
+    w._refresh_triggers() if hasattr(w, "_refresh_triggers") else w.update()
+    w.update_idletasks()
+    species = _species()
+    if True:
+        ring = next(i for i, s in enumerate(species) if s != "DROPPER")
+        drop = species.index("DROPPER")
 
         def geom():
             w.update_idletasks()
@@ -290,7 +318,8 @@ else:
         for idx in (drop, ring, drop, ring, drop):
             pick(idx)
             sizes.append(geom())
-        check("repeated RING <-> DROPPER leaves the workspace geometry identical",
+        check("repeated ordinary <-> DROPPER selection leaves the workspace "
+              "geometry identical",
               all(s == base for s in sizes), f"{base} vs {set(sizes)}")
         pick(drop)
         detail = w.preview.detail.get()
@@ -298,8 +327,6 @@ else:
               "\n" not in detail and len(detail) < 120, repr(detail[:70]))
         check("...and the full reason is still shown on the canvas",
               bool(w.preview.error) and "\n" in w.preview.error)
-    else:
-        ok("SKIP: the canonical level has no RING/DROPPER pair to switch between")
     app.destroy()
 
 print()

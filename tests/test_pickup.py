@@ -47,6 +47,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
                      free_run, step_n, call, check, report)
+import campaign_data as CD                                       # noqa: E402
 
 MAX_OBJECTS   = 16
 TYPE_ENEMY    = 1
@@ -61,7 +62,9 @@ TOKEN_PTR     = 0x2580 // 64            # $96
 COL_LIT, COL_DARK = 1, 15
 FLASH_BIT     = 0x10
 WAVE_SLOTS    = 2                       # src/waves.asm
-WAVE_TRIGGERS = 4
+# HOW MANY TRIGGERS THE LEVEL AUTHORS IS NOT THIS FILE'S BUSINESS. It was a 4
+# here; the level now authors five. The claim below is "no trigger, whichever
+# ones there are, produces a token", so the count is read from the package.
 # Where the notional Dropper dies. Deliberately NOT the old fixed spawn line
 # (PICKUP_SPAWN_Y) and not an authored X, so "it appeared where it died" cannot
 # pass by coincidence against either of the values the old model used.
@@ -226,8 +229,9 @@ def main():
         check("no authored trigger creates a token any more -- a P is a reward, "
               "not a placement",
               all(trigger_spawns_token(mon, sym, t) is None
-                  for t in range(WAVE_TRIGGERS)),
-              "one of the four triggers spawned a TYPE_PICKUP")
+                  for t in range(rd1(mon, CD.TRIGN_ADDR))),
+              f"none of the {rd1(mon, CD.TRIGN_ADDR)} authored triggers spawned "
+              f"a TYPE_PICKUP")
         check("...and the removed token columns are gone from the build",
               "waveTrigTokenLo" not in sym and "waveTrigTokenHi" not in sym)
 
@@ -477,8 +481,8 @@ def main():
         # measuring the quiet zone rather than the director. The approach is
         # package data at $f530; pushing it to $ffff restores the pre-quiet-zone
         # meaning of this assertion. See tests/test_no_spawn_row.py.
-        poke(mon, 0xf530, 0xff)
-        poke(mon, 0xf531, 0xff)
+        poke(mon, CD.NOSPAWN_ADDR + 0, 0xff)
+        poke(mon, CD.NOSPAWN_ADDR + 1, 0xff)
         poke(mon, sym["wvNextTrig"], 0)
         for s in range(WAVE_SLOTS):
             poke(mon, sym["wvActive"] + s, 0)
