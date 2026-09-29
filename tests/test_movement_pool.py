@@ -24,26 +24,68 @@ from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, call, check, report
 PORT = 6711
 POOL     = 0xf532       # movement programs
 WAVEDEF  = 0xf632       # wave definitions, 10 bytes each
-TRIG     = 0xf736       # six parallel trigger columns
-TRIG_SLOTS = 180        # each column is this wide, whatever the level authors
-TRIG_COLS  = ("rowLo", "rowHi", "def", "species", "fire", "side")
-WAVEDEF_SIZE = 10
-WAVE_DEFS, WAVE_TRIGGERS = 4, 4
-TRIG_ROWS = [48, 52, 90, 126]                 # Stage 1: absolute, no wrap
-SPECIES_RING, SPECIES_DROPPER = 0, 8
-TRIG_SPECIES = [SPECIES_RING, SPECIES_DROPPER, SPECIES_RING, SPECIES_DROPPER]
-TRIG_FIRE = [0b0101, 0b0010, 0b0101, 0b0000]
-TRIG_SIDE = [0, 0, 0, 1]                      # LEFT, LEFT, LEFT, RIGHT
+TRIG     = 0xf736       # the parallel trigger columns
+
+# ---------------------------------------------------------------------------
+# THE LAYOUT IS DERIVED, NOT WRITTEN DOWN. Every number below used to be a
+# literal, and every one of them went stale: TRIG_SLOTS said 180 through three
+# column additions that moved it to 154, then 135, then 120, and the column
+# list still named six when the package had nine. A frozen copy of a derived
+# number is a test that reports the wrong thing with total confidence.
+#
+# So the geometry comes from src/levelpkg.asm and the authored content from the
+# generated level, read through the editor's own declaration parser -- the same
+# one the exporter uses. If the engine and this test can ever disagree about
+# where a column is, it is because the engine moved it, which is the only thing
+# worth being told.
+# ---------------------------------------------------------------------------
+sys.path.insert(0, str(ROOT / "tools" / "level_editor"))
+import asm_decl                                                  # noqa: E402
+import contract_v2 as C                                          # noqa: E402
+
+TRIG_SLOTS = C.LEVELPKG_TRIG_SLOTS
+TRIG_COLS = ("rowLo", "rowHi", "def", "species", "fire", "side",
+             "colour", "fireMode", "speed")
+assert len(TRIG_COLS) == C.LEVELPKG_TRIG_COLS, (
+    f"this test names {len(TRIG_COLS)} trigger columns and src/levelpkg.asm "
+    f"declares {C.LEVELPKG_TRIG_COLS}")
+WAVEDEF_SIZE = C.LEVELPKG_WAVEDEF_SIZE
+
+# The authored content, from the level the engine was actually built against.
+_LVL = ROOT / "src" / "level1"
+_enc = asm_decl.parse_files(
+    [ROOT / "src" / n for n in ("movement_format.asm", "encounter_format.asm")]
+    + [_LVL / "wave_programs.asm", _LVL / "wave_encounters.asm"])
+WAVE_DEFS = _enc.const("WAVE_DEFS")
+WAVE_TRIGGERS = _enc.const("WAVE_TRIGGERS")
+TRIG_ROWS = list(_enc.list_("trigRow"))
+TRIG_SPECIES = list(_enc.list_("trigSpecies"))
+TRIG_FIRE = list(_enc.list_("trigFire"))
+TRIG_SIDE = list(_enc.list_("trigSide"))
+TRIG_SPEED = list(_enc.list_("trigSpeed"))
 WM_STRAIGHT, WM_ARC, WM_ARC_MIRROR, WM_EXIT, WM_HOLD = 0, 1, 2, 3, 4
 WM_HEAD_CONT, HEAD_LEN = 0xff, 64
 STAGE = 4
 SLOT = 0
-# src/wave_programs.asm: SWEEP, S-TURN, LINGER, LOOP
-PROG_AT = [0, 12, 24, 40]
+
+# THE POOL'S SHAPE, DERIVED FROM THE LEVEL IT WAS BUILT FROM. `progs` is a list
+# of programs, each a list of four-byte records; the package lays them end to
+# end and a definition's field 9 -- a program INDEX in the source -- is emitted
+# as that program's BYTE OFFSET. Both used to be frozen here as [0, 12, 24, 40]
+# and a 52-byte read, which were the right answers for the four programs that
+# existed at the time and silently the wrong ones for the six that exist now.
+_PROGS = _enc.list_("progs")
+_PROG_OFFSETS = []
+_acc = 0
+for _prog in _PROGS:
+    _PROG_OFFSETS.append(_acc)
+    _acc += len(_prog) * STAGE
+POOL_BYTES = _acc
+PROG_AT = [_PROG_OFFSETS[d[9]] for d in _enc.list_("waveDefs")]
 
 
 def records(mon):
-    raw = rd(mon, POOL, 52)
+    raw = rd(mon, POOL, POOL_BYTES)
     return [list(raw[i * STAGE:(i + 1) * STAGE]) for i in range(len(raw) // STAGE)]
 
 
@@ -101,11 +143,9 @@ def main():
                 for i, n in enumerate(TRIG_COLS)}
         for i, n in enumerate(TRIG_COLS):
             want = TRIG + i * TRIG_SLOTS
-            check(f"waveTrig{n[0].upper()}{n[1:]} resolves to its package column",
-                  sym.get({"rowLo": "waveTrigRowLo", "rowHi": "waveTrigRowHi",
-                           "def": "waveTrigDef", "species": "waveTrigSpecies",
-                           "fire": "waveTrigFire", "side": "waveTrigSide"}[n]) == want,
-                  f"${want:04x}")
+            label = "waveTrig" + n[0].upper() + n[1:]
+            check(f"{label} resolves to its package column",
+                  sym.get(label) == want, f"${want:04x}")
         rows = [lo | (hi << 8) for lo, hi in zip(cols["rowLo"], cols["rowHi"])]
         check("the authored trigger rows are ABSOLUTE and 16-bit in the package",
               rows == TRIG_ROWS, f"{rows}")
@@ -117,26 +157,59 @@ def main():
               f"{list(cols['fire'])}")
         check("the authored Dropper sides survived the move", list(cols["side"]) == TRIG_SIDE,
               f"{list(cols['side'])}")
+        check("...and so did the authored movement speeds",
+              list(cols["speed"]) == TRIG_SPEED, f"{list(cols['speed'])}")
+
+        # ---- THE CAPACITY, DERIVED AT BOTH ENDS ---------------------------
+        # The engine reserves LEVELPKG_TRIG_MAX bytes and cuts them into
+        # LEVELPKG_TRIG_COLS columns; the editor refuses to author more
+        # triggers than that yields. Neither number is written down twice, and
+        # this is where they are checked against each other.
+        check("the trigger columns tile the package's reservation exactly",
+              TRIG_SLOTS * len(TRIG_COLS) <= C.LEVELPKG_TRIG_RESERVATION
+              and (TRIG_SLOTS + 1) * len(TRIG_COLS) > C.LEVELPKG_TRIG_RESERVATION,
+              f"{len(TRIG_COLS)} x {TRIG_SLOTS} = "
+              f"{len(TRIG_COLS) * TRIG_SLOTS} of "
+              f"{C.LEVELPKG_TRIG_RESERVATION} bytes")
+        check("the editor's authoring ceiling is that same slot count",
+              C.MAX_TRIGGERS == TRIG_SLOTS, str(C.MAX_TRIGGERS))
+        check("...and this level fits inside it",
+              WAVE_TRIGGERS <= TRIG_SLOTS,
+              f"{WAVE_TRIGGERS} of {TRIG_SLOTS} slots used")
+        check("the whole trigger list stays below the package signature",
+              TRIG + len(TRIG_COLS) * TRIG_SLOTS <= 0xfb70,
+              f"ends at ${TRIG + len(TRIG_COLS) * TRIG_SLOTS:04x}, "
+              f"signature at $fb70")
 
         # ---- the cross-reference the whole package rests on ----------------
         # Field 9 of a definition is a BYTE OFFSET into the movement pool. If it
         # did not land on a record boundary the interpreter would read a stage
         # record straddling two others.
         offs = [wd_live[d * WAVEDEF_SIZE + 9] for d in range(WAVE_DEFS)]
-        check("every definition's movement-program offset lands on a record boundary",
-              all(o % STAGE == 0 and o < 52 for o in offs), f"{offs}")
-        check("the definitions still name the programs they always did",
+        # THE POOL'S OWN SIZE IS THE BOUND, not a frozen byte count: the pool
+        # grows whenever a program is added, and "< 52" was the length it
+        # happened to have when four programs existed.
+        pool_bytes = len(records(mon)) * STAGE
+        check("every definition's movement-program offset lands on a record "
+              "boundary inside the pool",
+              all(o % STAGE == 0 and o < pool_bytes for o in offs),
+              f"{offs}, pool is {pool_bytes} bytes")
+        check("the definitions name the offsets the generated level declares",
               offs == PROG_AT, f"{offs} vs {PROG_AT}")
 
         recs = records(mon)
         check("the pool is a whole number of four-byte stage records",
-              len(recs) * STAGE == 52, f"{len(recs)} records")
+              len(recs) * STAGE == POOL_BYTES, f"{len(recs)} records")
         check("every program start offset resolves to a record boundary",
-              all(o % STAGE == 0 and o < 52 for o in PROG_AT), f"{PROG_AT}")
+              all(o % STAGE == 0 and o < POOL_BYTES for o in PROG_AT),
+              f"{PROG_AT} in {POOL_BYTES} bytes")
+        # THE PRIMITIVE EACH PROGRAM OPENS WITH, read from the level rather
+        # than remembered: this froze as four kinds and the level now has six
+        # programs behind seven definitions.
         kinds = [recs[o // STAGE][0] for o in PROG_AT]
-        check("each program still starts with the primitive it always did",
-              kinds == [WM_STRAIGHT, WM_ARC_MIRROR, WM_STRAIGHT, WM_STRAIGHT],
-              f"{kinds}")
+        want_kinds = [_PROGS[d[9]][0][0] for d in _enc.list_("waveDefs")]
+        check("each definition's program starts with the primitive the level "
+              "declares", kinds == want_kinds, f"{kinds} vs {want_kinds}")
 
         headvx = rd(mon, sym["wmHeadVX"], HEAD_LEN)
         headvy = rd(mon, sym["wmHeadVY"], HEAD_LEN)
@@ -144,7 +217,10 @@ def main():
         # ---- ARC entry is determined by the record, not by history -------
         arcs = [(i, r) for i, r in enumerate(recs)
                 if r[0] in (WM_ARC, WM_ARC_MIRROR)]
-        check("the pool contains the expected arc stages", len(arcs) == 5, f"{len(arcs)}")
+        want_arcs = sum(1 for prog in _PROGS for r in prog
+                        if r[0] in (WM_ARC, WM_ARC_MIRROR))
+        check("the pool contains every arc stage the level declares",
+              len(arcs) == want_arcs, f"{len(arcs)} of {want_arcs}")
 
         explicit = [(i, r) for i, r in arcs if r[3] != WM_HEAD_CONT]
         cont = [(i, r) for i, r in arcs if r[3] == WM_HEAD_CONT]

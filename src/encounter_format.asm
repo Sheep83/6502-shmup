@@ -98,3 +98,49 @@
 .const TRIG_FIRE_DOWN  = 0      // the species' own default -- straight down
 .const TRIG_FIRE_AIMED = 1      // sampled at the instant of firing, never again
 .const TRIG_FIRE_MAX   = TRIG_FIRE_AIMED
+
+// --- how FAST this appearance crosses the playfield -------------------------
+// A TRIGGER FIELD, and the third of the occurrence properties after colour and
+// firing. A wave definition is the SHAPE of a path; how quickly an enemy walks
+// that shape is a property of the encounter. The same `sweep` should be able to
+// make a lazy formation pass at one row and a fast attack run at another
+// without being cloned.
+//
+// A NUMERATOR OVER FOUR, and the four is not arbitrary: the engine already
+// works in QUARTER PIXELS per frame (see WM_ARC_SPEED below and wmVX in
+// src/movement.asm), so a quarter-scale multiplier divides by a shift.
+//
+//     scaled = (|v| * TRIG_SPEED) >> 2, with the sign of v put back
+//
+// FOUR IS A BIT-EXACT NO-OP. (v * 4) >> 2 == v for every v, with no rounding
+// at all, so a level that does not touch this field moves exactly as it always
+// did -- not approximately, identically.
+//
+// TRUNCATION IS TOWARD ZERO, not floor, and that is a symmetry property rather
+// than an accident: +5 and -5 must scale to exactly opposite velocities or an
+// ARC and its ARC_MIRROR would trace different curves. Taking the magnitude,
+// scaling, and re-applying the sign is what guarantees it. An arithmetic shift
+// of the signed product would give -8 where +5 gives +7.
+//
+// NO SLOWER THAN 1x IN THIS PASS. The 64-entry heading table exists at
+// magnitude WM_ARC_SPEED because that radius is where 64 lattice directions are
+// distinguishable; scaling an arc DOWN collapses neighbouring headings onto the
+// same velocity and a smooth curve becomes visibly polygonal. Slower formations
+// are better authored as a wider turn radius, which costs nothing and is
+// already expressible.
+.const TRIG_SPEED_SHIFT = 2                     // the /4
+.const TRIG_SPEED_1X    = 4                     // the default
+// WRITTEN OUT RATHER THAN SHIFTED, and the guard is why it is still honest:
+// tools/level_editor/asm_decl.py reads these declarations to keep the editor
+// and the engine agreeing about what a 6 means, and its small expression
+// grammar has no shift operator. A literal both sides can read beats a
+// derivation only one of them can.
+.if (TRIG_SPEED_1X != 1 << TRIG_SPEED_SHIFT) {
+    .error "TRIG_SPEED_1X must be the identity for a shift of TRIG_SPEED_SHIFT"
+}
+.const TRIG_SPEED_125X  = 5
+.const TRIG_SPEED_150X  = 6
+.const TRIG_SPEED_175X  = 7
+.const TRIG_SPEED_2X    = 8
+.const TRIG_SPEED_MIN   = TRIG_SPEED_1X
+.const TRIG_SPEED_MAX   = TRIG_SPEED_2X

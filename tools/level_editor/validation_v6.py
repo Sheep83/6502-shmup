@@ -653,6 +653,11 @@ def _validate_triggers(p, r):
             r.error("trigger.colour",
                     f"colour must be 0..{C.MAX_COLOUR}; got {t.resolved_colour}",
                     f"{path}.colour")
+        if t.resolved_speed not in C.SPEED_CHOICES:
+            r.error("trigger.speed",
+                    f"movement speed {t.resolved_speed!r} is not one of "
+                    f"{', '.join(C.SPEED_LABELS[v] for v in C.SPEED_CHOICES)} "
+                    f"(encoded {list(C.SPEED_CHOICES)})", f"{path}.speed")
         if t.resolved_fire_mode not in C.FIRE_MODES:
             r.error("trigger.fire_mode",
                     f"firing mode {t.resolved_fire_mode!r} is not one of "

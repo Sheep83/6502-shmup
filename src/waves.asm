@@ -165,9 +165,36 @@
 // the validator distinguishes it from a runaway by asking whether the flight
 // ends at an edge and whether it was ever on screen, instead of by fencing the
 // coordinates in.
+// ---------------------------------------------------------------------------
+// wmScaleSim — the ASSEMBLER'S copy of src/movement.asm's wmScaleOne.
+//
+// IT MUST AGREE WITH THE 6502 EXACTLY, or the proofs below are proving a path
+// the machine does not fly. So it is written the same way rather than the
+// convenient way: take the magnitude, multiply, shift, put the sign back.
+// floor(v * n / 4) on a negative v would give -8 where this gives -7, and the
+// difference compounds over a nine-hundred-frame flight.
+// ---------------------------------------------------------------------------
+.function wmScaleSim(v, n) {
+    .var mag = floor(abs(v) * n / 4)
+    .return v < 0 ? -mag : mag
+}
+
 .const SIM_FRAME_BUDGET = 900        // frames before a path is called stuck
 .const SIM_ENTER_BUDGET = 240        // frames a pattern may spend off-screen
                                      // before it has to have shown itself
+
+// THE COLUMNS MUST LINE UP BEFORE ANYTHING READS THEM, and this proof moved
+// up here to make that true. The per-definition flight below now indexes
+// trigSpeed and trigDef to discover which speeds a path must be flown at, so
+// a short column reached it first and KickAssembler reported "Index out of
+// bound" from inside a loop rather than this sentence.
+.if (trigRow.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS
+     || trigSpecies.size() != WAVE_TRIGGERS || trigFire.size() != WAVE_TRIGGERS
+     || trigSide.size() != WAVE_TRIGGERS || trigColour.size() != WAVE_TRIGGERS
+     || trigFireMode.size() != WAVE_TRIGGERS
+     || trigSpeed.size() != WAVE_TRIGGERS) {
+    .error "the trigger list is not WAVE_TRIGGERS entries on every axis"
+}
 
 .for (var d = 0; d < WAVE_DEFS; d++) {
     .var def = waveDefs.get(d)
@@ -206,6 +233,69 @@
                 .error "a straight or hold leg moves in X fast enough to step over the left clearance window and wrap"
             }
         }
+    }
+
+    // ---- AT EVERY SPEED ANY TRIGGER ACTUALLY ASKS FOR ---------------------
+    // FLYING THE PATH ONCE AT 1x WOULD NO LONGER PROVE ANYTHING. A trigger may
+    // walk this definition at up to TRIG_SPEED_MAX, and every one of the four
+    // properties below -- it leaves, it arrives, it never wraps, it is not
+    // born on screen -- is a function of the speed it is walked at. A faster
+    // path reaches an edge sooner (fine), but it also takes BIGGER STEPS, and a
+    // big enough step can jump clean over the left clearance window: px goes
+    // from 5 to -2 in one frame, logXHi borrows to $ff, and the sprite
+    // reappears 256 pixels to the right. The `wrapped` test below is what
+    // catches that, and it only catches it if the simulation is running at the
+    // speed the runtime will.
+    //
+    // THIS ALSO CLOSES THE ARC GAP. The static per-record check further up
+    // guards STRAIGHT and HOLD legs only -- an arc has no authored velocity to
+    // check -- so before this loop existed nothing bounded a scaled arc at all.
+    // Flying the arc at each speed bounds it by simulating it.
+    //
+    // A DEFINITION NO TRIGGER USES is still flown, at the default: unused
+    // authored content should not silently stop being checked.
+    .var speeds = List()
+    .for (var t = 0; t < WAVE_TRIGGERS; t++) {
+        .if (trigDef.get(t) == d) {
+            .var already = false
+            .for (var i = 0; i < speeds.size(); i++) {
+                .if (speeds.get(i) == trigSpeed.get(t)) { .eval already = true }
+            }
+            .if (!already) { .eval speeds.add(trigSpeed.get(t)) }
+        }
+    }
+    .if (speeds.size() == 0) { .eval speeds.add(TRIG_SPEED_1X) }
+
+    .for (var si = 0; si < speeds.size(); si++) {
+    .var speed = speeds.get(si)
+
+    // ---- THE WRAP GUARD, AT THIS SPEED, BEFORE FLYING ANYTHING -----------
+    // A STATIC BOUND BEATS A SIMULATED ONE HERE, because whether a too-fast
+    // leg actually lands on a negative X depends on where it happened to
+    // start: stepping 8 pixels left from px=8 lands on 0 and is freed
+    // correctly, from px=7 it lands on -1 and wraps. The simulation below
+    // only catches the members whose alignment happens to expose it.
+    //
+    // THE RULE IS THE WINDOW WIDTH. ENEMY_CLEAR_X_LEFT is 4 pixels, and the
+    // despawn test runs once a frame, so a step of at most 4 pixels can never
+    // jump the window: from any px >= 4 it lands at >= 0, and anything landing
+    // inside 0..3 while travelling left is freed. Hold every SCALED velocity
+    // to that and no alignment can wrap, whatever the path does.
+    //
+    // AND THIS IS WHERE ARCS FINALLY GET CHECKED. The per-record test further
+    // up guards STRAIGHT and HOLD only -- an arc has no authored velocity to
+    // look at -- so until speed existed nothing bounded an arc at all. It did
+    // not need to while every arc was WM_ARC_SPEED; it does now.
+    .for (var s = 0; s < prog.size(); s++) {
+        .var rec = prog.get(s)
+        .if (rec.get(0) == WM_STRAIGHT || rec.get(0) == WM_HOLD) {
+            .if (abs(wmScaleSim(rec.get(2), speed)) > ENEMY_CLEAR_X_LEFT * 4) {
+                .error "a straight or hold leg, at a speed some trigger asks for, moves in X fast enough to step over the left clearance window and wrap"
+            }
+        }
+    }
+    .if (wmScaleSim(WM_ARC_SPEED, speed) > ENEMY_CLEAR_X_LEFT * 4) {
+        .error "an arc, at a speed some trigger asks for, moves in X fast enough to step over the left clearance window and wrap"
     }
 
     // ---- fly every member -------------------------------------------------
@@ -251,14 +341,14 @@
             // everything else has an authored length.
             .var outer = rec.get(0) == WM_EXIT ? SIM_FRAME_BUDGET : (isArc ? rec.get(1) : 1)
             .if (!isArc && rec.get(0) != WM_EXIT) {
-                .eval vx = rec.get(2)
-                .eval vy = rec.get(3)
+                .eval vx = wmScaleSim(rec.get(2), speed)
+                .eval vy = wmScaleSim(rec.get(3), speed)
             }
             .for (var k = 0; k < outer && !freed && frames <= SIM_FRAME_BUDGET; k++) {
                 .if (isArc) {
                     .eval head = mod(head + (rec.get(0) == WM_ARC ? 1 : WM_HEAD_LEN - 1), WM_HEAD_LEN)
-                    .eval vx = headVX.get(head)
-                    .eval vy = headVY.get(head)
+                    .eval vx = wmScaleSim(headVX.get(head), speed)
+                    .eval vy = wmScaleSim(headVY.get(head), speed)
                 }
                 .var inner = isArc ? rec.get(2) : (rec.get(0) == WM_EXIT ? 1 : rec.get(1))
                 .for (var f = 0; f < inner && !freed; f++) {
@@ -304,15 +394,10 @@
             .error "a pattern spends longer than SIM_ENTER_BUDGET frames off-screen before entering view"
         }
     }
+    }
 }
 
 
-.if (trigRow.size() != WAVE_TRIGGERS || trigDef.size() != WAVE_TRIGGERS
-     || trigSpecies.size() != WAVE_TRIGGERS || trigFire.size() != WAVE_TRIGGERS
-     || trigSide.size() != WAVE_TRIGGERS || trigColour.size() != WAVE_TRIGGERS
-     || trigFireMode.size() != WAVE_TRIGGERS) {
-    .error "the trigger list is not WAVE_TRIGGERS entries on every axis"
-}
 // THE CURSOR ONLY EVER WALKS FORWARD, so the rows must not go backwards. A
 // trigger authored before the one in front of it could never become due -- the
 // director would already have passed it by the time the cursor arrived -- and
@@ -383,6 +468,13 @@
     // Harmless, but it means the author believes something untrue.
     .if (trigFireMode.get(t) != TRIG_FIRE_DOWN && trigFire.get(t) == 0) {
         .error "a trigger sets a firing mode but its fire mask sends no shooters"
+    }
+    // A SPEED OUTSIDE THE AUTHORED RANGE would either stand the wave still
+    // (below 1x, which this pass does not offer) or overflow the byte
+    // wmScaleOne accumulates in. Both are refused here rather than discovered
+    // in play.
+    .if (trigSpeed.get(t) < TRIG_SPEED_MIN || trigSpeed.get(t) > TRIG_SPEED_MAX) {
+        .error "a trigger names a movement speed outside TRIG_SPEED_MIN..TRIG_SPEED_MAX"
     }
 }
 // ===========================================================================
@@ -455,6 +547,11 @@ wvColour:  .fill WAVE_SLOTS, 0      // THIS APPEARANCE'S colour byte, latched
                                     // INSTANCE, which is what lets two triggers
                                     // playing the SAME definition arrive in
                                     // different colours.
+wvSpeed:   .fill WAVE_SLOTS, 0      // HOW FAST this appearance crosses the
+                                    // playfield, latched from the trigger with
+                                    // everything else below and for the same
+                                    // reason. A numerator over four; see
+                                    // TRIG_SPEED_1X in src/encounter_format.asm.
 wvFireMode: .fill WAVE_SLOTS, 0     // HOW this appearance aims, latched from
                                     // the trigger with the fire mask below and
                                     // for the same reason. TRIG_FIRE_DOWN or
@@ -852,6 +949,11 @@ waveStartNext:
                                         // latched anyway: one unconditional
                                         // copy beats a branch that has to know
                                         // what a species is
+    lda waveTrigSpeed,y                 // ...and how fast it crosses, which is
+    sta wvSpeed,x                       // an encounter decision exactly like
+                                        // the two below: one reusable path,
+                                        // walked at whatever pace this
+                                        // occurrence asked for
     lda waveTrigFireMode,y              // ...and how THIS appearance aims, which
     sta wvFireMode,x                    // is an encounter decision exactly like
                                         // the mask above it: the same formation
@@ -1325,7 +1427,23 @@ waveSpawnMember:
     sta wmAccY,x                        // them again is two bytes for a
                                         // guarantee that does not depend on
                                         // another file's promise
-    jsr wmEnterStage                    // X preserved
+
+    // ---- THE SPEED, ONTO THE OBJECT, BEFORE THE FIRST STAGE IS ENTERED ----
+    // ORDER IS THE WHOLE OF IT. wmEnterStage below writes the first velocity
+    // and scales it by wmSpeed on the way, so the speed has to be here first
+    // or the opening leg of every wave would fly at 1x and only later stages
+    // would obey the trigger.
+    //
+    // COPIED TO THE OBJECT, NOT READ FROM THE INSTANCE LATER. A wave sends its
+    // members over many frames and lives in a slot that is recycled; an enemy
+    // that outlived its wave instance -- or whose slot was reused by another
+    // trigger's wave -- would otherwise start taking its speed from whatever
+    // appearance happened to be running. The enemy owns its pace from spawn to
+    // despawn, exactly as it owns its colour.
+    ldy wvInst
+    lda wvSpeed,y
+    sta wmSpeed,x
+    jsr wmEnterStage                    // X preserved; it reloads Y itself
 
     // ---- ...AND A DROPPER IS THEN TAKEN OFF THAT PATH ---------------------
     // AFTER wmEnterStage, not before, and the order is the whole of it: the
@@ -1465,6 +1583,7 @@ wvScratch:  .byte 0                     // waveDefBase's partial product
 .label waveTrigSide    = LEVELPKG_TRIG + 5 * LEVELPKG_TRIG_SLOTS
 .label waveTrigColour  = LEVELPKG_TRIG + 6 * LEVELPKG_TRIG_SLOTS
 .label waveTrigFireMode = LEVELPKG_TRIG + 7 * LEVELPKG_TRIG_SLOTS
+.label waveTrigSpeed   = LEVELPKG_TRIG + 8 * LEVELPKG_TRIG_SLOTS
 
 .if (WAVE_TRIGGERS > LEVELPKG_TRIG_SLOTS) {
     .error "more authored triggers than the level package reserves room for"

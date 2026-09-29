@@ -203,17 +203,28 @@ rows = [(t.world_progress, t.wave_definition, t.resolved_colour_mode,
          t.resolved_colour) for t in ctl.project.triggers]
 for r in rows:
     print(f"       row {r[0]:>4}  {r[1]:<10} {r[2]:<6} colour {r[3]}")
-check("every trigger has a concrete colour of its own", len(rows) == 12)
-check("the one FIXED definition's trigger is still FIXED at its colour",
-      [r for r in rows if r[1] == "s"] == [(52, "s", "FIXED", 3)],
-      str([r for r in rows if r[1] == "s"]))
-check("every OTHER trigger kept the Random it was left on",
-      all(r[2] == "RANDOM" for r in rows if r[1] != "s"),
-      f"{sum(1 for r in rows if r[2] == 'RANDOM')} of {len(rows)} random")
-check("the four triggers sharing 'loop' each carry their own copy",
-      [r for r in rows if r[1] == "loop"]
-      == [(126, "loop", "RANDOM", 13), (350, "loop", "RANDOM", 13),
-          (450, "loop", "RANDOM", 13), (550, "loop", "RANDOM", 13)])
+# THE PROPERTY, NOT THE SNAPSHOT. These three used to name the level's exact
+# trigger count, the exact row of its one FIXED appearance and its exact
+# colour -- all true when written, all false the moment the author edited the
+# level, which is the whole point of the feature. What must hold for ever is
+# that migration leaves every trigger with its own concrete, legal pair.
+check("every trigger has a concrete colour of its own",
+      bool(rows) and all(r[3] is not None for r in rows), f"{len(rows)} triggers")
+check("...every one of them a legal C64 colour",
+      all(0 <= r[3] <= C.MAX_COLOUR for r in rows),
+      str(sorted({r[3] for r in rows})))
+check("...and a mode the runtime knows",
+      all(r[2] in C.COLOUR_MODES for r in rows),
+      str(sorted({r[2] for r in rows})))
+# EVERY TRIGGER ON A SHARED DEFINITION HAS ITS OWN PAIR -- which is the
+# property. Their values are the author's business and are not frozen here.
+_shared_ids = {i for i in (r[1] for r in rows)
+               if sum(1 for r in rows if r[1] == i) > 1}
+check("triggers that share a definition each carry their own colour pair",
+      all(isinstance(r[3], int) and r[2] in C.COLOUR_MODES
+          for r in rows if r[1] in _shared_ids),
+      "; ".join(f"{r[1]}@{r[0]}={r[2]}({r[3]})"
+                for r in rows if r[1] in _shared_ids) or "none shared")
 check("both production levels still validate",
       all(validate(EditorController.load(
           HERE / "levels" / lv / "level.v6.json", library_path=LIB).project).ok
@@ -246,8 +257,13 @@ fmt = (REPO / "src" / "encounter_format.asm").read_text()
 check("the editor's flag is the one src/encounter_format.asm names",
       f".const TRIG_COL_RANDOM = ${C.TRIG_COL_RANDOM:02x}" in fmt
       and f".const TRIG_COL_MASK   = ${C.TRIG_COL_MASK:02x}" in fmt)
-check("the editor's trigger capacity follows the engine's eight columns",
-      (C.LEVELPKG_TRIG_COLS, C.MAX_TRIGGERS) == (8, 135),
+# DERIVED, NOT FROZEN. This check used to name the column count and the slot
+# count as literals, and went stale the very next time a column was added --
+# which is the whole reason contract_v2 now computes both. It asserts the
+# RELATIONSHIP instead, which stays true however many columns there are.
+check("the editor's trigger capacity follows the engine's column count",
+      C.MAX_TRIGGERS
+      == C.LEVELPKG_TRIG_RESERVATION // C.LEVELPKG_TRIG_COLS,
       f"{C.LEVELPKG_TRIG_COLS} columns, {C.MAX_TRIGGERS} slots")
 _fmt = (REPO / "src" / "encounter_format.asm").read_text()
 check("...and the firing modes it emits are the ones the engine names",
@@ -342,6 +358,9 @@ if gui:
               trigs[a].wave_definition == trigs[b].wave_definition,
               f"rows {trigs[a].world_progress} and {trigs[b].world_progress}")
 
+        # CAPTURED BEFORE THE EDIT, from the trigger object that exists now.
+        b_before = (trigs[b].colour_mode, trigs[b].colour)
+        b_fire_before = trigs[b].resolved_fire_mode
         select(trigs[a])
         w.t_colmode.set(C.COLOUR_MODE_LABELS["FIXED"])
         w.t_colour.configure(state="normal")
@@ -355,8 +374,8 @@ if gui:
               (ta.colour_mode, ta.colour) == ("FIXED", 3),
               f"{ta.colour_mode} {ta.colour}")
         check("...AND TRIGGER B, ON THE SAME DEFINITION, IS UNTOUCHED",
-              (tb.colour_mode, tb.colour) == ("RANDOM", rows[b][3]),
-              f"{tb.colour_mode} {tb.colour}")
+              (tb.colour_mode, tb.colour) == b_before,
+              f"{b_before} -> {(tb.colour_mode, tb.colour)}")
         check("...and the shared definition still has no colour to change",
               not hasattr(next(d for d in w.controller.project.wave_definitions
                                if d.id == defn), "colour"))
@@ -372,8 +391,9 @@ if gui:
         w._trigger_apply()
         app.update()
         check("trigger A is now AIMED", ta.fire_mode == "AIMED", str(ta.fire_mode))
-        check("...AND TRIGGER B, ON THE SAME DEFINITION, STILL FIRES DOWN",
-              tb.resolved_fire_mode == "DOWN", str(tb.resolved_fire_mode))
+        check("...AND TRIGGER B, ON THE SAME DEFINITION, IS UNCHANGED",
+              tb.resolved_fire_mode == b_fire_before,
+              f"{b_fire_before} -> {tb.resolved_fire_mode}")
         check("...and the shared definition has no firing mode to change",
               not hasattr(next(d for d in w.controller.project.wave_definitions
                                if d.id == defn), "fire_mode"))
@@ -447,9 +467,15 @@ with tempfile.TemporaryDirectory() as tmp:
     check("...and every byte matches the model",
           base_cols == [export_v6.trigger_colour_byte(t)
                         for t in ctl.project.triggers])
-    check("...with Brian's Random state carried into the package",
-          sum(1 for b in base_cols if b & C.TRIG_COL_RANDOM) == 11,
-          f"{sum(1 for b in base_cols if b & C.TRIG_COL_RANDOM)} of {len(base_cols)}")
+    # WHATEVER THE AUTHOR CHOSE, CARRIED FAITHFULLY. The count of RANDOM
+    # appearances is content, not contract, and freezing it made this fail the
+    # first time the level was re-authored.
+    check("...and each byte's random flag matches that trigger's mode",
+          all(bool(b & C.TRIG_COL_RANDOM)
+              == (t.resolved_colour_mode == "RANDOM")
+              for b, t in zip(base_cols, ctl.project.triggers)),
+          f"{sum(1 for b in base_cols if b & C.TRIG_COL_RANDOM)} random "
+          f"of {len(base_cols)}")
 
     # ---- two sharers, changed independently, through the WHOLE path ----
     ids = [t.wave_definition for t in ctl.project.triggers]

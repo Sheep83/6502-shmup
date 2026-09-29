@@ -783,7 +783,8 @@ class EditorController:
 
     def add_trigger(self, world_progress=None, wave_definition=None,
                     species=None, fire_mask=None, dropper_side="LEFT",
-                    colour=None, colour_mode=None, fire_mode=None):
+                    colour=None, colour_mode=None, fire_mode=None,
+                    speed=None):
         """Author one moment. Returns its index after sorting."""
         if len(self.project.triggers) >= C.MAX_TRIGGERS:
             raise ControllerError(
@@ -808,7 +809,8 @@ class EditorController:
             # state and not something a freshly authored one should be in.
             colour=C.DEFAULT_TRIGGER_COLOUR if colour is None else int(colour),
             colour_mode="FIXED" if colour_mode is None else str(colour_mode),
-            fire_mode="DOWN" if fire_mode is None else str(fire_mode))
+            fire_mode="DOWN" if fire_mode is None else str(fire_mode),
+            speed=C.TRIG_SPEED_1X if speed is None else int(speed))
         self.project.triggers.append(t)
         self.sort_triggers()
         return self.trigger_index_of(t)
@@ -848,6 +850,10 @@ class EditorController:
         # cannot reach another trigger playing the same wave definition.
         if "fire_mode" in fields:
             t.fire_mode = str(fields["fire_mode"])
+        # HOW FAST THIS APPEARANCE MOVES is this trigger's too, so setting it
+        # cannot reach another trigger playing the same wave definition.
+        if "speed" in fields:
+            t.speed = int(fields["speed"])
         self.sort_triggers()
         return self.trigger_index_of(t)
 
@@ -868,7 +874,8 @@ class EditorController:
             dropper_side=src.dropper_side,
             colour=src.resolved_colour,
             colour_mode=src.resolved_colour_mode,
-            fire_mode=src.resolved_fire_mode)
+            fire_mode=src.resolved_fire_mode,
+            speed=src.resolved_speed)
 
     def trigger_members(self, index):
         """How many members the trigger's wave actually sends, or 0 if dangling."""

@@ -115,38 +115,45 @@
 // A trigger names one row; once consumed it never becomes due again. The
 // rows must be NON-DECREASING because the director's cursor only ever
 // walks forward, and every row must be below STAGE_NO_SPAWN_ROW.
-.var trigRow      = List().add(20, 52, 90, 126, 160, 205, 260, 310, 350, 450, 550, 665)
+.var trigRow      = List().add(40, 90, 140, 200, 240)
 
 // Which definition each appearance plays.
-.var trigDef      = List().add(WAVE_DEF_SWEEP, WAVE_DEF_S, WAVE_DEF_LINGER, WAVE_DEF_LOOP, WAVE_DEF_LOOP_5, WAVE_DEF_DIVE_4, WAVE_DEF_UP_N_OVER, WAVE_DEF_DIVE_4, WAVE_DEF_LOOP, WAVE_DEF_LOOP, WAVE_DEF_LOOP, WAVE_DEF_UP_N_OVER)
+.var trigDef      = List().add(WAVE_DEF_UP_N_OVER, WAVE_DEF_LOOP, WAVE_DEF_LOOP, WAVE_DEF_DIVE_4, WAVE_DEF_S)
 
 // WHICH ENEMY THE WAVE IS MADE OF -- an authored column rather than
 // arithmetic on the cursor, so inserting a trigger cannot silently invert
 // every wave after it.
-.var trigSpecies  = List().add(SPECIES_RING, SPECIES_DROPPER, SPECIES_SQUARE, SPECIES_DROPPER, SPECIES_RING, SPECIES_SQUARE, SPECIES_RING, SPECIES_SQUARE, SPECIES_DROPPER, SPECIES_DROPPER, SPECIES_DROPPER, SPECIES_RING)
+.var trigSpecies  = List().add(SPECIES_DROPPER, SPECIES_RING, SPECIES_SQUARE, SPECIES_RING, SPECIES_DROPPER)
 
 // WHICH SIDE A DROPPER FLIES IN FROM. Read only when the species above is
 // SPECIES_DROPPER; a Ring wave carries whatever is written here and
 // ignores it.
-.var trigSide     = List().add(DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_RIGHT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT)
+.var trigSide     = List().add(DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT)
 
 // WHICH MEMBERS OF THIS APPEARANCE MAY SHOOT -- a bitmask over MEMBER
 // INDEX, bit 0 the first member sent, and zero for a formation that does
 // not shoot at all.
-.var trigFire     = List().add(%00000101, %00000010, %00000101, %00000000, %00000101, %00001111, %00110111, %00001111, %00000000, %00000000, %00000000, %00110111)
+.var trigFire     = List().add(%00111111, %00000111, %00000111, %00001111, %00000111)
 
 // HOW THIS APPEARANCE IS COLOURED -- bits 0-3 the C64 colour every
 // member wears, bit 4 (TRIG_COL_RANDOM) set if each enemy instead picks
 // its own eligible colour once, at spawn. On the TRIGGER and not on the
 // definition, so the same reusable formation can arrive in a different
 // colour at every row it is used.
-.var trigColour   = List().add(TRIG_COL_RANDOM + 10, 3, TRIG_COL_RANDOM + 7, TRIG_COL_RANDOM + 13, TRIG_COL_RANDOM + 13, TRIG_COL_RANDOM + 1, TRIG_COL_RANDOM + 1, TRIG_COL_RANDOM + 1, TRIG_COL_RANDOM + 13, TRIG_COL_RANDOM + 13, TRIG_COL_RANDOM + 13, TRIG_COL_RANDOM + 1)
+.var trigColour   = List().add(1, TRIG_COL_RANDOM + 1, 1, 1, 1)
 
 // HOW THIS APPEARANCE ATTACKS -- TRIG_FIRE_DOWN or TRIG_FIRE_AIMED.
 // On the TRIGGER and not on the definition, so the same reusable
 // formation can arrive silent at one row and aimed at another. Read
 // only for the members trigFire admits, and only for a species that
 // can shoot at all.
-.var trigFireMode = List().add(TRIG_FIRE_AIMED, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN, TRIG_FIRE_DOWN)
+.var trigFireMode = List().add(TRIG_FIRE_AIMED, TRIG_FIRE_AIMED, TRIG_FIRE_AIMED, TRIG_FIRE_AIMED, TRIG_FIRE_AIMED)
 
-.const WAVE_TRIGGERS          = 12
+// HOW FAST THIS APPEARANCE CROSSES THE PLAYFIELD -- a numerator over
+// four, TRIG_SPEED_1X being a bit-exact no-op. On the TRIGGER and not
+// on the definition, so one reusable path can be walked at several
+// paces. src/waves.asm flies every definition at every speed a trigger
+// here actually asks for.
+.var trigSpeed    = List().add(TRIG_SPEED_1X, TRIG_SPEED_150X, TRIG_SPEED_2X, TRIG_SPEED_125X, TRIG_SPEED_125X)
+
+.const WAVE_TRIGGERS          = 5

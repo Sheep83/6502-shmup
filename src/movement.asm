@@ -58,6 +58,10 @@
 // needs it too and the two builds share no labels. See src/movement_format.asm
 // for the primitives, the four-byte stage record and the heading geometry.
 #import "movement_format.asm"
+// TRIG_SPEED_*: the trigger-owned multiplier this file applies. It reaches
+// here rather than being re-declared, so the editor, the package and the
+// interpreter cannot disagree about what a 6 means.
+#import "encounter_format.asm"
 
 .var headVX = List()
 .var headVY = List()
@@ -139,6 +143,17 @@ wmVY:      .fill MAX_OBJECTS, 0     // signed, QUARTER pixels per frame
 wmAccX:    .fill MAX_OBJECTS, 0     // sub-pixel remainder, 0..3
 wmAccY:    .fill MAX_OBJECTS, 0     // sub-pixel remainder, 0..3
 wmBaseCol: .fill MAX_OBJECTS, 0     // the colour a hit flash returns to
+wmSpeed:   .fill MAX_OBJECTS, 0     // THIS OBJECT'S movement multiplier, a
+                                    // numerator over four -- see TRIG_SPEED_1X
+                                    // in src/encounter_format.asm. Copied from
+                                    // the wave instance at spawn, so it lives
+                                    // as long as the enemy does and does not
+                                    // follow the trigger cursor.
+
+// Locals for wmScaleOne. Not per-object: the routine runs to completion inside
+// one call, exactly like wvScratch in src/waves.asm.
+wmSgn:     .byte 0                  // the sign of the value being scaled
+wmMag:     .byte 0                  // ...and its magnitude
 
 movementStateEnd:
 .if (movementStateEnd > $77c0) {
@@ -166,6 +181,15 @@ wmClearSlot:
     sta wmVY,x
     sta wmAccX,x
     sta wmAccY,x
+    // THE SPEED CLEARS TO 1x, NOT TO ZERO, and it is the one field here that
+    // does. Zero is the harmless value for every other movement field; a zero
+    // SPEED would be a multiplier of nothing, so a slot ticked before its wave
+    // configured it would stand still instead of simply not moving yet. The
+    // scaler below also refuses anything under 1x, but a slot should never be
+    // in that state to begin with.
+    lda #TRIG_SPEED_1X
+    sta wmSpeed,x
+    lda #0
     sta wmBaseCol,x
     rts
 
@@ -309,8 +333,84 @@ wmArcStep:
     jmp wmEnterNext
 
 // ---------------------------------------------------------------------------
-// wmLoadHeading — velocity <- the heading table at this object's heading.
-// X = slot, preserved.
+// wmApplySpeed — scale this object's velocity by its trigger's multiplier.
+// X = slot, preserved. A and Y clobbered.
+//
+// CALLED WHERE VELOCITY IS WRITTEN, WHICH IS TWICE IN THE WHOLE ENGINE: here
+// (arcs, via wmLoadHeading) and in wmEnterStage's STRAIGHT/HOLD branch. Both
+// are COLD -- a handful of executions across an object's life, and for an arc
+// once every framesPerStep rather than once a frame. Nothing is multiplied on
+// the per-frame path: wmApplyVelocity still adds a byte and shifts.
+//
+// WM_EXIT IS COVERED BY DOING NOTHING. It deliberately does not rewrite the
+// velocity, so it inherits whatever was last scaled -- which is exactly what
+// "continue in the final direction, at this trigger's speed" means.
+//
+// 1x COSTS FOUR CYCLES. The overwhelmingly common case is the default, and it
+// leaves both bytes untouched rather than multiplying by four and shifting
+// back -- which is also why the default is bit-exact rather than merely close.
+// ---------------------------------------------------------------------------
+wmApplySpeed:
+    lda wmSpeed,x
+    cmp #TRIG_SPEED_1X + 1
+    bcc !done+                          // 1x, or a slot that never got one
+    lda wmVX,x
+    jsr wmScaleOne
+    sta wmVX,x
+    lda wmVY,x
+    jsr wmScaleOne
+    sta wmVY,x
+!done:
+    rts
+
+// ---------------------------------------------------------------------------
+// wmScaleOne — A = (|A| * wmSpeed[X]) >> 2, with A's sign put back.
+// X = slot, preserved. Y clobbered.
+//
+// SIGN-MAGNITUDE, AND THAT IS THE POINT. Truncating the magnitude and
+// re-applying the sign gives +5 -> +7 and -5 -> -7; an arithmetic shift of the
+// signed product would give -8, and an ARC would then trace a different curve
+// from its own ARC_MIRROR. Symmetry is worth the two branches.
+//
+// IT CANNOT OVERFLOW. |v| is bounded by MAX_ABS_VX for a straight leg (the
+// assembler refuses more) and by WM_ARC_SPEED for an arc, and the multiplier
+// by TRIG_SPEED_MAX; the guard below pins that product inside a byte.
+// ---------------------------------------------------------------------------
+// The same bound src/waves.asm enforces on an authored leg, times the fastest
+// multiplier: 16 * 8 = 128, comfortably inside the byte the loop accumulates
+// in. Arcs are smaller still -- WM_ARC_SPEED is 6.
+.if ((ENEMY_CLEAR_X_LEFT * 4) * TRIG_SPEED_MAX > 255
+     || WM_ARC_SPEED * TRIG_SPEED_MAX > 255) {
+    .error "a scaled velocity could overflow the byte wmScaleOne accumulates in"
+}
+wmScaleOne:
+    sta wmSgn                           // N is set from the value itself
+    bpl !mag+
+    eor #$ff
+    clc
+    adc #1                              // |v|
+!mag:
+    sta wmMag
+    lda #0
+    ldy wmSpeed,x                       // 5..8: the loop is bounded by the
+!mul:                                   // assembler's own range check
+    clc
+    adc wmMag
+    dey
+    bne !mul-
+    lsr                                 // >> TRIG_SPEED_SHIFT
+    lsr
+    ldy wmSgn                           // LDY sets N from the original sign
+    bpl !done+
+    eor #$ff
+    clc
+    adc #1
+!done:
+    rts
+
+// ---------------------------------------------------------------------------
+// wmLoadHeading — velocity <- the heading table at this object's heading,
+// scaled by this object's speed. X = slot, preserved.
 //
 // No mirroring or negation: the table already contains every direction, so
 // WM_ARC_MIRROR differs from WM_ARC in which way it STEPS and nothing else.
@@ -321,7 +421,7 @@ wmLoadHeading:
     sta wmVX,x
     lda wmHeadVY,y
     sta wmVY,x
-    rts
+    jmp wmApplySpeed                    // its rts is ours; X preserved
 
 // ---------------------------------------------------------------------------
 // wmEnterNext — this stage is finished; take up the next record. X = slot.
@@ -365,7 +465,7 @@ wmEnterStage:
     sta wmVX,x
     lda waveStageTable + 3,y
     sta wmVY,x
-    rts
+    jmp wmApplySpeed                    // its rts is ours; X preserved
 
 !arc:
     // Take the heading's velocity IMMEDIATELY rather than after one step, so

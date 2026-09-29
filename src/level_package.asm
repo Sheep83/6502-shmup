@@ -233,7 +233,7 @@ levelDefsEnd2:
 // ---------------------------------------------------------------------------
 // THE ABSOLUTE TRIGGER LIST, above the definitions.
 //
-// SEVEN PARALLEL COLUMNS, each LEVELPKG_TRIG_SLOTS bytes long whatever this level
+// NINE PARALLEL COLUMNS, each LEVELPKG_TRIG_SLOTS bytes long whatever this level
 // authors, because the engine addresses them as fixed bases: a column that
 // shrank with the trigger count would move every column above it and the
 // engine's labels would point at the wrong data. The unused tail of each column
@@ -271,6 +271,13 @@ levelTrigStart:
 // members trigFire admits and only for a species that can shoot at all.
 .for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
     .byte t < WAVE_TRIGGERS ? trigFireMode.get(t) : 0
+}
+// ...AND HOW FAST: a numerator over four, TRIG_SPEED_1X being a no-op.
+// THE PADDING IS TRIG_SPEED_1X, NOT ZERO. Every other column pads with zero
+// because zero is that column's harmless value; a zero SPEED is not harmless,
+// so the unused tail carries the default instead.
+.for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
+    .byte t < WAVE_TRIGGERS ? trigSpeed.get(t) : TRIG_SPEED_1X
 }
 levelTrigEnd:
 

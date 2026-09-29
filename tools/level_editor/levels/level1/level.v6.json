@@ -3988,70 +3988,57 @@
   ],
   "triggers": [
     {
-      "worldProgress": 20,
-      "waveDefinition": "sweep",
-      "species": "RING_3",
-      "fireMask": [
-        0,
-        2
-      ],
-      "dropperSide": "LEFT",
-      "colour": 10,
-      "colourMode": "RANDOM",
-      "fireMode": "AIMED"
-    },
-    {
-      "worldProgress": 52,
-      "waveDefinition": "s",
+      "worldProgress": 40,
+      "waveDefinition": "up_n_over",
       "species": "DROPPER",
       "fireMask": [
-        1
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "dropperSide": "LEFT",
-      "colour": 3,
+      "colour": 1,
       "colourMode": "FIXED",
-      "fireMode": "DOWN"
+      "fireMode": "AIMED",
+      "speed": 4
     },
     {
       "worldProgress": 90,
-      "waveDefinition": "linger",
-      "species": "SPACE_WHISK",
-      "fireMask": [
-        0,
-        2
-      ],
-      "dropperSide": "LEFT",
-      "colour": 7,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN"
-    },
-    {
-      "worldProgress": 126,
       "waveDefinition": "loop",
-      "species": "DROPPER",
-      "fireMask": [],
-      "dropperSide": "RIGHT",
-      "colour": 13,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN"
-    },
-    {
-      "worldProgress": 160,
-      "waveDefinition": "loop_5",
       "species": "RING_3",
       "fireMask": [
         0,
+        1,
         2
       ],
       "dropperSide": "LEFT",
-      "colour": 13,
+      "colour": 1,
       "colourMode": "RANDOM",
-      "fireMode": "DOWN"
+      "fireMode": "AIMED",
+      "speed": 6
     },
     {
-      "worldProgress": 205,
-      "waveDefinition": "dive_4",
+      "worldProgress": 140,
+      "waveDefinition": "loop",
       "species": "SPACE_WHISK",
+      "fireMask": [
+        0,
+        1,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 8
+    },
+    {
+      "worldProgress": 200,
+      "waveDefinition": "dive_4",
+      "species": "RING_3",
       "fireMask": [
         0,
         1,
@@ -4060,85 +4047,24 @@
       ],
       "dropperSide": "LEFT",
       "colour": 1,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN"
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 5
     },
     {
-      "worldProgress": 260,
-      "waveDefinition": "up_n_over",
-      "species": "RING_3",
+      "worldProgress": 240,
+      "waveDefinition": "s",
+      "species": "DROPPER",
       "fireMask": [
         0,
         1,
-        2,
-        4,
-        5
+        2
       ],
       "dropperSide": "LEFT",
       "colour": 1,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN"
-    },
-    {
-      "worldProgress": 310,
-      "waveDefinition": "dive_4",
-      "species": "SPACE_WHISK",
-      "fireMask": [
-        0,
-        1,
-        2,
-        3
-      ],
-      "dropperSide": "LEFT",
-      "colour": 1,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN"
-    },
-    {
-      "worldProgress": 350,
-      "waveDefinition": "loop",
-      "species": "DROPPER",
-      "fireMask": [],
-      "dropperSide": "LEFT",
-      "colour": 13,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN"
-    },
-    {
-      "worldProgress": 450,
-      "waveDefinition": "loop",
-      "species": "DROPPER",
-      "fireMask": [],
-      "dropperSide": "LEFT",
-      "colour": 13,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN"
-    },
-    {
-      "worldProgress": 550,
-      "waveDefinition": "loop",
-      "species": "DROPPER",
-      "fireMask": [],
-      "dropperSide": "LEFT",
-      "colour": 13,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN"
-    },
-    {
-      "worldProgress": 665,
-      "waveDefinition": "up_n_over",
-      "species": "RING_3",
-      "fireMask": [
-        0,
-        1,
-        2,
-        4,
-        5
-      ],
-      "dropperSide": "LEFT",
-      "colour": 1,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN"
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 5
     }
   ],
   "levelMetatileSet": [

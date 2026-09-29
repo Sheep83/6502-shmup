@@ -23,6 +23,7 @@ leave, and it is drawn dimmed rather than cropped.
 import tkinter as tk
 from tkinter import ttk
 
+import contract_v2 as C
 import movement_semantic as sem
 import movement_sim as ms
 
@@ -283,7 +284,24 @@ class PreviewPanel(ttk.LabelFrame):
                 t = proj.triggers[ref]
                 wave = next((w for w in proj.wave_definitions
                              if w.id == t.wave_definition), None)
-                key = (t.species, t.wave_definition)
+                # THE TRIGGER'S MOVEMENT SPEED IS PART OF THE SIGNATURE, for
+                # exactly the reason the preview heading below is. The wave
+                # definition's own dict is in the signature and the trigger's
+                # is NOT, so every trigger field the simulation reads has to be
+                # named here -- and speed is one, because simulate_trigger
+                # passes it to simulate_wave.
+                #
+                # WITHOUT IT THE SCALING WORKS AND THE SCREEN DOES NOT. Nothing
+                # else in this tuple moves when the author changes speed, so
+                # the signature compares equal, _rebuild() never runs, and the
+                # previously flown path stays on the canvas -- a correct
+                # simulation that is simply never asked for again.
+                #
+                # Colour and firing mode are deliberately absent: they are
+                # trigger fields too, but they do not change the trajectory,
+                # and putting them here would re-fly a 300-frame wave every
+                # time somebody picked a different shade.
+                key = (t.species, t.wave_definition, t.resolved_speed)
             elif kind == "wave":
                 wave = next((w for w in proj.wave_definitions if w.id == ref),
                             None)
@@ -362,7 +380,8 @@ class PreviewPanel(ttk.LabelFrame):
                     f"trigger at worldProgress {t.world_progress} → wave "
                     f"{self.sim.wave_id!r} → program "
                     f"{self.sim.program_id!r}   ({self.sim.count} members, "
-                    f"{self.sim.interval}-frame interval)")
+                    f"{self.sim.interval}-frame interval, "
+                    f"{C.SPEED_LABELS.get(t.resolved_speed, '?')} movement)")
             elif kind == "wave":
                 wave = ms.wave_by_id(proj, ref)
                 _p = ms.resolve_program(proj, wave)

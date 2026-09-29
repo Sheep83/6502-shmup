@@ -417,6 +417,23 @@ def trigger_fire_mode_expr(t):
     return f"TRIG_FIRE_{t.resolved_fire_mode}"
 
 
+def trigger_speed_byte(t):
+    """The trigger's movement speed: a numerator over four.
+
+    A column of its own, like the colour and the firing mode beside it. There
+    was no spare bit to borrow -- trigFire is a full eight-bit mask, and
+    trigSpeed's own range needs four values of headroom for the five choices.
+    """
+    return t.resolved_speed
+
+
+def trigger_speed_expr(t):
+    """...as the generated source spells it, symbolically where it can."""
+    named = {C.TRIG_SPEED_1X: "TRIG_SPEED_1X", 5: "TRIG_SPEED_125X",
+             6: "TRIG_SPEED_150X", 7: "TRIG_SPEED_175X", 8: "TRIG_SPEED_2X"}
+    return named.get(t.resolved_speed, str(t.resolved_speed))
+
+
 def trigger_colour_expr(t):
     """...as the generated source spells it, symbolically where it matters."""
     colour = t.resolved_colour & C.MAX_COLOUR
@@ -654,6 +671,13 @@ def render_wave_encounters(project, level_name):
         "// only for the members trigFire admits, and only for a species that",
         "// can shoot at all.",
         _list_decl("trigFireMode", [trigger_fire_mode_expr(t) for t in trigs]),
+        "",
+        "// HOW FAST THIS APPEARANCE CROSSES THE PLAYFIELD -- a numerator over",
+        "// four, TRIG_SPEED_1X being a bit-exact no-op. On the TRIGGER and not",
+        "// on the definition, so one reusable path can be walked at several",
+        "// paces. src/waves.asm flies every definition at every speed a trigger",
+        "// here actually asks for.",
+        _list_decl("trigSpeed", [trigger_speed_expr(t) for t in trigs]),
         "",
         f".const {'WAVE_TRIGGERS':<22} = {len(trigs)}",
     ]

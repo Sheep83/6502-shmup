@@ -293,6 +293,19 @@ class Trigger:
     # authored yet", exactly as above.
     fire_mode: str = None
 
+    # ---- ...and how fast it crosses the playfield ------------------------
+    # OWNED HERE TOO. A wave definition is the SHAPE of a path; the pace it is
+    # walked at is this occurrence's business, so one `sweep` can be a lazy
+    # pass at one row and an attack run at another. A numerator over four; see
+    # contract_v2.SPEED_CHOICES. None means "not authored yet", exactly as
+    # above -- and unlike colour there is nothing on the definition to inherit
+    # from, so it resolves to 1.00x.
+    speed: int = None
+
+    @property
+    def resolved_speed(self):
+        return C.TRIG_SPEED_1X if self.speed is None else self.speed
+
     @property
     def resolved_colour(self):
         return C.DEFAULT_TRIGGER_COLOUR if self.colour is None else self.colour
@@ -324,7 +337,8 @@ class Trigger:
                 "dropperSide": self.dropper_side,
                 "colour": self.resolved_colour,
                 "colourMode": self.resolved_colour_mode,
-                "fireMode": self.resolved_fire_mode}
+                "fireMode": self.resolved_fire_mode,
+                "speed": self.resolved_speed}
 
     @staticmethod
     def from_dict(raw, path, slots=None):
@@ -344,6 +358,11 @@ class Trigger:
             colour_mode=(str(raw["colourMode"])
                          if "colourMode" in raw else None),
             fire_mode=(str(raw["fireMode"]) if "fireMode" in raw else None),
+            # ABSENT MEANS 1.00x. A project written before movement speed
+            # existed moved at exactly one pace, and opening it must not
+            # change that.
+            speed=(_int_or_zero(raw["speed"], C.TRIG_SPEED_1X)
+                   if "speed" in raw else None),
         )
 
 
@@ -382,6 +401,12 @@ def resolve_trigger_encounter_fields(project):
         return []
     done = []
     for t in project.triggers:
+        if t.speed is None:
+            # NOTHING TO INHERIT. Colour and firing came off the definition, so
+            # they need its legacy fields; speed never lived there, so the
+            # answer is simply the default and does not depend on the
+            # vocabulary being present.
+            t.speed = C.TRIG_SPEED_1X
         if (t.colour is not None and t.colour_mode is not None
                 and t.fire_mode is not None):
             continue

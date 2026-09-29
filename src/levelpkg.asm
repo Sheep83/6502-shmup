@@ -167,18 +167,19 @@
 .const LEVELPKG_WAVEDEF_MAX = LEVELPKG_WAVEDEF_SLOTS * 10           // 260
 
 // --- the absolute trigger list, above the definitions -----------------------
-// EIGHT PARALLEL COLUMNS, not interleaved records: rowLo, rowHi, def, species,
-// fire, side, colour, fireMode. The director indexes every one of them with the
+// NINE PARALLEL COLUMNS, not interleaved records: rowLo, rowHi, def, species,
+// fire, side, colour, fireMode, speed. The director indexes every one of them with the
 // SAME cursor (`lda waveTrigDef,y` and so on), so parallel columns cost one
 // `absolute,y` per field and nothing else. An interleaved record would need the
-// cursor multiplied by eight on every read -- strictly more work for the same
+// cursor multiplied by nine on every read -- strictly more work for the same
 // data.
 //
-// THE LAST TWO COLUMNS ARE THE OCCURRENCE'S PRESENTATION AND ATTACK, and both
-// cost capacity rather than cleverness. Enemy colour and the firing mode used
-// to be packed into the wave DEFINITION's one spare byte, which made every
-// occurrence of a reusable formation identically coloured and identically
-// armed; both belong to the encounter.
+// THE LAST THREE COLUMNS ARE THE OCCURRENCE'S PRESENTATION, ATTACK AND SPEED,
+// and all three cost capacity rather than cleverness. Colour and firing mode
+// used to be packed into the wave DEFINITION's one spare byte, and the speed
+// was not expressible at all -- every occurrence of a reusable formation was
+// identically coloured, identically armed and identically paced. All three
+// belong to the encounter.
 //
 // NEITHER COULD BORROW A BIT FROM AN EXISTING COLUMN, and that was checked
 // rather than assumed. trigFire is a full eight-bit mask over member index --
@@ -189,16 +190,18 @@
 // in either is the kind of overload that is only ever found later and painfully.
 //
 // WHAT IT COST: the slot count below is DERIVED from the column count and the
-// space available, so eight columns take the ceiling from 180 authored triggers
-// to 135. Level 1 uses twelve and level 2 uses seven; the ceiling has never been
-// within an order of magnitude of the content.
+// space available -- it is never written down as a literal, here or in the
+// editor or in a test, precisely because it has moved every time a column was
+// added. Nine columns give 120 authored triggers. Level 1 uses twelve and
+// level 2 uses seven; the ceiling has never been within an order of magnitude
+// of the content.
 //
-// Each column is one byte per trigger, so the whole list is eight bytes a
+// Each column is one byte per trigger, so the whole list is nine bytes a
 // trigger and the cursor is a byte: 255 triggers is the addressing ceiling.
 .const LEVELPKG_TRIG        = LEVELPKG_WAVEDEF + LEVELPKG_WAVEDEF_MAX   // $f736
-.const LEVELPKG_TRIG_COLS   = 8
+.const LEVELPKG_TRIG_COLS   = 9
 .const LEVELPKG_TRIG_MAX    = LEVELPKG_ENC_MAX - LEVELPKG_STAGE_MAX - LEVELPKG_MOVE_MAX - LEVELPKG_WAVEDEF_MAX
-.const LEVELPKG_TRIG_SLOTS  = floor(LEVELPKG_TRIG_MAX / LEVELPKG_TRIG_COLS)   // 180
+.const LEVELPKG_TRIG_SLOTS  = floor(LEVELPKG_TRIG_MAX / LEVELPKG_TRIG_COLS)
 
 // --- the signature ----------------------------------------------------------
 // FOUR BYTES AT THE VERY TOP OF THE REGION, so that "did the package actually

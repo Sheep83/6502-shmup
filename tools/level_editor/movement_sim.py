@@ -196,17 +196,36 @@ class _Obj:
     """
 
     __slots__ = ("mode", "stage", "phase", "timer", "steps", "vx", "vy",
-                 "acc_x", "acc_y", "log_x", "log_x_hi", "log_y", "gone")
+                 "acc_x", "acc_y", "log_x", "log_x_hi", "log_y", "gone",
+                 "speed")
 
     def __init__(self):
         self.mode = self.stage = self.phase = self.timer = self.steps = 0
         self.vx = self.vy = self.acc_x = self.acc_y = 0
         self.log_x = self.log_x_hi = self.log_y = 0
         self.gone = False
+        # wmSpeed. Cleared to 1x rather than to zero, exactly as wmClearSlot
+        # does it: a zero multiplier is not a harmless default.
+        self.speed = C.TRIG_SPEED_1X
 
     @property
     def x9(self):
         return self.log_x | (self.log_x_hi << 8)
+
+
+def _apply_speed(obj):
+    """wmApplySpeed: scale the velocity just written by this object's speed.
+
+    THE SAME TWO COLD POINTS THE ENGINE USES -- after the heading table is read
+    and after a STRAIGHT/HOLD record is taken up -- so the preview and the 6502
+    scale the same values at the same moments. WM_EXIT is covered by doing
+    nothing here, because it does not rewrite the velocity and therefore
+    inherits whatever was last scaled.
+    """
+    if obj.speed == C.TRIG_SPEED_1X:
+        return                          # bit-exact no-op, as on the machine
+    obj.vx = C.scale_velocity(obj.vx, obj.speed)
+    obj.vy = C.scale_velocity(obj.vy, obj.speed)
 
 
 def _load_heading(obj):
@@ -217,6 +236,7 @@ def _load_heading(obj):
     """
     obj.vx = HEAD_VX[obj.phase]
     obj.vy = HEAD_VY[obj.phase]
+    _apply_speed(obj)
 
 
 def _enter_stage(obj, stages):
@@ -264,6 +284,7 @@ def _enter_stage(obj, stages):
     obj.timer = rec.frames & 0xFF
     obj.vx = s8(rec.vx)
     obj.vy = s8(rec.vy)
+    _apply_speed(obj)
 
 
 def _apply_velocity(obj):
@@ -428,7 +449,8 @@ def member_start(wave, member):
     return lo, hi, y
 
 
-def simulate_member(wave, stages, member, max_frames):
+def simulate_member(wave, stages, member, max_frames,
+                    speed=C.TRIG_SPEED_1X):
     """One member's whole life, from its spawn frame to its despawn.
 
     Returns (list of per-frame snapshots, exited). Frame numbers are relative
@@ -446,6 +468,10 @@ def simulate_member(wave, stages, member, max_frames):
     obj.phase = wave.heading                # waveSpawnMember: launch heading
     obj.stage = 0
     obj.acc_x = obj.acc_y = 0
+    # BEFORE THE FIRST STAGE IS ENTERED, exactly as waveSpawnMember does it:
+    # _enter_stage scales the velocity it writes, so the speed has to be on
+    # the object first or the opening leg would fly at 1x.
+    obj.speed = speed
     _enter_stage(obj, stages)
 
     out = [_snap(obj, 0, member, stages)]
@@ -508,7 +534,8 @@ def resolve_program(project, wave):
         f"{wave.movement_program!r}, which does not exist")
 
 
-def simulate_wave(project, wave, *, max_frames=None, stages=None):
+def simulate_wave(project, wave, *, max_frames=None, stages=None,
+                  speed=C.TRIG_SPEED_1X):
     """A complete ordinary wave over its whole useful life.
 
     Frame 0 is the frame the trigger became due, and MEMBER 0 IS SENT ON IT.
@@ -575,7 +602,7 @@ def simulate_wave(project, wave, *, max_frames=None, stages=None):
     paths, exited = [], []
     for m in range(wave.count):
         life, went = simulate_member(wave, stages, m,
-                                     budget - spawn_frames[m])
+                                     budget - spawn_frames[m], speed)
         paths.append(tuple(life))
         exited.append(went)
 
@@ -627,8 +654,12 @@ def simulate_trigger(project, index, *, stages=None, max_frames=None):
             "spawns -- src/dropper.asm installs its own three-pass flight over "
             "the top of the aperture -- so an ordinary-wave preview would show "
             "a trajectory the engine never flies.")
+    # THE TRIGGER'S OWN SPEED, which is the whole point of previewing a
+    # trigger rather than its wave: the same definition shown from two
+    # triggers must travel at each one's authored pace.
     return simulate_wave(project, wave_by_id(project, trig.wave_definition),
-                         stages=stages, max_frames=max_frames)
+                         stages=stages, max_frames=max_frames,
+                         speed=trig.resolved_speed)
 
 
 def preview_program(project, program, *, heading=0, start=(160, 40),

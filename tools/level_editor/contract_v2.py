@@ -30,15 +30,20 @@ LEVELPKG_BASE = 0xE000
 LEVELPKG_TOP = 0xFFF9
 LEVELPKG_MAP_MAX = 4400         # 440 rows * 10
 LEVELPKG_DEFS_MAX = 1024        # 64 defs * 16
+LEVELPKG_ENC_MAX = 1600         # the whole encounter reservation
+LEVELPKG_STAGE_MAX = 2          # the stage header: noSpawnRow lo/hi
 LEVELPKG_MOVE_MAX = 256         # wmStage is ONE BYTE -- the hardware ceiling
 LEVELPKG_WAVEDEF_SLOTS = 26     # waveDefBase forms def*10 in one byte
+LEVELPKG_WAVEDEF_SIZE = 10      # count..program, one indexed load per field
+LEVELPKG_WAVEDEF_MAX = LEVELPKG_WAVEDEF_SLOTS * LEVELPKG_WAVEDEF_SIZE
 # THE SLOT COUNT FOLLOWS THE COLUMN COUNT, exactly as src/levelpkg.asm derives
-# it: floor(the encounter reservation left over / the number of columns). The
-# seventh and eighth columns -- this appearance's colour and its firing mode --
-# took the ceiling from 180 to 135, which is still more than ten times the
-# longest authored level.
-LEVELPKG_TRIG_COLS = 8
-LEVELPKG_TRIG_SLOTS = 1082 // LEVELPKG_TRIG_COLS                   # 135
+# it, and is NEVER written down as a literal -- here, in the engine, or in a
+# test. It has moved every time a trigger column was added (180 -> 154 -> 135
+# -> 120) and every hard-coded copy of it has gone stale within a task or two.
+LEVELPKG_TRIG_RESERVATION = (LEVELPKG_ENC_MAX - LEVELPKG_STAGE_MAX
+                             - LEVELPKG_MOVE_MAX - LEVELPKG_WAVEDEF_MAX)
+LEVELPKG_TRIG_COLS = 9
+LEVELPKG_TRIG_SLOTS = LEVELPKG_TRIG_RESERVATION // LEVELPKG_TRIG_COLS
 
 # Stage height. The binding limit is the map budget, not the turret tables
 # (src/turrets.asm allows 512 metatile rows / 2047 logical).
@@ -221,6 +226,43 @@ COLOUR_MODE_LABELS = {"FIXED": "Fixed colour",
 TRIG_COL_MASK = 0x0F
 TRIG_COL_RANDOM = 0x10
 
+# --- how FAST an APPEARANCE crosses the playfield, src/encounter_format.asm --
+# A TRIGGER FIELD, the third occurrence property after colour and firing. A
+# wave definition is the SHAPE of a path; the pace it is walked at belongs to
+# the encounter, so the same `sweep` can make a lazy pass at one row and a fast
+# attack run at another without being cloned.
+#
+# A NUMERATOR OVER FOUR, because the engine already works in quarter pixels a
+# frame -- so the divide is a shift:
+#
+#     scaled = (|v| * speed) >> 2, with the sign of v put back
+#
+# 4 IS A BIT-EXACT NO-OP: (v * 4) >> 2 == v for every v. A project that never
+# touches this field moves exactly as it always did.
+#
+# NOTHING SLOWER THAN 1x IN THIS PASS. The heading table's 64 directions are
+# only distinguishable at its own magnitude; scaling an arc down collapses
+# neighbouring headings together and a smooth curve goes polygonal. A slower
+# formation is better authored as a wider turn radius.
+TRIG_SPEED_SHIFT = 2
+TRIG_SPEED_1X = 1 << TRIG_SPEED_SHIFT                              # 4
+# Ordered, because the editor shows them in this order.
+SPEED_CHOICES = (4, 5, 6, 7, 8)
+SPEED_LABELS = {4: "1.00x", 5: "1.25x", 6: "1.50x", 7: "1.75x", 8: "2.00x"}
+TRIG_SPEED_MIN = min(SPEED_CHOICES)
+TRIG_SPEED_MAX = max(SPEED_CHOICES)
+
+
+def scale_velocity(v, speed):
+    """The editor's copy of wmScaleOne in src/movement.asm.
+
+    SIGN-MAGNITUDE, matching the 6502 exactly rather than conveniently.
+    Python's // floors, so `-5 * 6 // 4` is -8 where the engine gives -7, and
+    an ARC would then preview differently from its own ARC_MIRROR.
+    """
+    mag = abs(v) * speed >> TRIG_SPEED_SHIFT
+    return -mag if v < 0 else mag
+
 # The colour a trigger gets when nothing says otherwise -- an older project
 # whose wave definition named no colour either. 1 is WaveDefinition's own
 # historical default.
@@ -348,7 +390,7 @@ def enemy_slot_problems(identities):
 # ---------------------------------------------------------------------------
 # Triggers and the boss approach — src/waves.asm, src/levelpkg.asm
 # ---------------------------------------------------------------------------
-MAX_TRIGGERS = LEVELPKG_TRIG_SLOTS                                 # 180
+MAX_TRIGGERS = LEVELPKG_TRIG_SLOTS
 MAX_WORLD_PROGRESS = 0xFFFF     # the row is two bytes, compared 16-bit
 
 # The quiet zone the authored level 1 uses, and the default this editor offers.

@@ -323,6 +323,22 @@ class EncounterWorkspace(tk.Toplevel):
                                          justify="left")
         self.t_firemode_note.grid(row=8, column=2, sticky="w", padx=(8, 0))
 
+        # HOW FAST THIS APPEARANCE CROSSES. Beside the other occurrence
+        # properties, because it is one: the wave definition owns the SHAPE of
+        # the path and the trigger owns the pace it is walked at, so the same
+        # formation can be a lazy pass here and an attack run three rows later.
+        ttk.Label(d, text="movement speed").grid(row=9, column=0, sticky="w")
+        self.t_speed = ttk.Combobox(
+            d, state="readonly", width=18,
+            values=[C.SPEED_LABELS[v] for v in C.SPEED_CHOICES])
+        self.t_speed.grid(row=9, column=1, sticky="w")
+        self.t_speed.bind("<<ComboboxSelected>>", self._trigger_apply)
+        ttk.Label(d, text="physical travel speed only -- it does not change "
+                          "spawn interval, wave spacing or firing cadence, so "
+                          "a faster wave spends less time in the firing band",
+                  font=("TkDefaultFont", 9), wraplength=PROG_TEXT_WRAP,
+                  justify="left").grid(row=9, column=2, sticky="w", padx=(8, 0))
+
         ttk.Label(d, text="colour").grid(row=7, column=0, sticky="w")
         self.t_colour = ttk.Entry(d, width=8)
         self.t_colour.grid(row=7, column=1, sticky="w")
@@ -841,6 +857,7 @@ class EncounterWorkspace(tk.Toplevel):
             self.t_colour_note.configure(text="")
             self.t_firemode.set("")
             self.t_firemode_note.configure(text="")
+            self.t_speed.set("")
             for child in self.t_fire.winfo_children():
                 child.destroy()
             return
@@ -867,6 +884,8 @@ class EncounterWorkspace(tk.Toplevel):
         self.t_firemode.set(C.FIRE_MODE_LABELS.get(t.resolved_fire_mode,
                                                    t.resolved_fire_mode))
         self._sync_fire_mode_note(t)
+        self.t_speed.set(C.SPEED_LABELS.get(t.resolved_speed,
+                                            str(t.resolved_speed)))
 
         # Where the moment falls, in terrain terms -- DISPLAY ONLY. The authored
         # value is worldProgress; no converted coordinate is stored.
@@ -1615,6 +1634,11 @@ class EncounterWorkspace(tk.Toplevel):
         for key, text in C.FIRE_MODE_LABELS.items():
             if text == label:
                 fields["fire_mode"] = key
+                break
+        label = self.t_speed.get()
+        for value, text in C.SPEED_LABELS.items():
+            if text == label:
+                fields["speed"] = value
                 break
         i = self._edit(self.controller.update_trigger, self.sel_trigger, **fields)
         if i is not None:

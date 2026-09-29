@@ -4001,7 +4001,8 @@
       "dropperSide": "LEFT",
       "colour": 10,
       "colourMode": "RANDOM",
-      "fireMode": "AIMED"
+      "fireMode": "AIMED",
+      "speed": 4
     },
     {
       "worldProgress": 52,
@@ -4013,7 +4014,8 @@
       "dropperSide": "LEFT",
       "colour": 3,
       "colourMode": "FIXED",
-      "fireMode": "DOWN"
+      "fireMode": "DOWN",
+      "speed": 4
     },
     {
       "worldProgress": 90,
@@ -4026,7 +4028,8 @@
       "dropperSide": "LEFT",
       "colour": 7,
       "colourMode": "RANDOM",
-      "fireMode": "DOWN"
+      "fireMode": "DOWN",
+      "speed": 4
     },
     {
       "worldProgress": 126,
@@ -4036,7 +4039,8 @@
       "dropperSide": "RIGHT",
       "colour": 13,
       "colourMode": "RANDOM",
-      "fireMode": "DOWN"
+      "fireMode": "DOWN",
+      "speed": 4
     },
     {
       "worldProgress": 160,
@@ -4049,7 +4053,8 @@
       "dropperSide": "LEFT",
       "colour": 13,
       "colourMode": "RANDOM",
-      "fireMode": "DOWN"
+      "fireMode": "DOWN",
+      "speed": 4
     },
     {
       "worldProgress": 205,
@@ -4064,7 +4069,8 @@
       "dropperSide": "LEFT",
       "colour": 1,
       "colourMode": "RANDOM",
-      "fireMode": "DOWN"
+      "fireMode": "DOWN",
+      "speed": 4
     },
     {
       "worldProgress": 260,
@@ -4080,7 +4086,8 @@
       "dropperSide": "LEFT",
       "colour": 1,
       "colourMode": "RANDOM",
-      "fireMode": "DOWN"
+      "fireMode": "DOWN",
+      "speed": 4
     }
   ],
   "levelMetatileSet": [

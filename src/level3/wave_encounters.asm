@@ -149,4 +149,11 @@
 // can shoot at all.
 .var trigFireMode = List()
 
+// HOW FAST THIS APPEARANCE CROSSES THE PLAYFIELD -- a numerator over
+// four, TRIG_SPEED_1X being a bit-exact no-op. On the TRIGGER and not
+// on the definition, so one reusable path can be walked at several
+// paces. src/waves.asm flies every definition at every speed a trigger
+// here actually asks for.
+.var trigSpeed    = List()
+
 .const WAVE_TRIGGERS          = 0
