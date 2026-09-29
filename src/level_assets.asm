@@ -44,68 +44,18 @@
 // It carries no artwork. Proving the address contract does not need a second
 // set of drawings, and inventing enemy art is not this task's job. Level 1's
 // own claims live with level 1, in level1/stage_enemies.asm.
-.const LEVEL_PACKAGE_1      = 0             // Ring + Dropper, the real level
-.const LEVEL_PACKAGE_B      = 1             // the replacement proof
-.const LEVEL_PACKAGE_COUNT  = 2
-
-.const LB_SLOT_RING         = 12            // $2f00, pointer $bc
-.const LB_SLOT_DROPPER      = 8             // $2e00, pointer $b8
-// Package B disagrees about the Square too, which is the point of it: the
-// level packs Ring/Dropper/Square at 0/4/8 and this package puts them at
-// 12/8/16, so no species keeps its address and the loader cannot pass by
-// accident. Slot 16 holds no art -- package B has never carried any -- and it
-// does not need to: what is being proved is the pointer arithmetic.
-.const LB_SLOT_SQUARE       = 16            // $3000, pointer $c0
-
-// THE ROW IS PADDED TO A POWER OF TWO so the loop below can still turn a
-// package index into a row base with a shift rather than a multiply. It used to
-// be exactly SPECIES_COUNT wide, which worked only while that was 2; a third
-// species made the count odd, and padding the stride is a great deal cheaper
-// than a multiply on the path that builds the table.
-.const LEVEL_DESC_ROW_STRIDE = 4
-.const LEVEL_DESC_ROW_SHIFT = 2
-.if ((1 << LEVEL_DESC_ROW_SHIFT) != LEVEL_DESC_ROW_STRIDE) {
-    .error "LEVEL_DESC_ROW_SHIFT no longer matches LEVEL_DESC_ROW_STRIDE"
-}
-.if (LEVEL_DESC_ROW_STRIDE < SPECIES_COUNT) {
-    .error "the descriptor row is narrower than the number of species"
-}
-
-levelAssetDescs:
-    // one row per package, LEVEL_DESC_ROW_STRIDE wide, SPECIES_COUNT used
-    .byte LVL_SLOT_RING, LVL_SLOT_DROPPER, LVL_SLOT_SQUARE, 0   // LEVEL_PACKAGE_1
-    .byte LB_SLOT_RING,  LB_SLOT_DROPPER,  LB_SLOT_SQUARE,  0   // LEVEL_PACKAGE_B
-levelAssetDescsEnd:
-
-.if (levelAssetDescsEnd - levelAssetDescs != LEVEL_PACKAGE_COUNT * LEVEL_DESC_ROW_STRIDE) {
-    .error "the descriptor table is not one row of LEVEL_DESC_ROW_STRIDE slots per package"
-}
-
-// Every slot any package claims must hold a whole species inside the window.
-// Named one by one rather than looped: there are four, and a guard that names
-// the constant it is protecting is worth more than a clever loop.
-.if (LVL_SLOT_RING    + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "the level's Ring slot runs past the enemy sprite window" }
-.if (LVL_SLOT_DROPPER + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "the level's Dropper slot runs past the enemy sprite window" }
-.if (LB_SLOT_RING    + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "level B's Ring slot runs past the enemy sprite window" }
-.if (LB_SLOT_DROPPER + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "level B's Dropper slot runs past the enemy sprite window" }
-.if (LVL_SLOT_SQUARE + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "the level's Square slot runs past the enemy sprite window" }
-.if (LB_SLOT_SQUARE  + ENEMY_FRAMES > LEVEL_SPRITE_BLOCKS) { .error "level B's Square slot runs past the enemy sprite window" }
-
-// A package's two species must not be loaded on top of each other. This is the
-// check that would catch a hand-edited descriptor, which is how a level package
-// will be authored until there is a tool that emits one.
-.if (LVL_SLOT_RING < LVL_SLOT_DROPPER + ENEMY_FRAMES && LVL_SLOT_DROPPER < LVL_SLOT_RING + ENEMY_FRAMES) {
-    .error "the level loads two species into overlapping window slots"
-}
-.if (LVL_SLOT_RING < LVL_SLOT_SQUARE + ENEMY_FRAMES && LVL_SLOT_SQUARE < LVL_SLOT_RING + ENEMY_FRAMES) {
-    .error "the level loads the Ring and the Square into overlapping window slots"
-}
-.if (LVL_SLOT_DROPPER < LVL_SLOT_SQUARE + ENEMY_FRAMES && LVL_SLOT_SQUARE < LVL_SLOT_DROPPER + ENEMY_FRAMES) {
-    .error "the level loads the Dropper and the Square into overlapping window slots"
-}
-.if (LB_SLOT_RING < LB_SLOT_DROPPER + ENEMY_FRAMES && LB_SLOT_DROPPER < LB_SLOT_RING + ENEMY_FRAMES) {
-    .error "level B loads two species into overlapping window slots"
-}
+// THE RESIDENT DESCRIPTOR TABLE IS GONE, and with it the whole idea that the
+// ENGINE knows where a level put its artwork. It held one row of slot claims
+// per package, assembled from the build-time level's stage_enemies.asm, and it
+// was resolved ONCE at boot -- which quietly required every level in the
+// campaign to use the same slot layout as the level the binary was built
+// against. A level that chose different artwork, with different frame counts
+// and therefore different slots, would have been drawn with the first level's
+// pointers.
+//
+// A package now carries its own resolved table (LEVELPKG_ANIM) and
+// levelAssetsLoad is called on every level load, so each level's choice is its
+// own. See src/levelpkg.asm.
 
 // --- state -----------------------------------------------------------------
 // CPU-ONLY, so it lives outside VIC bank 0 with every other module's state.
@@ -116,9 +66,15 @@ lvlPackage:     .byte 0         // which package levelAssetsLoad last resolved.
                                 // Diagnostic and test-visible. No gameplay code
                                 // reads it, and none may: gameplay must not
                                 // branch on which level is loaded
-lvlDescBase:    .byte 0         // the loader's row offset into the descriptor
-                                // table -- one byte of scratch rather than a
-                                // second index register
+lvlDescBase:    .byte 0         // (vestigial scratch; the descriptor table is gone)
+
+// WHICH SLOT BEHAVES HOW, copied straight out of the loaded package. Both are
+// SPECIES ROW OFFSETS, so the engine's Dropper tests stayed one `cmp` -- they
+// compare against a byte instead of an assembled-in constant, which is the
+// whole of what it took to stop every enemy identity having to pretend to be
+// one of three legacy species.
+lvlDropRow:     .byte $ff       // the token-dropping slot, or $ff for none
+lvlPlainRow:    .byte 0         // a slot with ordinary behaviour
 levelAssetStateEnd:
 .if (levelAssetStateEnd > $c500) {
     .error "the level asset state has grown into the enemy species array at $c500"
@@ -151,29 +107,23 @@ levelAssetStateEnd:
 // written to be read rather than to be fast.
 // ---------------------------------------------------------------------------
 levelAssetsLoad:
-    stx lvlPackage
-    txa
-    .for (var i = 0; i < LEVEL_DESC_ROW_SHIFT; i++) {
-        asl                             // * SPECIES_COUNT: this package's row
-    }
-    sta lvlDescBase
-
-    ldy #0                              // Y = entry index, 0 .. rows*steps-1
+    // THE PACKAGE HAS ALREADY DONE THE ARITHMETIC. Every byte of the table is
+    // a window-relative BLOCK, so all that is left is the window's own pointer
+    // base. No species division, no descriptor row, no frame count: a species
+    // wearing eight-frame artwork simply has eight different blocks in its row.
+    ldy #LEVELPKG_ANIM_MAX - 1
 !entry:
-    tya
-    .for (var i = 0; i < ENEMY_ANIM_STEPS_SHIFT; i++) {
-        lsr                             // / ENEMY_ANIM_STEPS: the entry's
-    }                                   // species
+    lda LEVELPKG_ANIM,y
     clc
-    adc lvlDescBase
-    tax                                 // X = this species' descriptor entry
-    lda levelAssetDescs,x               // the slot the level loaded it into
-    clc
-    adc #LEVEL_PTR_FIRST                // -> that slot's sprite pointer
-    clc
-    adc enemyAnimShape,y                // + the frame this step wants
+    adc #LEVEL_PTR_FIRST
     sta enemyAnimSeq,y
-    iny
-    cpy #SPECIES_COUNT * ENEMY_ANIM_STEPS
-    bne !entry-
+    dey
+    bpl !entry-
+
+    // The behaviour rows travel with the artwork, for the same reason: which
+    // slot drops the token is a property of the identity the LEVEL chose.
+    lda LEVELPKG_DROPROW
+    sta lvlDropRow
+    lda LEVELPKG_PLAINROW
+    sta lvlPlainRow
     rts

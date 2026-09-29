@@ -120,6 +120,28 @@ class V5View:
     def name(self, value):
         self._p.name = str(value)
 
+    # ---- the level's three enemy identities ----------------------------
+    # A REAL PROPERTY, NOT AN ATTRIBUTE. V5View is __slots__ = ("_p",) and holds
+    # no state of its own -- it is a naming facade over the live ProjectV6 -- so
+    # `view.enemy_slots = [...]` raised rather than writing anything. Every
+    # other editable field on this class is a property pair for exactly that
+    # reason; this one was simply missed when identities were added, and the
+    # editor writes to the VIEW.
+    #
+    # The setter normalises through contract_v2 so the view cannot store a
+    # shorter, longer or unknown selection than the model accepts, and both
+    # sides read the same list: there is one place the identities live.
+    @property
+    def enemy_slots(self):
+        return C.level_identities(self._p)
+
+    @enemy_slots.setter
+    def enemy_slots(self, value):
+        names = [str(v) for v in (value or [])]
+        self._p.enemy_slots = [
+            names[i] if i < len(names) else C.DEFAULT_ENEMY_IDENTITIES[i]
+            for i in range(C.ENEMY_SLOTS)]
+
     # ---- terrain -------------------------------------------------------
     @property
     def metatile_rows(self):

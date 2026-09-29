@@ -261,7 +261,47 @@
 // between the encounter components, and widening it would shift the movement
 // pool, the wave definitions and the trigger list. This run is spare.
 .const LEVELPKG_TRIGN     = LEVELPKG_TRTROWHI + LEVELPKG_TRT_MAX    // $ff92
-.const LEVELPKG_ASSETS_END = LEVELPKG_TRIGN + 1                     // $ff93
+// ---------------------------------------------------------------------------
+// THE ANIMATION TABLE — which BLOCK of the sprite window each species shows at
+// each animation step. Twenty-four bytes: SPECIES_COUNT rows of
+// ENEMY_ANIM_STEPS, window-relative.
+//
+// THIS IS WHERE VARIABLE FRAME COUNTS LIVE, and the reason the engine needs no
+// frame counter of its own. A species is three things to the animation: a row
+// in this table, a base in the window, and eight steps. Which BLOCK each step
+// shows is a level's decision, because a level chooses the artwork -- so the
+// level says it outright, already resolved, and levelAssetsLoad adds nothing
+// but the window's own pointer base.
+//
+// A species wearing eight-frame artwork names eight different blocks in its
+// row; one wearing three-frame artwork names three. Nothing at run time counts
+// frames, compares a frame count, or divides by one. The budget -- that the
+// chosen artwork fits twenty blocks -- is proved where the artwork is chosen,
+// at export and again at package build, and can never be a runtime question.
+.const LEVELPKG_ANIM      = LEVELPKG_TRIGN + 1                      // $ff93
+.const LEVELPKG_ANIM_MAX  = 3 * 8       // SPECIES_COUNT * ENEMY_ANIM_STEPS
+// ---------------------------------------------------------------------------
+// WHICH OF THIS LEVEL'S THREE ENEMY SLOTS BEHAVES HOW.
+//
+// An enemy IDENTITY owns its behaviour; a level slot merely holds an identity.
+// Both bytes are the SPECIES ROW OFFSET (0, 8 or 16) of the slot concerned, so
+// the engine compares against them exactly as it used to compare against the
+// old SPECIES_DROPPER constant -- same instruction, same cycles, one byte of
+// package data instead of an assembled-in assumption.
+//
+//   LEVELPKG_DROPROW  the slot whose identity carries the token-dropping
+//                     behaviour, or $ff when this level chose none. $ff can
+//                     never equal a species value, so every Dropper test simply
+//                     fails and the whole mechanism stays dormant.
+//   LEVELPKG_PLAINROW a slot with ordinary behaviour, used where the engine
+//                     needs "an ordinary enemy": the substitute for a refused
+//                     Dropper, and the escort the token encounter spawns. This
+//                     used to be the literal SPECIES_RING, which is precisely
+//                     the assumption that made every new identity have to
+//                     masquerade as one of three legacy species.
+.const LEVELPKG_DROPROW   = LEVELPKG_ANIM + LEVELPKG_ANIM_MAX       // $ffab
+.const LEVELPKG_PLAINROW  = LEVELPKG_DROPROW + 1                    // $ffac
+.const LEVELPKG_ASSETS_END = LEVELPKG_PLAINROW + 1                  // $ffad
 
 .if (LEVELPKG_CHARS != LEVELPKG_SIG + 4) {
     .error "the render identity must follow the signature with no gap"

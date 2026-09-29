@@ -588,6 +588,10 @@ def _validate_wave_definitions(p, r):
 
 
 def _validate_triggers(p, r):
+    # The three identities this level carries; a trigger may name any of them.
+    _identities = C.level_identities(p)
+    for _m in C.enemy_slot_problems(_identities):
+        r.error("level.enemies", _m, "enemySlots")
     ts = p.triggers
     if len(ts) > C.MAX_TRIGGERS:
         r.error("trigger.too_many",
@@ -617,10 +621,22 @@ def _validate_triggers(p, r):
                     f"never start: the director's gate is `>=`",
                     f"{path}.worldProgress")
 
-        if t.species not in C.SPECIES:
-            r.error("trigger.species",
-                    f"unknown species {t.species!r}; expected one of "
-                    f"{', '.join(sorted(C.SPECIES))}", f"{path}.species")
+        # A TRIGGER NAMES ONE OF THIS LEVEL'S ENEMY IDENTITIES. It used to be
+        # checked against the engine's three legacy species, which is the same
+        # assumption that limited the editor's dropdown to Dropper/Ring/Square
+        # no matter how much artwork existed.
+        if t.species not in _identities:
+            if t.species not in C.ROSTER_FRAMES:
+                r.error("trigger.species",
+                        f"unknown enemy {t.species!r}; expected one of "
+                        f"{', '.join(sorted(C.ROSTER_FRAMES))}",
+                        f"{path}.species")
+            else:
+                r.error("trigger.species",
+                        f"this level does not carry "
+                        f"{C.identity_label(t.species)!r}. It holds "
+                        + ", ".join(C.identity_label(i) for i in _identities),
+                        f"{path}.species")
         if t.dropper_side not in C.DROPPER_SIDES:
             r.error("trigger.side",
                     f"unknown Dropper side {t.dropper_side!r}; expected one of "
@@ -696,7 +712,8 @@ def _validate_triggers(p, r):
                    f"triggers[{i}].worldProgress")
             break
     for i, t in enumerate(ts):
-        if t.species == "RING" and t.dropper_side != "LEFT":
+        if C.identity_behaviour(t.species) != C.BEHAVIOUR_DROPPER \
+                and t.dropper_side != "LEFT":
             r.warn("trigger.side_ignored",
                    "dropperSide is read only for a DROPPER wave; a RING wave "
                    "carries it and ignores it", f"triggers[{i}].dropperSide")

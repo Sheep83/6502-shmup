@@ -1203,11 +1203,11 @@ waveSpawnMember:
     // content -- silently spawning one fewer member would quietly rewrite an
     // encounter the level author wrote, where a different enemy on the same
     // path keeps it.
-    cmp #SPECIES_DROPPER
+    cmp lvlDropRow
     bne !species+
     ldy tkDropperLive
     beq !claim+
-    lda #SPECIES_RING                   // one is already out there
+    lda lvlPlainRow                     // one is already out there
     jmp !species+
 !claim:
     ldy #1
@@ -1340,7 +1340,7 @@ waveSpawnMember:
     // killed low, the P it drops has no room for the encounter it starts. A
     // formation path authored for Rings cannot promise that. See src/dropper.asm.
     lda enySpecies,x
-    cmp #SPECIES_DROPPER
+    cmp lvlDropRow
     bne !ordinary+
     ldy wvInst
     lda wvSide,y                        // the side this appearance authored

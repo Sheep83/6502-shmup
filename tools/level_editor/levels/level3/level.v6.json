@@ -12,6 +12,11 @@
     "multicolour2": 9,
     "character": 0
   },
+  "enemySlots": [
+    "RING_3",
+    "DROPPER",
+    "SQUARE"
+  ],
   "glyphs": {
     "count": 125,
     "bitmaps": [

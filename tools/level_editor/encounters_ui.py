@@ -92,6 +92,16 @@ def _put(entry, value):
     entry.insert(0, str(value))
 
 
+def _is_dropper(identity):
+    """Does this identity carry the token-dropping behaviour?
+
+    The Dropper side field only means anything for an enemy that actually
+    launches like a Dropper, and that is a property of the IDENTITY now -- not
+    of a species called "DROPPER".
+    """
+    return C.identity_behaviour(identity) == C.BEHAVIOUR_DROPPER
+
+
 class EncounterWorkspace(tk.Toplevel):
     """One window over the host editor's live controller.
 
@@ -130,8 +140,23 @@ class EncounterWorkspace(tk.Toplevel):
         self.prog_mode_text = tk.StringVar()
         self.prog_cost_text = tk.StringVar()
 
-        self._build()
-        self.refresh()
+        # NOTHING IS BOUND OR SCHEDULED UNTIL THE WIDGETS EXIST. If _build()
+        # raises, this window is destroyed before the exception leaves the
+        # constructor -- otherwise Tk keeps a mapped Toplevel whose callbacks
+        # and whose WM_DELETE_WINDOW handler both reference widgets that were
+        # never created, which is what made the broken window impossible to
+        # close and made every click raise.
+        self._built = False
+        try:
+            self._build()
+            self._built = True
+            self.refresh()
+        except BaseException:
+            try:
+                self.destroy()
+            except tk.TclError:
+                pass
+            raise
 
     # =====================================================================
     # construction
@@ -241,9 +266,15 @@ class EncounterWorkspace(tk.Toplevel):
         self.t_wave.grid(row=1, column=1, sticky="w")
         self.t_wave.bind("<<ComboboxSelected>>", self._trigger_apply)
 
-        ttk.Label(d, text="species").grid(row=2, column=0, sticky="w")
-        self.t_species = ttk.Combobox(d, state="readonly", width=12,
-                                      values=sorted(C.SPECIES))
+        # THE ENEMY, BY NAME. This used to be `sorted(C.SPECIES)` -- the
+        # engine's three legacy species -- which is the whole reason only
+        # Dropper, Ring and Square ever appeared here however much artwork was
+        # imported. It now lists the three IDENTITIES this level actually
+        # carries, so a trigger says "Space Whisk" rather than asking the
+        # author to remember that Sonic Ring is wearing Space Whisk today.
+        ttk.Label(d, text="enemy").grid(row=2, column=0, sticky="w")
+        self.t_species = ttk.Combobox(d, state="readonly", width=18,
+                                      values=self._identity_labels())
         self.t_species.grid(row=2, column=1, sticky="w")
         self.t_species.bind("<<ComboboxSelected>>", self._trigger_apply)
 
@@ -694,9 +725,27 @@ class EncounterWorkspace(tk.Toplevel):
         self.refresh()
 
     def _close(self):
-        self.preview.pause()        # never leave an after() job behind
-        self.host._encounters = None
-        self.destroy()
+        """Tear down in the reverse order construction built up.
+
+        DEFENSIVE ONLY WHERE TEARDOWN GENUINELY NEEDS IT. The ordering fix
+        above means a half-built workspace no longer survives to be closed, but
+        _close is also the WM_DELETE_WINDOW handler and it must not be the thing
+        that raises while the user is trying to shut a window. Pausing a preview
+        that was never attached is not an error worth propagating; leaving an
+        after() job running is.
+        """
+        preview = getattr(self, "preview", None)
+        if preview is not None:
+            try:
+                preview.pause()     # never leave an after() job behind
+            except tk.TclError:
+                pass
+        if getattr(self.host, "_encounters", None) is self:
+            self.host._encounters = None
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
 
     # =====================================================================
     # refresh
@@ -768,10 +817,10 @@ class EncounterWorkspace(tk.Toplevel):
         tree.delete(*tree.get_children())
         for i, t in enumerate(self.controller.project.triggers):
             fires = ", ".join(str(m) for m in t.fire_mask) or "—"
-            side = t.dropper_side if t.species == "DROPPER" else "—"
+            side = t.dropper_side if _is_dropper(t.species) else "—"
             tree.insert("", "end", iid=str(i),
                         values=(t.world_progress, t.wave_definition,
-                                t.species, fires, side))
+                                C.identity_label(t.species), fires, side))
         if self.sel_trigger is not None and str(self.sel_trigger) in tree.get_children():
             tree.selection_set(str(self.sel_trigger))
         self._refresh_trigger_detail()
@@ -798,11 +847,12 @@ class EncounterWorkspace(tk.Toplevel):
         t = ts[self.sel_trigger]
         self.t_prog.delete(0, "end"); self.t_prog.insert(0, str(t.world_progress))
         self.t_wave.set(t.wave_definition)
-        self.t_species.set(t.species)
+        self.t_species.set(C.identity_label(t.species))
         self.t_side.set(t.dropper_side)
         # A RING carries a side and ignores it, so the control is disabled
         # rather than inviting a meaningless choice.
-        self.t_side.configure(state="readonly" if t.species == "DROPPER" else "disabled")
+        self.t_side.configure(
+            state="readonly" if _is_dropper(t.species) else "disabled")
 
         # THIS APPEARANCE'S COLOUR. Written while the entry is enabled: a
         # disabled ttk.Entry ignores insert and delete from code as well as
@@ -1513,6 +1563,30 @@ class EncounterWorkspace(tk.Toplevel):
         self.sel_trigger = None
         self.refresh()
 
+    def _identity_labels(self):
+        """The level's three enemy identities, as the author sees them.
+
+        THROUGH THE CONTROLLER, because this window owns no project state --
+        that is the first line of the class docstring and it was already true.
+        These two helpers reached for a `self.project` that has never existed
+        on an EncounterWorkspace, and because they are called from _build()
+        the window aborted half-constructed: Wave Definitions and Moves were
+        never built, and every later callback met a widget that was not there.
+        """
+        return [C.identity_label(n)
+                for n in C.level_identities(self.controller.project)]
+
+    def _identity_from_label(self, label):
+        for name in C.level_identities(self.controller.project):
+            if C.identity_label(name) == label:
+                return name
+        return None
+
+    def refresh_identities(self):
+        """Re-offer the level's identities after the level's choice changed."""
+        if getattr(self, "t_species", None) is not None:
+            self.t_species.configure(values=self._identity_labels())
+
     def _trigger_apply(self, _e=None):
         if self._syncing or self.sel_trigger is None:
             return
@@ -1520,9 +1594,11 @@ class EncounterWorkspace(tk.Toplevel):
         fields = {
             "world_progress": _int_or(self.t_prog.get(), t.world_progress),
             "wave_definition": self.t_wave.get() or t.wave_definition,
-            "species": self.t_species.get() or t.species,
+            # The combobox shows a LABEL; the document stores the identity.
+            "species": self._identity_from_label(self.t_species.get()) or t.species,
         }
-        if self.t_species.get() == "DROPPER" and self.t_side.get():
+        if _is_dropper(self._identity_from_label(self.t_species.get())) \
+                and self.t_side.get():
             fields["dropper_side"] = self.t_side.get()
         fields["colour"] = _int_or(self.t_colour.get(), t.resolved_colour)
         label = self.t_colmode.get()

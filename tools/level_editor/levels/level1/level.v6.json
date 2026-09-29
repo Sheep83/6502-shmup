@@ -12,6 +12,11 @@
     "multicolour2": 11,
     "character": 1
   },
+  "enemySlots": [
+    "RING_3",
+    "DROPPER",
+    "SPACE_WHISK"
+  ],
   "glyphs": {
     "count": 80,
     "bitmaps": [
@@ -3985,7 +3990,7 @@
     {
       "worldProgress": 20,
       "waveDefinition": "sweep",
-      "species": "RING",
+      "species": "RING_3",
       "fireMask": [
         0,
         2
@@ -4010,7 +4015,7 @@
     {
       "worldProgress": 90,
       "waveDefinition": "linger",
-      "species": "RING",
+      "species": "SPACE_WHISK",
       "fireMask": [
         0,
         2
@@ -4033,7 +4038,7 @@
     {
       "worldProgress": 160,
       "waveDefinition": "loop_5",
-      "species": "RING",
+      "species": "RING_3",
       "fireMask": [
         0,
         2
@@ -4046,7 +4051,7 @@
     {
       "worldProgress": 205,
       "waveDefinition": "dive_4",
-      "species": "RING",
+      "species": "SPACE_WHISK",
       "fireMask": [
         0,
         1,
@@ -4061,7 +4066,7 @@
     {
       "worldProgress": 260,
       "waveDefinition": "up_n_over",
-      "species": "RING",
+      "species": "RING_3",
       "fireMask": [
         0,
         1,
@@ -4077,7 +4082,7 @@
     {
       "worldProgress": 310,
       "waveDefinition": "dive_4",
-      "species": "SQUARE",
+      "species": "SPACE_WHISK",
       "fireMask": [
         0,
         1,
@@ -4122,7 +4127,7 @@
     {
       "worldProgress": 665,
       "waveDefinition": "up_n_over",
-      "species": "RING",
+      "species": "RING_3",
       "fireMask": [
         0,
         1,

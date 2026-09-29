@@ -265,7 +265,10 @@ class Trigger:
     """
     world_progress: int
     wave_definition: str
-    species: str = "RING"
+    # A ROSTER IDENTITY, not one of the three legacy species names. Ring 3 is
+    # the successor to the Sonic Ring artwork, so a trigger built with no
+    # species still means what it used to mean.
+    species: str = "RING_3"
     fire_mask: list = field(default_factory=list)
     dropper_side: str = "LEFT"
 
@@ -324,13 +327,14 @@ class Trigger:
                 "fireMode": self.resolved_fire_mode}
 
     @staticmethod
-    def from_dict(raw, path):
+    def from_dict(raw, path, slots=None):
         if not isinstance(raw, dict):
             raise ProjectV6Error(f"{path} must be an object")
+        slots = slots or list(C.DEFAULT_ENEMY_IDENTITIES)
         return Trigger(
             world_progress=_int_or_zero(raw.get("worldProgress")),
             wave_definition=str(raw.get("waveDefinition", "")),
-            species=str(raw.get("species", "RING")),
+            species=_trigger_identity(raw.get("species", "RING"), slots),
             fire_mask=_fire_mask(raw.get("fireMask")),
             dropper_side=str(raw.get("dropperSide", "LEFT")),
             # ABSENT MEANS "ASK THE DEFINITION", not "use a default". The two
@@ -500,6 +504,44 @@ class Turret:
 # ===========================================================================
 # The project
 # ===========================================================================
+def _trigger_identity(value, slots):
+    """A trigger's enemy, as an IDENTITY name.
+
+    Old projects name one of the three legacy species -- RING, DROPPER, SQUARE.
+    Those were never really three enemies; they were three SLOTS. So a legacy
+    name migrates to whichever identity this level put in that slot, which is
+    exactly what the level was already drawing. Nothing changes on screen; the
+    trigger simply now says what it always meant.
+    """
+    name = str(value)
+    if name in C.LEGACY_SPECIES_ORDER:
+        return slots[C.LEGACY_SPECIES_ORDER.index(name)]
+    return name
+
+
+def _enemy_slots_from(data):
+    """This level's three identities, from whichever schema the file uses.
+
+    THREE GENERATIONS, ALL READ WITHOUT GUESSING:
+      * `enemySlots`  -- the current list, in slot order;
+      * `enemyArt`    -- the interim {legacySpecies: rosterName} map, which the
+                         variable-frame pass wrote;
+      * neither       -- a project older than both, which meant Ring, Dropper
+                         and Square; Ring 3 is the successor to the Sonic Ring
+                         artwork the SpritePad project retired.
+    """
+    slots = data.get("enemySlots")
+    if isinstance(slots, list) and slots:
+        out = [str(x) for x in slots[:C.ENEMY_SLOTS]]
+    else:
+        art = data.get("enemyArt") or {}
+        out = [str(art.get(sp, C.DEFAULT_ENEMY_IDENTITIES[i]))
+               for i, sp in enumerate(C.LEGACY_SPECIES_ORDER)]
+    while len(out) < C.ENEMY_SLOTS:
+        out.append(C.DEFAULT_ENEMY_IDENTITIES[len(out)])
+    return out
+
+
 @dataclass
 class ProjectV6:
     name: str = "level"
@@ -518,6 +560,12 @@ class ProjectV6:
     # The vocabulary exactly as the library handed it over, or None. save()
     # compares against it to tell "nothing to lose" from "about to lose work".
     attached_vocabulary: object = field(default=None, compare=False, repr=False)
+    # THE THREE ENEMY IDENTITIES THIS LEVEL HOLDS, in slot order. Slot 0 is
+    # the engine's species row 0, slot 1 is row 8, slot 2 is row 16. A trigger
+    # names one of these identities and the exporter resolves it to its row.
+    # An identity owns its own artwork, frame count and behaviour, so a level
+    # picks three real enemies rather than three costumes for legacy species.
+    enemy_slots: list = field(default_factory=list)
     turrets: list = field(default_factory=list)
     movement_programs: list = field(default_factory=list)
     wave_definitions: list = field(default_factory=list)
@@ -553,6 +601,7 @@ class ProjectV6:
             "name": self.name,
             "stage": self.stage.to_dict(),
             "palette": self.palette.to_dict(),
+            "enemySlots": C.level_identities(self),
             "glyphs": {"count": len(self.glyphs),
                        "bitmaps": [list(g) for g in self.glyphs]},
             "metatileDefs": [list(d) for d in self.metatile_defs],
@@ -649,10 +698,12 @@ class ProjectV6:
             turrets.append(Turret(_int_or_zero(t.get("metatileRow")),
                                   _int_or_zero(t.get("metatileCol"))))
 
+        _slots = _enemy_slots_from(data)
         project = ProjectV6(
             name=str(data.get("name", "level")),
             stage=stage,
             palette=palette,
+            enemy_slots=_slots,
             glyphs=glyphs,
             metatile_defs=[list(d) if isinstance(d, list) else d for d in defs],
             level_metatile_set=data.get("levelMetatileSet"),
@@ -664,7 +715,7 @@ class ProjectV6:
             wave_definitions=[
                 WaveDefinition.from_dict(d, f"waveDefinitions[{i}]")
                 for i, d in enumerate(data.get("waveDefinitions") or [])],
-            triggers=[Trigger.from_dict(t, f"triggers[{i}]")
+            triggers=[Trigger.from_dict(t, f"triggers[{i}]", _slots)
                       for i, t in enumerate(data.get("triggers") or [])],
         )
         project.declared_metatile_cols = stage_cols

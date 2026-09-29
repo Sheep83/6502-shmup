@@ -152,6 +152,14 @@ class LevelEditor(tk.Tk):
         self.viewport_text = tk.StringVar()
         self.status_text = tk.StringVar()
         self.encounter_text = tk.StringVar()
+        # One per behavioural species; the value is the ROSTER LABEL shown to a
+        # human, mapped back to the roster name on apply.
+        _ids = C.level_identities(self.project)
+        self.enemy_art_vars = {
+            i: tk.StringVar(value=f"{C.ROSTER_LABELS[_ids[i]]}  "
+                                  f"({C.ROSTER_FRAMES[_ids[i]]})")
+            for i in range(C.ENEMY_SLOTS)}
+        self.enemy_budget_text = tk.StringVar(value="")
         self.palette_vars = {
             key: tk.IntVar(value=self.project.palette[key])
             for key in ("background", "multicolour1", "multicolour2", "character")
@@ -325,6 +333,31 @@ class LevelEditor(tk.Tk):
         # reports what the project carries that this phase cannot edit.
         ttk.Label(level_settings, text="   Encounters:").pack(side="left", padx=(14, 2))
         ttk.Label(level_settings, textvariable=self.encounter_text).pack(side="left")
+
+        # ---- WHICH ARTWORK THIS LEVEL'S THREE SPECIES WEAR -----------------
+        # A species is a BEHAVIOUR -- RING, DROPPER, SQUARE -- and there are
+        # three. The roster is ARTWORK and there are twelve. This row is the
+        # choice between them, and the budget beside it is the only thing
+        # standing between a selection and a level package that overruns the
+        # engine's enemy sprite window. The exporter checks it again anyway:
+        # a UI is not a validator.
+        art_row = ttk.Frame(self, padding=(8, 0, 8, 4))
+        art_row.pack(fill="x")
+        ttk.Label(art_row, text="Level enemies:").pack(side="left")
+        self._art_choices = [
+            f"{label}  ({frames})" for _n, label, frames in C.ENEMY_ROSTER]
+        self._art_by_choice = {
+            f"{label}  ({frames})": name
+            for name, label, frames in C.ENEMY_ROSTER}
+        for i in range(C.ENEMY_SLOTS):
+            ttk.Label(art_row, text=f"{i + 1}:").pack(side="left", padx=(10, 2))
+            box = ttk.Combobox(art_row, width=22, state="readonly",
+                               values=self._art_choices,
+                               textvariable=self.enemy_art_vars[i])
+            box.pack(side="left")
+            box.bind("<<ComboboxSelected>>", self._apply_enemy_art)
+        ttk.Label(art_row, textvariable=self.enemy_budget_text,
+                  font=("TkDefaultFont", 10, "bold")).pack(side="left", padx=(16, 0))
 
         body = ttk.Frame(self, padding=8)
         body.pack(fill="both", expand=True)
@@ -1305,6 +1338,52 @@ class LevelEditor(tk.Tk):
         self._update_document_ui()
         return "break" if event else None
 
+    def _apply_enemy_art(self, *_):
+        """Write the three choices onto the project and refresh the budget.
+
+        REFUSING IS NOT THIS METHOD'S JOB. It records the selection and reports
+        the cost; the budget label turns red and the exporter refuses. Blocking
+        the combobox would leave a user unable to get from one legal selection
+        to another through an illegal intermediate one -- swapping two 8-frame
+        sequences, say -- which is a worse experience than showing 24 / 20 in
+        red for a moment.
+        """
+        old = C.level_identities(self.project)
+        chosen = [self._art_by_choice.get(self.enemy_art_vars[i].get()) or old[i]
+                  for i in range(C.ENEMY_SLOTS)]
+        if chosen != old:
+            before = self._project_state()
+            self.project.enemy_slots = chosen
+            # A TRIGGER POINTING AT AN ENEMY THE LEVEL NO LONGER CARRIES would
+            # be unexportable, so a slot's replacement inherits that slot's
+            # triggers. The author swapped the enemy in slot 2; every trigger
+            # that used slot 2 still means slot 2.
+            # THROUGH THE MODEL, not the view. self.project is a V5View --
+            # a slotted naming facade that exposes only the fields it declares
+            # -- and it has no `triggers`. The same mistake as enemy_slots, one
+            # line later, and only reachable once a slot actually changed.
+            for t in self.controller.project.triggers:
+                if t.species in old and t.species not in chosen:
+                    t.species = chosen[old.index(t.species)]
+            self._push_undo(before)
+            self._update_document_ui()
+            if self._encounters is not None and self._encounters.winfo_exists():
+                self._encounters.refresh_identities()
+                self._encounters.refresh()
+        self._refresh_enemy_budget()
+
+    def _refresh_enemy_budget(self):
+        """`Enemy sprite budget: 16 / 20`, updated the instant a choice changes."""
+        try:
+            cost = C.enemy_slot_cost(C.level_identities(self.project))
+        except ValueError:
+            self.enemy_budget_text.set("Enemy sprite budget: ?")
+            return
+        over = cost > C.LEVEL_SPRITE_BLOCKS
+        self.enemy_budget_text.set(
+            f"Enemy sprite budget: {cost} / {C.LEVEL_SPRITE_BLOCKS}"
+            + ("   OVER BUDGET" if over else ""))
+
     def _apply_level_settings(self, event=None):
         try:
             new_palette = {k: int(v.get()) for k, v in self.palette_vars.items()}
@@ -1336,6 +1415,12 @@ class LevelEditor(tk.Tk):
     def _sync_level_settings_controls(self):
         for k, v in self.palette_vars.items():
             v.set(self.project.palette[k])
+        # The artwork row follows the document too, so opening another level
+        # shows ITS selection and ITS budget rather than the previous one's.
+        for i, name in enumerate(C.level_identities(self.project)):
+            self.enemy_art_vars[i].set(
+                f"{C.ROSTER_LABELS[name]}  ({C.ROSTER_FRAMES[name]})")
+        self._refresh_enemy_budget()
 
     def _update_stage_info(self):
         """Duration under the CURRENT contract, derived by contract_v2.

@@ -1039,7 +1039,7 @@ gameInit:
                                         // no start can inherit a sound. NOT a
                                         // whole-chip clear: that happens once,
                                         // at boot, in sfxInit
-    ldx #LEVEL_PACKAGE_1                // resolve the resident level's window
+                                        // resolve the RESIDENT package's own
     jsr levelAssetsLoad                 // claims into enemyAnimSeq. BEFORE any
                                         // enemy can be spawned or animated:
                                         // until this runs the table is zeros

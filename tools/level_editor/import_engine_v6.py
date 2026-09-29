@@ -265,7 +265,14 @@ def import_triggers(src, definitions):
         raise EncounterImportError(
             f"WAVE_TRIGGERS is {live} but the columns hold only {authored} entries")
 
-    species_of = {v: k for k, v in C.SPECIES.items()}
+    # THE ENGINE'S SPECIES VALUE IS A SLOT, NOT AN ENEMY. Which identity sits
+    # in a slot is recorded in the level's stage_enemies.asm, which this reader
+    # does not consume -- it reads the encounter tables. So a slot maps back to
+    # the DEFAULT identity for that slot, which is what a level that never
+    # chose otherwise carries. Re-importing a level whose stage_enemies names
+    # different identities will need them set again in the editor.
+    species_of = {i * C.ENEMY_ANIM_STEPS: C.DEFAULT_ENEMY_IDENTITIES[i]
+                  for i in range(C.ENEMY_SLOTS)}
     side_of = {v: k for k, v in C.DROPPER_SIDES.items()}
     fire_of = {v: k for k, v in C.FIRE_MODES.items()}
     out = []
@@ -280,8 +287,8 @@ def import_triggers(src, definitions):
         sp = columns["trigSpecies"][i]
         if sp not in species_of:
             raise EncounterImportError(
-                f"{what} names species {sp!r}, which is not one of "
-                f"{sorted(C.SPECIES.items())}")
+                f"{what} names enemy slot {sp!r}, which is not one of "
+                f"{sorted(species_of)}")
         side = columns["trigSide"][i]
         if side not in side_of:
             raise EncounterImportError(
@@ -422,11 +429,13 @@ def reference_encode_trigger_columns(triggers, definitions, slots=None):
     slots = C.MAX_TRIGGERS if slots is None else slots
     index_of = {d.id: i for i, d in enumerate(definitions)}
     n = len(triggers)
+    _ids = list(C.DEFAULT_ENEMY_IDENTITIES)
     cols = [
         [t.world_progress & 0xFF for t in triggers],
         [(t.world_progress >> 8) & 0xFF for t in triggers],
         [index_of[t.wave_definition] for t in triggers],
-        [C.SPECIES[t.species] for t in triggers],
+        # identity -> the slot this level put it in
+        [(C.identity_row(t.species, _ids) or 0) for t in triggers],
         [t.fire_bits for t in triggers],
         [C.DROPPER_SIDES[t.dropper_side] for t in triggers],
         # THE SEVENTH COLUMN: this appearance's colour and colour mode.

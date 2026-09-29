@@ -6,31 +6,39 @@
 //
 // Source of truth: assets/sprites/19656-sprites.spd, edited in
 // Spritemate. Regenerate with `make sprites`.
-// spd sha256: f70e5a967d7acff2a7f6293a86387141ad1ce4073ecd0dab5ce31168e5ff31c9
+// spd sha256: b1d8ef40fc6867ce26e64a3131867da3ebd6c2701bc19fdd51c1efa508ca351f
+//
+// SpritePad $53, the SHADED power-up.
+//
+// THE SOURCE INDEX MOVED AND THE ROLE DID NOT. The token used to come
+// from slot 21 of the old project; that artwork is the OLD power-up,
+// which Brian has retired, and its slot is now $15 and is not imported
+// by anything. $53 is the shaded replacement and is the only power-up
+// the game draws.
 //
 // The caller owns the address and the labels: src/pickup.asm pins
 // this between the muzzle flash and the fireball.
 // ==========================================================================
 
-    .byte $15, $55, $54
-    .byte $55, $55, $55
-    .byte $55, $55, $55
-    .byte $5a, $aa, $95
-    .byte $5a, $aa, $a5
-    .byte $5a, $55, $a5
-    .byte $5a, $55, $a5
-    .byte $5a, $55, $a5
-    .byte $5a, $55, $a5
-    .byte $5a, $aa, $a5
-    .byte $5a, $aa, $95
-    .byte $5a, $55, $55
-    .byte $5a, $55, $55
-    .byte $5a, $55, $55
-    .byte $5a, $55, $55
-    .byte $5a, $55, $55
-    .byte $5a, $55, $55
-    .byte $5a, $55, $55
-    .byte $55, $55, $55
-    .byte $55, $55, $55
+    .byte $3f, $ff, $fc
+    .byte $f5, $55, $54
+    .byte $d5, $55, $55
+    .byte $df, $ff, $55
+    .byte $de, $aa, $d5
+    .byte $de, $aa, $b5
+    .byte $de, $bf, $b5
+    .byte $de, $b5, $b5
+    .byte $de, $b5, $b5
+    .byte $de, $aa, $b5
+    .byte $de, $aa, $d5
+    .byte $de, $bf, $55
+    .byte $de, $b5, $55
+    .byte $de, $b5, $55
+    .byte $de, $b5, $55
+    .byte $de, $b5, $55
+    .byte $df, $f5, $55
+    .byte $d5, $55, $55
+    .byte $d5, $55, $55
+    .byte $d5, $55, $55
     .byte $15, $55, $54
     .byte $00          // the 64th byte: alignment, never fetched

@@ -54,7 +54,7 @@ def build(rows=105, no_spawn=340, defs=1, glyphs=1):
                                          start_y=64, x_step=0, y_step=20,
                                          heading=0,
                                          movement_program="run")],
-        triggers=[Trigger(world_progress=48, wave_definition="w", species="RING",
+        triggers=[Trigger(world_progress=48, wave_definition="w", species="RING_3",
                           fire_mask=[0, 2], dropper_side="LEFT")],
     )
 
@@ -208,7 +208,7 @@ p.wave_definitions = [WaveDefinition(id=f"w{i}", count=1, interval=1, start_x=0,
                                      start_y=0, heading=0,
                                      movement_program="run")
                       for i in range(C.MAX_WAVE_DEFINITIONS + 1)]
-p.triggers = [Trigger(10, "w0", "RING", [0])]
+p.triggers = [Trigger(10, "w0", "RING_3", [0])]
 expect_error(p, "wavedef.too_many",
              "more than 26 wave definitions is rejected (def*10 in one byte)")
 
@@ -253,7 +253,7 @@ p = build(); p.triggers[0].fire_mask = ["x"]
 expect_error(p, "trigger.fire_member", "a non-integer fire mask member is rejected")
 
 p = build()
-p.triggers = [Trigger(10, "w", "RING", [0]), Trigger(5, "w", "DROPPER", [0])]
+p.triggers = [Trigger(10, "w", "RING_3", [0]), Trigger(5, "w", "DROPPER", [0])]
 expect_error(p, "trigger.unsorted", "trigger rows going backwards are rejected")
 # CONSECUTIVE TRIGGERS MAY NOW SHARE A SPECIES. src/waves.asm used to assert the
 # alternation at assembly time; the assertion was about Level 1's content, not
@@ -272,18 +272,18 @@ assert "two consecutive authored waves use the same enemy species" not in _waves
 ok("src/waves.asm does not assert the species alternation")
 
 p = build()
-p.triggers = [Trigger(10, "w", "RING", [0]), Trigger(20, "w", "RING", [0])]
+p.triggers = [Trigger(10, "w", "RING_3", [0]), Trigger(20, "w", "RING_3", [0])]
 expect_clean(p, "two consecutive RING waves are accepted")
 p = build()
 p.triggers = [Trigger(10, "w", "DROPPER", [0]), Trigger(20, "w", "DROPPER", [0])]
 expect_clean(p, "two consecutive DROPPER waves are accepted")
 p = build()
-p.triggers = [Trigger(10, "w", "RING", [0]), Trigger(20, "w", "DROPPER", [0]),
-              Trigger(30, "w", "DROPPER", [0]), Trigger(40, "w", "RING", [0])]
+p.triggers = [Trigger(10, "w", "RING_3", [0]), Trigger(20, "w", "DROPPER", [0]),
+              Trigger(30, "w", "DROPPER", [0]), Trigger(40, "w", "RING_3", [0])]
 expect_clean(p, "RING -> DROPPER -> DROPPER -> RING is accepted")
 
 p = build()
-p.triggers = [Trigger(i * 2, "w", "RING" if i % 2 == 0 else "DROPPER", [0])
+p.triggers = [Trigger(i * 2, "w", "RING_3" if i % 2 == 0 else "DROPPER", [0])
               for i in range(C.MAX_TRIGGERS + 1)]
 expect_error(p, "trigger.too_many", "more than 180 triggers is rejected")
 
@@ -305,7 +305,7 @@ expect_clean(p, "worldProgress 255 is accepted")
 p = build(); p.triggers[0].world_progress = 256
 expect_clean(p, "worldProgress 256 is accepted -- the row is not one byte")
 p = build()
-p.triggers = [Trigger(255, "w", "RING", [0]), Trigger(256, "w", "DROPPER", [0])]
+p.triggers = [Trigger(255, "w", "RING_3", [0]), Trigger(256, "w", "DROPPER", [0])]
 expect_clean(p, "255 then 256 is a legal non-decreasing pair across the page break")
 
 p = build(); p.triggers[0].world_progress = 396

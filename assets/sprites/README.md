@@ -30,35 +30,75 @@ change the program's content is a build whose output nobody reviewed.
 
 ## Format
 
-**SpritePad 2.0.** Signature `SPD`, version byte 1, sprite count stored minus
-one, then three shared colours and N 64-byte blocks of 63 bitmap bytes plus one
-metadata byte (bit 7 multicolour, bit 4 overlay, bits 0–3 colour). Spritemate
-reads and writes exactly this; `tools/sprite_export/spd_reader.py` parses it
-strictly and documents the evidence.
+**SpritePad, version byte 1 or 5.** The current project is **version 5**, which
+Spritemate writes now; version 1 (SpritePad 2.0) is still accepted. The SPRITE
+BLOCK is identical in both — 63 bitmap bytes then one metadata byte (bit 7
+multicolour, bit 4 overlay, bits 0–3 colour) — and only the header and trailer
+differ:
 
-## Slots
+| | v1 | v5 |
+|---|---|---|
+| body starts at | 9 | 20 |
+| sprite count | byte 4, stored minus one | word at 5, stored plain |
+| shared colours | bytes 6, 7, 8 | bytes 13, 14, 15 |
+| animations | byte 5, 4 bytes each | word at 16, 6 bytes each |
+| total length | `9 + 64n + 4 + 4a` | `20 + 64n + 6a` |
 
-| Slots | Contents |
-|---|---|
-| 0–14 | player ship — 5 banking attitudes × 3 engine frames, bank-major |
-| 15 | **deliberately blank** — the block HW1 draws; keep it empty |
-| 16–20 | muzzle flash, one per attitude |
-| 21 | collectible token |
-| 22–29 | player death fireball, 8 frames |
-| 30–33 | Sonic Ring — north, east, south, west |
-| 34–37 | Orbital Dropper — wide, front-right, front, front-left |
-| 38–41 | boss, 4 cells |
-| 42 | hostile projectile |
-| 43–46 | **Square** — the third ordinary enemy species, 4 spin frames |
-| 47 | unused trailing slot; left alone by the importer |
+`tools/sprite_export/spd_reader.py` parses both strictly, checks the length
+identity before trusting any offset, and writes down how the v5 offsets were
+derived from the file itself.
 
-**Slots 0–42 keep their roles and their order.** The engine addresses sprites by
-VIC pointer, so inserting, deleting or reordering a slot would silently
-repoint something. The importer refuses a `.spd` whose slot count has changed
-rather than guessing which sprite became which.
+## Slots — 110 of them, `$00`–`$6D`
 
-To add another species, append four more frames and extend the group table in
-`tools/sprite_export/import_spd.py` — the same way the Square was added.
+The project is the **artwork authority for the whole set**, and most of it has no
+runtime home. Only the ranges marked **wired** below are imported; everything
+else exists to be drawn, referred to by index, and promoted later.
+
+| Slots | Frames | Contents | |
+|---|---:|---|---|
+| `$00`–`$0E` | 15 | player ship — 5 attitudes × 3 engine frames, bank-major | **wired** |
+| `$0F` | 1 | **deliberately blank** — the block HW1 draws; keep it empty | reserved |
+| `$10`–`$14` | 5 | muzzle flash, one per attitude | **wired** |
+| `$15` | 1 | old power-up — obsolete, superseded by `$53` | — |
+| `$16`–`$1D` | 8 | player death fireball | **wired** |
+| `$1E`–`$21` | 4 | Orbital Dropper | **wired** |
+| `$22`–`$25` | 4 | placeholder boss | **wired** |
+| `$26` | 1 | hostile projectile | **wired** |
+| `$27`–`$2A` | 4 | Square | **wired** |
+| `$2B`–`$33` | 9 | old Alleykat explosion | — |
+| `$34`–`$36` | 3 | modded Alleykat A | — |
+| `$37`–`$3A` | 4 | unmodified Alleykat (reference) | — |
+| `$3B`–`$3D` | 3 | modded Alleykat B | — |
+| `$3E`–`$40` | 3 | `ring_1` | — |
+| `$41`–`$43` | 3 | `ring_2` | — |
+| `$44`–`$49` | 6 | `spinner` | — |
+| `$4A`–`$4B` | 2 | Hades A (reference) | — |
+| `$4C`–`$4F` | 4 | Hades B (reference) | — |
+| `$50`–`$52` | 3 | space mine | — |
+| `$53` | 1 | shaded power-up — the token the game draws | **wired** |
+| `$54`–`$59` | 6 | spinny thing | — |
+| `$5A`–`$5F` | 6 | space whisk | — |
+| `$60`–`$67` | 8 | `ring_3` — 8-step rotation | **wired, 4 of 8** |
+| `$68`–`$6C` | 5 | spinny rotatey thing | — |
+| `$6D` | 1 | unused trailing slot | reserved |
+
+**The mapping lives in exactly one place**: the `GROUPS` table in
+`tools/sprite_export/import_spd.py`. Each entry lists the SpritePad indices it
+emits, in order, and every generated file names those indices in its own banner.
+Nothing renumbers anything anywhere else.
+
+Two entries are not a plain range, and both are deliberate:
+
+* the **token** comes from `$53`, not from `$15`. `$15` is the retired power-up;
+* the **Ring** comes from `$60, $62, $64, $66` — every *second* frame of
+  `ring_3`. A species gets `ENEMY_FRAMES = 4` blocks and `ring_3` is an 8-step
+  rotation, so sampling alternate frames shows a complete turn where the first
+  four would show a quarter turn and snap back.
+
+**Adding a species is not just artwork.** The engine has `SPECIES_COUNT = 3` and
+`ENEMY_FRAMES = 4`, both guarded, and a level's enemy window is 20 blocks of
+which 12 are claimed. Promoting any of the unwired sequences above needs engine
+work, not an importer change — see `/reports/sprite-set-v2-import.md`.
 
 ## HUD sprites are not here, on purpose
 

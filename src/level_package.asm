@@ -78,9 +78,11 @@ levelSprEnd:
 // them against each other is what stops a manifest edited in one file and not
 // the other from shipping a Dropper where the engine expects a Ring.
 .var sprBlocks = (levelSprEnd - LEVELPKG_SPR) / 64
-.if (LVL_SLOT_RING + 4 > sprBlocks || LVL_SLOT_DROPPER + 4 > sprBlocks
-     || LVL_SLOT_SQUARE + 4 > sprBlocks) {
-    .error "stage_enemies claims a slot that stage_sprites does not fill"
+.if (LVL_SPR_BLOCKS != sprBlocks) {
+    .error "stage_enemies says how many blocks this level's artwork needs and stage_sprites supplied a different number"
+}
+.if (LVL_SPR_BLOCKS > LEVELPKG_SPR_MAX / 64) {
+    .error "this level's chosen enemy artwork does not fit the engine's twenty-block sprite window"
 }
 .fill LEVELPKG_SPR_MAX - (levelSprEnd - LEVELPKG_SPR), 0    // unclaimed slots
 
@@ -98,6 +100,31 @@ levelBossEnd:
 
 .if (levelBossEnd - LEVELPKG_BOSS != LEVELPKG_BOSS_MAX) {
     .error "the boss artwork is not BOSS_CELLS blocks of 64 bytes"
+}
+
+// ---------------------------------------------------------------------------
+// THE ANIMATION TABLE, at its own reserved address.
+//
+// EVERY BYTE IS A BLOCK INSIDE THE WINDOW THIS PACKAGE JUST FILLED, so the two
+// are checked against each other here rather than trusted: a table naming block
+// 17 in a package that only supplied 16 would fetch the previous level's
+// artwork, which is exactly the class of bug the window padding exists to stop.
+* = LEVELPKG_ANIM "level anim table"
+levelAnimTable:
+    .fill LVL_ANIM.size(), LVL_ANIM.get(i)
+levelAnimTableEnd:
+
+.if (levelAnimTableEnd - levelAnimTable != LEVELPKG_ANIM_MAX) {
+    .error "the level animation table is not SPECIES_COUNT rows of ENEMY_ANIM_STEPS"
+}
+* = LEVELPKG_DROPROW "level enemy behaviour"
+    .byte LVL_DROP_ROW              // the slot that drops the token, or $ff
+    .byte LVL_PLAIN_ROW             // a slot with ordinary behaviour
+
+.for (var i = 0; i < LVL_ANIM.size(); i++) {
+    .if (LVL_ANIM.get(i) >= sprBlocks) {
+        .error "an animation step names a sprite block this package never filled"
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -728,7 +728,7 @@ tokenReinforce:
     sta logY,x
 
     // ---- an ordinary Ring -------------------------------------------------
-    lda #SPECIES_RING
+    lda lvlPlainRow
     sta enySpecies,x
     jsr enemyAnimPtr                    // A = this frame's frame, X preserved
     sta logPtr,x

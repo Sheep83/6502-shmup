@@ -62,6 +62,13 @@ class Group:
     ends_at_symbol: str = ""    # or against where the next run starts
 
 
+# ONLY WHAT IS ACTUALLY IN main.prg. The enemy species' artwork and the boss
+# cells are no longer assembled into the engine at all: they travel in a LEVEL
+# PACKAGE and levelApplySprites copies them into the sprite window at level
+# init. Their symbols exist in level_package.sym, not in main.sym, and this
+# reader searches the main program -- so listing them here made every run raise
+# "the build has no symbol 'sonicRingFrames'". They are verified against the
+# packages instead, by verify_sprites.verify_packages().
 GROUPS = (
     Group("player_art_frames", 16, "player ship", 14,
           names=tuple(
@@ -84,32 +91,6 @@ GROUPS = (
           names=tuple(f"boom_{i}" for i in range(8)),
           colour_note="PLAYER_COL_BOOM=2, red, in HW0's own $d027",
           end_symbol="playerBoomArtEnd"),
-    Group("sonicRingFrames", 4, "enemy: Sonic Ring", 13,
-          names=("ring_north", "ring_east", "ring_south", "ring_west"),
-          colour_note="NO FIXED COLOUR. Pair 10 is the wave's authored colour "
-                      "in $d027+n; level 1 authors 10, 3, 7, 13 and 1. 13 is "
-                      "exported as an editing default because it is an "
-                      "authored value and differs from both shared "
-                      "multicolours",
-          end_symbol="sonicRingFramesEnd"),
-    Group("orbitalDropperFrames", 4, "enemy: Orbital Dropper", 13,
-          names=("dropper_wide", "dropper_front_right",
-                 "dropper_front", "dropper_front_left"),
-          colour_note="same per-wave colour as the Ring; see above",
-          end_symbol="orbitalDropperFramesEnd"),
-    Group("squareFrames", 4, "enemy: Square", 4,
-          names=("square_0_full", "square_1_turn",
-                 "square_2_narrow", "square_3_edge"),
-          colour_note="NO FIXED COLOUR, exactly like the Ring and the Dropper: "
-                      "pair 10 is the wave's authored colour in $d027+n. The "
-                      "value here is the .spd's editing colour and never "
-                      "reaches the game",
-          end_symbol="squareFramesEnd"),
-    Group("bossArt", 4, "boss", 4,
-          names=tuple(f"boss_cell{i}" for i in range(4)),
-          colour_note="BOSS_COL=4 (purple); the whole machine flashes to "
-                      "BOSS_COL_HIT=1 (white) while taking a hit",
-          end_symbol="bossArtEnd"),
     Group("ebulletBitmap", 1, "hostile projectile", 7,
           names=("ebullet",),
           colour_note="EBULLET_COL=7, yellow"),

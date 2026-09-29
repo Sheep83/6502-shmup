@@ -265,7 +265,7 @@ doc = json.loads(a)
 assert "movementProgram" in doc["waveDefinitions"][0]
 assert isinstance(doc["waveDefinitions"][0]["movementProgram"], str)
 ok("a definition stores a program ID, not an offset")
-assert doc["triggers"][0]["species"] == "RING"
+assert doc["triggers"][0]["species"] == "RING_3"
 assert doc["triggers"][3]["dropperSide"] == "RIGHT"
 assert doc["triggers"][0]["fireMask"] == [0, 2]
 ok("triggers are stored as semantic objects, not six physical columns")

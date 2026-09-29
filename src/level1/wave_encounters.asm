@@ -123,7 +123,7 @@
 // WHICH ENEMY THE WAVE IS MADE OF -- an authored column rather than
 // arithmetic on the cursor, so inserting a trigger cannot silently invert
 // every wave after it.
-.var trigSpecies  = List().add(SPECIES_RING, SPECIES_DROPPER, SPECIES_RING, SPECIES_DROPPER, SPECIES_RING, SPECIES_RING, SPECIES_RING, SPECIES_SQUARE, SPECIES_DROPPER, SPECIES_DROPPER, SPECIES_DROPPER, SPECIES_RING)
+.var trigSpecies  = List().add(SPECIES_RING, SPECIES_DROPPER, SPECIES_SQUARE, SPECIES_DROPPER, SPECIES_RING, SPECIES_SQUARE, SPECIES_RING, SPECIES_SQUARE, SPECIES_DROPPER, SPECIES_DROPPER, SPECIES_DROPPER, SPECIES_RING)
 
 // WHICH SIDE A DROPPER FLIES IN FROM. Read only when the species above is
 // SPECIES_DROPPER; a Ring wave carries whatever is written here and

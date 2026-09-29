@@ -157,7 +157,7 @@ c = fresh()
 _rows0 = [t.world_progress for t in c.project.triggers]
 _wave = c.project.wave_definitions[0].id
 i = c.add_trigger(world_progress=_rows0[-1] + 40, wave_definition=_wave,
-                  species="RING")
+                  species="RING_3")
 check("add_trigger inserts and returns its sorted index", i == len(_rows0),
       f"index {i}, rows {[t.world_progress for t in c.project.triggers]}")
 _between = (_rows0[0] + _rows0[1]) // 2
@@ -173,7 +173,7 @@ check("delete_trigger removes exactly it",
 # moment is authored, and re-saving must not shuffle them
 c2 = fresh()
 a = c2.add_trigger(world_progress=90, wave_definition="s", species="DROPPER")
-b = c2.add_trigger(world_progress=90, wave_definition="loop", species="RING")
+b = c2.add_trigger(world_progress=90, wave_definition="loop", species="RING_3")
 order = [(t.world_progress, t.wave_definition) for t in c2.project.triggers]
 c2.sort_triggers()
 check("equal worldProgress keeps a stable, deterministic order",
@@ -198,18 +198,26 @@ check("duplicate_trigger copies the whole trigger one row later",
 # ===========================================================================
 c = fresh()
 # SYMBOLIC IS THE CLAIM, not the census. This asserted the exact set
-# {"RING", "DROPPER"} and so failed the moment a third species was authored --
+# {"RING_3", "DROPPER"} and so failed the moment a third species was authored --
 # which is a fact about the game's content, not about the contract this file
 # tests. What matters is that a species is a NAME the project stores, that the
 # two established ones are still there, and that each maps to a whole animation
 # row. tools/sprite_export/test_spd_pipeline.py owns the roll-call.
-check("species are symbolic", all(isinstance(k, str) for k in C.SPECIES)
-      and {"RING", "DROPPER"} <= set(C.SPECIES), str(sorted(C.SPECIES)))
+# C.SPECIES is the engine's three enemy SLOTS, not the enemy roster. Slot names
+# are still RING/DROPPER/SQUARE because that is what the engine's row offsets
+# are called; which ENEMY sits in each slot is the level's choice and lives in
+# C.ROSTER_FRAMES. Both are checked, because conflating them is exactly the
+# mistake that kept the trigger dropdown at three entries.
+check("enemy slots are symbolic", all(isinstance(k, str) for k in C.SPECIES)
+      and {"RING", "DROPPER", "SQUARE"} == set(C.SPECIES), str(sorted(C.SPECIES)))
+check("...and the enemy roster is larger than the slot count",
+      len(C.ROSTER_FRAMES) > len(C.SPECIES),
+      f"{len(C.ROSTER_FRAMES)} identities for {len(C.SPECIES)} slots")
 check("...and every species value is a whole animation row",
       all(v % C.ENEMY_ANIM_STEPS == 0 for v in C.SPECIES.values()),
       str(C.SPECIES))
 check("sides are symbolic", set(C.DROPPER_SIDES) == {"LEFT", "RIGHT"})
-c.update_trigger(3, species="RING")
+c.update_trigger(3, species="RING_3")
 check("switching a DROPPER to RING returns the side to the canonical neutral",
       c.project.triggers[3].dropper_side == "LEFT",
       c.project.triggers[3].dropper_side)

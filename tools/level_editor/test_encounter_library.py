@@ -135,7 +135,7 @@ with tempfile.TemporaryDirectory() as d:
     fx.install_into(legacy)
     legacy.triggers = [project_v6.Trigger(world_progress=12,
                                           wave_definition="pair",
-                                          species="RING")]
+                                          species="RING_3")]
     (d / "legacy").mkdir()
     (d / "legacy" / "level.v6.json").write_text(legacy.to_json(), encoding="utf-8")
 
@@ -251,14 +251,14 @@ with tempfile.TemporaryDirectory() as d:
     A = make("A", [project_v6.Trigger(world_progress=10, wave_definition="pair",
                                       species="SQUARE"),
                    project_v6.Trigger(world_progress=40, wave_definition="pair",
-                                      species="RING")])
+                                      species="RING_3")])
     B = make("B", [project_v6.Trigger(world_progress=25, wave_definition="pair",
                                       species="DROPPER")])
 
     ca = EditorController.load(A, library_path=libp)
     check("A shows only A's triggers",
           [(t.world_progress, t.species) for t in ca.project.triggers]
-          == [(10, "SQUARE"), (40, "RING")])
+          == [(10, "SQUARE"), (40, "RING_3")])
     cb = EditorController.load(B, library_path=libp)
     check("B shows only B's triggers",
           [(t.world_progress, t.species) for t in cb.project.triggers]
@@ -267,11 +267,11 @@ with tempfile.TemporaryDirectory() as d:
     ca2 = EditorController.load(A, library_path=libp)
     check("switching back to A restores A's timeline exactly",
           [(t.world_progress, t.species) for t in ca2.project.triggers]
-          == [(10, "SQUARE"), (40, "RING")])
+          == [(10, "SQUARE"), (40, "RING_3")])
 
     # editing A's triggers must not reach B
     ca2.project.triggers.append(project_v6.Trigger(
-        world_progress=60, wave_definition="pair", species="RING"))
+        world_progress=60, wave_definition="pair", species="RING_3"))
     ca2.save()
     check("a trigger added to A does not appear in B",
           len(EditorController.load(B, library_path=libp).project.triggers) == 1)

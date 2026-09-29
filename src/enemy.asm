@@ -115,17 +115,18 @@
 // so a species' frames must be adjacent and in the authored order. The label
 // assertions further down are what make reordering an art file a build error
 // rather than a scrambled animation.
-.const ENEMY_FRAMES      = 4                        // north, east, south, west
-.const DROPPER_FRAMES    = 4                        // wide, f-right, f, f-left
-.const SQUARE_FRAMES     = 4                        // full, turn, narrow, edge
-
-.const ENEMY_SPRITES     = levelSlotAddr(LVL_SLOT_RING)
-.const DROPPER_SPRITES   = levelSlotAddr(LVL_SLOT_DROPPER)
-.const SQUARE_SPRITES    = levelSlotAddr(LVL_SLOT_SQUARE)
-
-.if (ENEMY_FRAMES != DROPPER_FRAMES || ENEMY_FRAMES != SQUARE_FRAMES) {
-    .error "a window slot holds ENEMY_FRAMES blocks: species of different frame counts need the descriptor to carry the count"
-}
+// THERE IS NO ENEMY_FRAMES ANY MORE, and there deliberately is not one to put
+// back. It said every species owned exactly four consecutive blocks, which was
+// true of three species drawn to match and of nothing else. Artwork now ranges
+// from one frame to eight and a level chooses which sequence each of its three
+// species wears, so "how many blocks does a species own" has no engine-wide
+// answer -- it is a property of the artwork a LEVEL picked, proved to fit the
+// window at export and at package build.
+//
+// The engine never needs the number. A level package hands it a resolved table
+// of window-relative BLOCKS, one per species per step, and the only arithmetic
+// left is adding the window's pointer base. See src/levelpkg.asm LEVELPKG_ANIM
+// and levelAssetsLoad.
 // The window guards in main.asm already prove the run is aligned, inside the
 // bank and clear of screen page B and the clip scratch; level_assets.asm proves
 // every package's slots fit inside it. What is left to check here is that the
@@ -466,41 +467,19 @@ enemyInit:
 // Named as assembler lists so the rows can be CHECKED as well as emitted: a
 // step that names a frame its species does not have would otherwise walk off
 // the end of that species' slot and into whatever the level loaded next to it.
-.var RING_SHAPE    = List().add(0, 1, 2, 3,  0, 1, 2, 3)   // rotate, twice
-.var DROPPER_SHAPE = List().add(0, 1, 2, 3,  3, 2, 1, 0)   // out and back
-// THE SQUARE SPINS, and a spin reverses: frames 0..3 narrow the silhouette from
-// a full face to an edge-on bar, so running them out and back is one complete
-// revolution rather than a jump from edge-on straight back to full face.
-.var SQUARE_SHAPE  = List().add(0, 1, 2, 3,  3, 2, 1, 0)   // out and back
-
-.for (var i = 0; i < RING_SHAPE.size(); i++) {
-    .if (RING_SHAPE.get(i) >= ENEMY_FRAMES) {
-        .error "a Ring animation step names a frame the Ring does not have"
-    }
-}
-.for (var i = 0; i < DROPPER_SHAPE.size(); i++) {
-    .if (DROPPER_SHAPE.get(i) >= DROPPER_FRAMES) {
-        .error "a Dropper animation step names a frame the Dropper does not have"
-    }
-}
-.for (var i = 0; i < SQUARE_SHAPE.size(); i++) {
-    .if (SQUARE_SHAPE.get(i) >= SQUARE_FRAMES) {
-        .error "a Square animation step names a frame the Square does not have"
-    }
-}
-.if (RING_SHAPE.size() != ENEMY_ANIM_STEPS || DROPPER_SHAPE.size() != ENEMY_ANIM_STEPS
-     || SQUARE_SHAPE.size() != ENEMY_ANIM_STEPS) {
-    .error "an animation shape row is not ENEMY_ANIM_STEPS steps long"
-}
-
-enemyAnimShape:
-    .fill RING_SHAPE.size(), RING_SHAPE.get(i)          // SPECIES_RING
-    .fill DROPPER_SHAPE.size(), DROPPER_SHAPE.get(i)    // SPECIES_DROPPER
-    .fill SQUARE_SHAPE.size(), SQUARE_SHAPE.get(i)      // SPECIES_SQUARE
-enemyAnimShapeEnd:
-.if (enemyAnimShapeEnd - enemyAnimShape != SPECIES_COUNT * ENEMY_ANIM_STEPS) {
-    .error "the animation shape is not one row of ENEMY_ANIM_STEPS per species"
-}
+// THE SHAPE TABLE IS GONE TOO. It held, per species, which FRAME INDEX each of
+// the eight steps showed -- resident data, because the three species were
+// resident. The artwork is now a per-level choice, so the shape belongs with
+// the choice: tools/sprite_export/import_spd.py owns each sequence's steps and
+// the exporter folds them into the level's own table, already added to that
+// sequence's base. What used to be `base + shape[step]` at load time is now
+// simply the byte the level supplied.
+//
+// The two authored shapes that existed are preserved exactly where their
+// artwork is still used: the Dropper and the Square run 0,1,2,3,3,2,1,0 -- out
+// and back -- and new artwork defaults to `step mod frames`, which reaches
+// every frame and states no direction. LOOP and PINGPONG modes are a later
+// task and nothing here pre-empts them.
 
 // ---------------------------------------------------------------------------
 // enemyAnimPtr — the sprite pointer THIS enemy should be showing this frame.
@@ -614,7 +593,7 @@ enemyTick:
     // Testing species first costs the common case one load and one compare
     // and saves the Dropper both.
     lda enySpecies,x
-    cmp #SPECIES_DROPPER
+    cmp lvlDropRow
     beq !dropper+
 
     lda enyRole,x
@@ -828,7 +807,7 @@ enemyDeathTick:
     // nothing: the object that just died was occupying exactly the slot the
     // token needs. No deferred queue, no retry, no dropped token.
     lda enySpecies,x
-    cmp #SPECIES_DROPPER
+    cmp lvlDropRow
     beq !dropper+
     jmp enemyDespawn
 
@@ -876,7 +855,7 @@ enemyDespawn:
     // being the live Dropper. Reading the species before objectFree matters --
     // objectZeroSlot is about to erase it.
     lda enySpecies,x
-    cmp #SPECIES_DROPPER
+    cmp lvlDropRow
     bne !notDropper+
     lda #0
     sta tkDropperLive

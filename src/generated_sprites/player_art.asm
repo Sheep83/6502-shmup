@@ -6,16 +6,17 @@
 //
 // Source of truth: assets/sprites/19656-sprites.spd, edited in
 // Spritemate. Regenerate with `make sprites`.
-// spd sha256: f70e5a967d7acff2a7f6293a86387141ad1ce4073ecd0dab5ce31168e5ff31c9
+// spd sha256: b1d8ef40fc6867ce26e64a3131867da3ebd6c2701bc19fdd51c1efa508ca351f
 //
-// Five banking attitudes x three engine frames, bank-major:
+// SpritePad $00..$0E. Five banking attitudes x three engine frames,
+// bank-major:
 //     index = bank * 3 + engine
 //     bank 0..4 = hard left .. hard right
 //     engine 0..2 = flame full, small, out
 //
 // The SIXTEENTH block is NOT here. src/player.asm emits it itself as
 // playerBlankBitmap -- the blank HW1 draws -- and this importer checks
-// that the .spd's slot 15 is still blank so the two cannot disagree.
+// that the .spd's slot $0F is still blank so the two cannot disagree.
 //
 // The caller owns the address: src/player.asm sets * = PLAYER_SPRITES.
 // ==========================================================================
@@ -95,8 +96,8 @@ player_art_frames:
     .byte $00, $be, $00
     .byte $00, $be, $00
     .byte $00, $be, $00
-    .byte $00, $9e, $00
-    .byte $00, $ae, $00
+    .byte $00, $be, $00
+    .byte $00, $be, $00
     .byte $00, $aa, $30
     .byte $00, $eb, $20
     .byte $0c, $ff, $e0
@@ -118,8 +119,8 @@ player_art_frames:
     .byte $00, $be, $00
     .byte $00, $be, $00
     .byte $00, $be, $00
-    .byte $00, $9e, $00
-    .byte $00, $ae, $00
+    .byte $00, $be, $00
+    .byte $00, $be, $00
     .byte $00, $aa, $30
     .byte $00, $eb, $20
     .byte $0c, $ff, $e0
@@ -141,8 +142,8 @@ player_art_frames:
     .byte $00, $be, $00
     .byte $00, $be, $00
     .byte $00, $be, $00
-    .byte $00, $9e, $00
-    .byte $00, $ae, $00
+    .byte $00, $be, $00
+    .byte $00, $be, $00
     .byte $00, $aa, $30
     .byte $00, $eb, $20
     .byte $0c, $ff, $e0
@@ -233,8 +234,8 @@ player_art_frames:
     .byte $00, $be, $00
     .byte $00, $be, $00
     .byte $00, $be, $00
-    .byte $00, $b6, $00
-    .byte $00, $ba, $00
+    .byte $00, $be, $00
+    .byte $00, $be, $00
     .byte $0c, $aa, $00
     .byte $08, $eb, $00
     .byte $0b, $ff, $30
@@ -256,8 +257,8 @@ player_art_frames:
     .byte $00, $be, $00
     .byte $00, $be, $00
     .byte $00, $be, $00
-    .byte $00, $b6, $00
-    .byte $00, $ba, $00
+    .byte $00, $be, $00
+    .byte $00, $be, $00
     .byte $0c, $aa, $00
     .byte $08, $eb, $00
     .byte $0b, $ff, $30
@@ -279,8 +280,8 @@ player_art_frames:
     .byte $00, $be, $00
     .byte $00, $be, $00
     .byte $00, $be, $00
-    .byte $00, $b6, $00
-    .byte $00, $ba, $00
+    .byte $00, $be, $00
+    .byte $00, $be, $00
     .byte $0c, $aa, $00
     .byte $08, $eb, $00
     .byte $0b, $ff, $30

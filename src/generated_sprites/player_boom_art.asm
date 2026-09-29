@@ -6,10 +6,11 @@
 //
 // Source of truth: assets/sprites/19656-sprites.spd, edited in
 // Spritemate. Regenerate with `make sprites`.
-// spd sha256: f70e5a967d7acff2a7f6293a86387141ad1ce4073ecd0dab5ce31168e5ff31c9
+// spd sha256: b1d8ef40fc6867ce26e64a3131867da3ebd6c2701bc19fdd51c1efa508ca351f
 //
-// Eight 24x21 multicolour blocks that replace the ship's silhouette on
-// HW0 the instant the craft dies, so the explosion costs no mux slot.
+// SpritePad $16..$1D. Eight 24x21 multicolour blocks that replace the
+// ship's silhouette on HW0 the instant the craft dies, so the
+// explosion costs no mux slot.
 //
 // This file pins itself, as the hand-authored one did.
 // ==========================================================================

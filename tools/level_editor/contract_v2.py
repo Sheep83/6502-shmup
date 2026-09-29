@@ -1,3 +1,5 @@
+import sys
+from pathlib import Path
 """Engine ↔ Editor Contract v2 — the numbers, verified against engine source.
 
 EVERY CONSTANT HERE WAS READ OUT OF `src/` AND THE SOURCE IS NAMED BESIDE IT.
@@ -236,13 +238,112 @@ DEFAULT_TRIGGER_COLOUR = 1
 # freshly exported level directory has no hand-authored file to inherit them
 # from. A level that genuinely needs a different packing overrides it by keeping
 # its own stage_enemies.asm, which the exporter never overwrites.
-ENEMY_FRAMES = 4                       # src/enemy.asm
-# THE ORDER IS THE WINDOW ORDER, not the species numbering. Slots are packed in
-# this order, ENEMY_FRAMES blocks each, so appending a species appends a slot
-# and never moves an existing one.
+# THE ORDER IS THE WINDOW ORDER, not the species numbering. A level's chosen
+# artwork is packed in this order, each entry taking exactly its own frame
+# count, so the window holds only what the level uses.
 SPECIES_ORDER = ("RING", "DROPPER", "SQUARE")   # src/encounter_format.asm
-DEFAULT_ENEMY_SLOTS = {name: i * ENEMY_FRAMES
-                       for i, name in enumerate(SPECIES_ORDER)}
+
+# --- THE ENEMY ARTWORK ROSTER ----------------------------------------------
+# A ROSTER ENTRY IS ARTWORK, NOT A SPECIES. The engine has three behavioural
+# species; a level chooses which sequence each of them WEARS. Frame counts run
+# 1..8 and a species owns exactly its artwork's frame count -- there is no
+# ENEMY_FRAMES any more, because there is no single answer.
+#
+# The roster itself lives in tools/sprite_export/import_spd.py, beside the
+# SpritePad source it is cut from, and is imported here rather than copied: a
+# second list of frame counts is exactly the kind of duplicate that goes stale.
+_SPRITE_TOOLS = Path(__file__).resolve().parent.parent / "sprite_export"
+if str(_SPRITE_TOOLS) not in sys.path:
+    sys.path.insert(0, str(_SPRITE_TOOLS))
+import import_spd as _spd                                          # noqa: E402
+
+ENEMY_ROSTER = tuple((r.name, r.label, r.frames) for r in _spd.ENEMY_ROSTER)
+ROSTER_FRAMES = {r.name: r.frames for r in _spd.ENEMY_ROSTER}
+ROSTER_LABELS = {r.name: r.label for r in _spd.ENEMY_ROSTER}
+ROSTER_SOURCE = {r.name: (r.slots[0], r.slots[-1]) for r in _spd.ENEMY_ROSTER}
+
+# THE ONE AUTHORITATIVE BUDGET. src/main.asm LEVEL_SPRITE_BLOCKS, and the same
+# number src/levelpkg.asm sizes LEVELPKG_SPR with. Imported, never retyped.
+LEVEL_SPRITE_BLOCKS = _spd.LEVEL_SPRITE_BLOCKS          # 20
+
+# --- A LEVEL'S THREE ENEMY IDENTITIES ---------------------------------------
+# ORDERED, because the order IS the engine's species row offset: slot 0 is row
+# 0, slot 1 is row 8, slot 2 is row 16. A trigger names an IDENTITY and the
+# exporter resolves it to whichever of this level's slots holds it.
+#
+# The engine still has three enemy slots per level. What changed is that a slot
+# is no longer one of three fixed legacy species -- it holds any identity from
+# the roster, and the identity carries its own artwork, frame count and
+# behaviour. "Space Whisk" is an enemy; it is not a Sonic Ring wearing a
+# costume.
+ENEMY_SLOTS = len(SPECIES_ORDER)        # 3, unchanged in this task
+
+# What a level gets when it says nothing. Ring 3 is the successor to the Sonic
+# Ring artwork the current SpritePad project retired, so a level written before
+# identities existed keeps meaning what it meant.
+DEFAULT_ENEMY_IDENTITIES = ["RING_3", "DROPPER", "SQUARE"]
+
+# The legacy trigger species names, in slot order, for migrating old projects.
+LEGACY_SPECIES_ORDER = ("RING", "DROPPER", "SQUARE")
+
+
+def level_identities(project):
+    """The three identity names this level holds, in slot order."""
+    got = list(getattr(project, "enemy_slots", None) or [])
+    out = []
+    for i in range(ENEMY_SLOTS):
+        name = got[i] if i < len(got) else None
+        out.append(name if name in ROSTER_FRAMES else DEFAULT_ENEMY_IDENTITIES[i])
+    return out
+
+
+def identity_row(identity, identities):
+    """The engine species row offset holding `identity`, or None if absent."""
+    if identity in identities:
+        return identities.index(identity) * ENEMY_ANIM_STEPS
+    return None
+
+
+BEHAVIOUR_PLAIN = _spd.BEHAVIOUR_PLAIN
+BEHAVIOUR_DROPPER = _spd.BEHAVIOUR_DROPPER
+ROSTER_BEHAVIOUR = {r.name: r.behaviour for r in _spd.ENEMY_ROSTER}
+
+
+def identity_behaviour(name):
+    """PLAIN or DROPPER. Behaviour belongs to the identity, not to a slot."""
+    return ROSTER_BEHAVIOUR.get(name, BEHAVIOUR_PLAIN)
+
+
+def identity_label(name):
+    return ROSTER_LABELS.get(name, name)
+
+
+def enemy_slot_cost(identities):
+    """Blocks the three chosen identities consume."""
+    total = 0
+    for name in identities:
+        if name not in ROSTER_FRAMES:
+            raise ValueError(f"{name!r} is not in the enemy roster")
+        total += ROSTER_FRAMES[name]
+    return total
+
+
+def enemy_slot_problems(identities):
+    """Human-readable reasons a level's identity selection is invalid."""
+    out = [f"{n!r} is not in the enemy roster"
+           for n in identities if n not in ROSTER_FRAMES]
+    if out:
+        return out
+    if len(identities) != ENEMY_SLOTS:
+        return [f"a level holds {ENEMY_SLOTS} enemy identities; got {len(identities)}"]
+    cost = enemy_slot_cost(identities)
+    if cost > LEVEL_SPRITE_BLOCKS:
+        out.append("enemy sprite budget exceeded: "
+                   + " + ".join(f"{ROSTER_LABELS[n]} {ROSTER_FRAMES[n]}"
+                                for n in identities)
+                   + f" = {cost}, and the window holds {LEVEL_SPRITE_BLOCKS}")
+    return out
+
 
 # ---------------------------------------------------------------------------
 # Triggers and the boss approach — src/waves.asm, src/levelpkg.asm

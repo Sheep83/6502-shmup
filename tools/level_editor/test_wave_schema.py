@@ -110,18 +110,18 @@ p.wave_definitions = [WaveDefinition(id="w", count=4, interval=22, start_x=0,
                                      start_y=64, heading=0,
                                      movement_program="run")]
 
-p.triggers = [Trigger(90, "w", "RING", [0]),
+p.triggers = [Trigger(90, "w", "RING_3", [0]),
               Trigger(300, "w", "DROPPER", [1])]
 assert validate(p).ok, validate(p)
 ok("ascending worldProgress rows are accepted")
 
-p.triggers = [Trigger(300, "w", "RING", [0]), Trigger(90, "w", "DROPPER", [1])]
+p.triggers = [Trigger(300, "w", "RING_3", [0]), Trigger(90, "w", "DROPPER", [1])]
 codes = [i.code for i in validate(p).errors]
 assert "trigger.unsorted" in codes, codes
 ok("descending rows -- the OLD contract's order -- are now rejected")
 
 # A row above 255 is not a special case: it is two bytes compared sixteen-bit.
-p.triggers = [Trigger(255, "w", "RING", [0]), Trigger(300, "w", "DROPPER", [1])]
+p.triggers = [Trigger(255, "w", "RING_3", [0]), Trigger(300, "w", "DROPPER", [1])]
 assert validate(p).ok, validate(p)
 assert 300 > 0xFF and (300 & 0xFF, 300 >> 8) == (44, 1)
 ok("a trigger row above 255 is legal and splits low/high as 44/1")
@@ -134,11 +134,11 @@ assert t.fire_bits == 0b101, bin(t.fire_bits)
 assert C.SPECIES[t.species] == 8 and C.DROPPER_SIDES[t.dropper_side] == 1
 ok("a trigger carries row, definition, species, fire mask and Dropper side")
 
-p.triggers = [Trigger(90, "nope", "RING", [0])]
+p.triggers = [Trigger(90, "nope", "RING_3", [0])]
 assert "trigger.dangling_definition" in [i.code for i in validate(p).errors]
 p.triggers = [Trigger(90, "w", "SQUID", [0])]
 assert "trigger.species" in [i.code for i in validate(p).errors]
-p.triggers = [Trigger(90, "w", "RING", [7])]
+p.triggers = [Trigger(90, "w", "RING_3", [7])]
 assert "trigger.fire_member_absent" in [i.code for i in validate(p).errors]
 ok("dangling definition, unknown species and an impossible fire bit are rejected")
 

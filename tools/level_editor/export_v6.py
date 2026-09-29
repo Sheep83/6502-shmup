@@ -38,6 +38,7 @@ DESTINATION IS ALWAYS EXPLICIT. Nothing here defaults to the repository, so a
 test cannot overwrite the authoritative src/level1/ by omission.
 """
 from pathlib import Path
+import hashlib
 import os
 import re
 import shutil
@@ -58,6 +59,7 @@ ENCOUNTERS_NAME = "wave_encounters.asm"
 # and never overwritten when it does, so a level that needs its own packing
 # keeps it by simply having the file.
 ENEMIES_NAME = "stage_enemies.asm"
+SPRITES_NAME = "stage_sprites.asm"
 
 TERRAIN_NAMES = (CONFIG_NAME, CHARSET_NAME, MAP_NAME, TURRETS_NAME)
 ENCOUNTER_NAMES = (PROGRAMS_NAME, ENCOUNTERS_NAME)
@@ -65,7 +67,7 @@ GENERATED_NAMES = TERRAIN_NAMES + ENCOUNTER_NAMES
 # EVERY file src/main.asm and src/level_package.asm need from a level directory.
 # A package missing any one of these does not assemble, so the export refuses
 # rather than leaving one behind.
-REQUIRED_PACKAGE_NAMES = GENERATED_NAMES + (ENEMIES_NAME,)
+REQUIRED_PACKAGE_NAMES = GENERATED_NAMES + (ENEMIES_NAME, SPRITES_NAME)
 
 
 class ExportRefused(RuntimeError):
@@ -620,7 +622,14 @@ def render_wave_encounters(project, level_name):
         "// WHICH ENEMY THE WAVE IS MADE OF -- an authored column rather than",
         "// arithmetic on the cursor, so inserting a trigger cannot silently invert",
         "// every wave after it.",
-        _list_decl("trigSpecies", [f"SPECIES_{t.species}" for t in trigs]),
+        # A TRIGGER NAMES AN IDENTITY; THE PACKAGE CARRIES A SLOT. The engine's
+        # species value is this level's enemy SLOT (row 0, 8 or 16), and which
+        # identity sits in that slot is the level's own choice. Resolving it
+        # here is what lets a trigger say "Space Whisk" instead of pretending
+        # to be one of three legacy species.
+        _list_decl("trigSpecies",
+                   [f"SPECIES_{C.SPECIES_ORDER[_identity_slot(project, t.species)]}"
+                    for t in trigs]),
         "",
         "// WHICH SIDE A DROPPER FLIES IN FROM. Read only when the species above is",
         "// SPECIES_DROPPER; a Ring wave carries whatever is written here and",
@@ -660,48 +669,80 @@ def _list_decl(name, values):
 # ---------------------------------------------------------------------------
 # the export
 # ---------------------------------------------------------------------------
+def _enemy_identities(project):
+    """This level's three enemy identities, in slot order, validated."""
+    ids = C.level_identities(project)
+    problems = C.enemy_slot_problems(ids)
+    if problems:
+        raise ExportRefused("; ".join(problems))
+    return ids
+
+
+def _identity_slot(project, identity):
+    """Which of this level's three enemy slots holds `identity`."""
+    ids = C.level_identities(project)
+    if identity not in ids:
+        raise ExportRefused(
+            f"a trigger uses the enemy {C.identity_label(identity)!r}, which "
+            f"this level does not carry. The level holds "
+            + ", ".join(C.identity_label(i) for i in ids)
+            + ". Either add it to the level's enemies or point the trigger at "
+              "one it has.")
+    return ids.index(identity)
+
+
 def render_stage_enemies(project, level_name):
-    """The level's claim on the enemy sprite window.
+    """Which artwork this level's three species wear, and the animation table.
 
-    ONE CANONICAL TEMPLATE, not a copy of Level 1's file. The slot numbers are
-    the default packing in contract_v2 (species in order, ENEMY_FRAMES blocks
-    each), which is what every level using the current two species wants; they
-    are NOT read out of src/level1/, so a fresh Level 2 export does not depend
-    on Level 1 existing at all.
+    GENERATED EVERY EXPORT, and that is a change. It used to be written once as
+    a default and then left alone for ever, because it only said where three
+    fixed four-block species sat and that never varied. It now encodes the
+    level's CHOICE of artwork and the resolved animation table, so a hand-kept
+    copy would silently ignore every change made in the editor.
 
-    The symbols are deliberately level-NEUTRAL. They were LVL_SLOT_* only after
-    this cleanup -- they used to be L1_SLOT_*, which meant a generated Level 2
-    had to define constants named after Level 1.
+    The table itself comes from tools/sprite_export/import_spd.py, which owns
+    the roster, the frame counts and each sequence's animation steps. Nothing is
+    recomputed here; a second implementation is a second thing to go stale.
     """
-    slots = C.DEFAULT_ENEMY_SLOTS
+    ids = _enemy_identities(project)
+    digest = hashlib.sha256(Path(C._spd.SPD).read_bytes()).hexdigest()
+    text, _layout, _table = C._spd.level_enemies_asm(ids, digest, level_name)
+    return text
+
+
+def render_stage_sprites(project, level_name):
+    """The manifest: which generated art files fill the window, in window order.
+
+    ALSO GENERATED EVERY EXPORT, for the same reason and for one more: it must
+    name exactly the artwork stage_enemies.asm claims, and the package build
+    checks the two against each other. Keeping one by hand while generating the
+    other is how they would disagree.
+    """
+    layout, _ = C._spd.level_sprite_plan(_enemy_identities(project))
     body = [
-        "// CONSTANTS-ONLY level include. Emits no bytes, no memory segment, no",
-        "// program-counter change. Imported very early, beside stage_config.asm,",
-        "// so every level-owned constant exists before the engine code that",
-        "// consumes them.",
+        "// The enemy sprite window is level-owned artwork: the package carries",
+        "// the bytes and levelApplySprites copies them into LEVEL_SPRITES at",
+        "// level init. This names which generated blocks fill the window, in",
+        "// WINDOW ORDER -- slot 0 first, contiguously.",
         "//",
-        "// Ownership: these values belong to the LEVEL PACKAGE, not to the engine.",
-        "// They say which slot of the engine's enemy sprite window each species'",
-        "// frames were loaded into. A slot is a block index counted from the start",
-        "// of the window, so nothing here knows or cares where the window actually",
-        "// is -- see the window constants in src/main.asm and the loader in",
-        "// src/level_assets.asm.",
+        "// IT IS A MANIFEST, NOT ARTWORK. Every block comes from",
+        "// src/generated_sprites/, produced by tools/sprite_export/import_spd.py",
+        "// from assets/sprites/19656-sprites.spd. SpritePad remains the",
+        "// authority; this only says which of its output this level ships.",
         "//",
-        "// A species' IDENTITY is engine-resident and never appears here; only its",
-        "// physical placement, which is exactly the thing that changes per level.",
-        "//",
-        "// THE BANNER ABOVE IS ONLY HALF TRUE FOR THIS FILE. It is written once,",
-        "// as a default, when a level directory does not yet have one -- and the",
-        "// exporter never overwrites an existing stage_enemies.asm. So a level",
-        "// that needs a different packing edits this file and keeps it; from",
-        "// then on it is hand-authored and every later export leaves it alone.",
+        "// ONLY THE CHOSEN ARTWORK IS SHIPPED. The roster has twelve sequences;",
+        "// a level carries the three it uses, which is what keeps it inside the",
+        f"// engine's {C.LEVEL_SPRITE_BLOCKS}-block window.",
+        "",
+        "#importonce",
         "",
     ]
-    for name in C.SPECIES_ORDER:
-        body.append(f".const LVL_SLOT_{name:<8} = {slots[name]:<3}"
-                    f"// {C.ENEMY_FRAMES} consecutive sprite blocks")
+    for r, b in layout:
+        body.append(f'#import "generated_sprites/{r.filename}"'
+                    + " " * max(1, 46 - len(r.filename))
+                    + f"// slots {b}-{b + r.frames - 1}  {r.label}")
     return _text(_banner(level_name,
-                         "the level's claim on the enemy sprite window") + [""] + body)
+                         "this level's claim on the SPRITE artwork") + [""] + body)
 
 
 def render_all(project, level_name):
@@ -771,21 +812,18 @@ def export_level(project, dest_dir, *, level_name=None, validate_first=True,
     # itself as `carry_enemies_from` -- so on a fresh level directory the source
     # did not exist, the copy was skipped without a word, and the export handed
     # back a six-file package that src/main.asm cannot assemble.
-    target = dest / ENEMIES_NAME
-    carried = None
-    if carry_enemies_from is not None:
-        candidate = Path(carry_enemies_from) / ENEMIES_NAME
-        if candidate.exists():
-            carried = candidate
-    if carried is not None:
-        if carried.resolve() != target.resolve():
-            shutil.copyfile(carried, target)
-    elif not target.exists():
-        tmp = dest / (ENEMIES_NAME + ".tmp")
-        tmp.write_text(render_stage_enemies(project, level_name),
-                       encoding="utf-8", newline="\n")
+    # stage_enemies.asm and stage_sprites.asm are GENERATED EVERY TIME now.
+    # They used to be carried forward by hand because they only recorded a fixed
+    # packing; they now encode which artwork this level chose, so carrying an old
+    # one forward would discard the choice and ship the previous level's
+    # animation table against this level's sprite window.
+    for name, render in ((ENEMIES_NAME, render_stage_enemies),
+                         (SPRITES_NAME, render_stage_sprites)):
+        target = dest / name
+        tmp = dest / (name + ".tmp")
+        tmp.write_text(render(project, level_name), encoding="utf-8", newline="\n")
         os.replace(tmp, target)
-    written[ENEMIES_NAME] = target
+        written[name] = target
 
     # AND THEN CHECK. An export that quietly produces an unbuildable directory
     # is worse than one that fails, because the failure surfaces later as an
