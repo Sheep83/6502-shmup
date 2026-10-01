@@ -395,13 +395,13 @@ test-fast: build
 
 # FULL: every suite in the repository.
 test-full: build
-	@tools/run_tier.sh test-full aimed_fire aimed_velocity attrition_inflives bank2_arena boot boss boss_hud_transition campaign clip_scratch dropper_flight ebullet_clipping encounter_director enemy_fire flight_paths heat_cadence ingress_egress level_assets level_identity lifecycle movement_pool no_spawn_row p_economy_colours pickup player_death player_ship production sfx species_order square_species token_encounter turret_arming turret_regression wave_triggers
+	@tools/run_tier.sh test-full aimed_fire aimed_velocity attrition_inflives bank2_arena boot boss boss_hud_transition campaign clip_scratch dropper_flight ebullet_clipping encounter_director enemy_fire flight_paths heat_cadence ingress_egress level_assets level_identity lifecycle movement_pool no_spawn_row p_economy_colours pickup player_death player_ship production regen_page_shift sfx species_order square_species token_encounter turret_arming turret_regression wave_triggers
 
 # SOAK: the suites whose runtime is UNBOUNDED -- they wait on content-dependent
 # events, so they have been measured from 25s to 2,226s. See the phase-2 report:
 # their runtime and their flakiness are the same defect and want the same fix.
 test-soak: build
-	@tools/run_tier.sh test-soak dropper_flight encounter_director flight_paths ingress_egress production species_order square_species token_encounter
+	@tools/run_tier.sh test-soak dropper_flight encounter_director flight_paths ingress_egress production regen_page_shift species_order square_species token_encounter
 
 test-boot: build
 	python3 tests/test_boot.py

@@ -748,6 +748,12 @@ gamePlayLoop:
 // thing that may change which page that is. Nothing above them touches a page.
 // ---------------------------------------------------------------------------
 gameFrame:
+    // THE OVERRUN MARK, taken before any work: gameSpan compares against it to
+    // see whether this frame's work outlasted the displayed frame it belongs
+    // to. See gameFrameOver for why the existing counters could not.
+    lda frameCounter
+    sta gameFrameMark
+
     // FIRST, AND THE POSITION IS THE WHOLE POINT.
     //
     // The main loop is paced by the frame counter, which the renderer
@@ -978,6 +984,16 @@ gameFrame:
 // own wrap check was written twice for exactly that reason.
 // ---------------------------------------------------------------------------
 gameSpan:
+    // ---- did this frame's work outlast its displayed frame? --------------
+    lda frameCounter
+    cmp gameFrameMark
+    beq !inFrame+                       // unchanged: the work fitted
+    lda gameFrameOver
+    cmp #$ff
+    beq !inFrame+                       // saturating, like every fault counter
+    inc gameFrameOver
+!inFrame:
+
     lda $d011
     and #$80
     bne !high+
@@ -1070,6 +1086,7 @@ gameInit:
     sta gameSpanMax                     // publication; nothing is outstanding
     sta gameSpanOver
     sta gameOverrun
+    sta gameFrameOver
     rts
 
 // ---------------------------------------------------------------------------
@@ -1316,5 +1333,31 @@ gameSpanOver:  .byte 0                  // frames whose span exceeded 255 lines:
                                         // the span above is then a floor
 gameOverrun:   .byte 0                  // displayed frames the main thread did
                                         // not prepare a frame for. MUST read 0.
+
+// --- THE COUNTER THAT ACTUALLY DETECTS A FRAME OVERRUN ---------------------
+// gameOverrun above counts frames the main thread DROPPED, which is a real but
+// LAGGING measure: a frame whose work takes 101% of the budget steals only 1%
+// of the next one, so the loop still sees a frameCounter delta of 1 and nothing
+// is recorded until enough debt accumulates to skip a whole frame. And
+// gameSpanMax SATURATES at 255 raster lines, which is 82% of a frame -- every
+// span from 82% to over 100% reports the same 255.
+//
+// Between them, a stress encounter measured at 101-107% of the frame reported
+// "zero overruns" and a worst span of "255". See
+// reports/mux-glitch-diagnostic-pass-1.md, which had to measure the span in
+// CYCLES from outside to see it at all.
+//
+// THE TEST THAT IS EXACT AND COSTS ALMOST NOTHING: gameFrame runs between two
+// frame transactions, and the transaction at raster 250 is what increments
+// frameCounter. So if frameCounter has CHANGED between gameFrame's entry and
+// gameSpan, this frame's work occupied more than a whole displayed frame. No
+// raster arithmetic, no saturation, no wrap case -- one byte compared against
+// one byte.
+gameFrameMark: .byte 0                  // frameCounter at gameFrame's entry
+gameFrameOver: .byte 0                  // frames whose WORK exceeded one whole
+                                        // displayed frame. Saturating. Unlike
+                                        // gameOverrun this fires on the FIRST
+                                        // such frame, not once the debt has
+                                        // accumulated into a dropped one.
 
 .if (* > $5300) { .error "main has run into the level loader at $5300" }

@@ -34,6 +34,15 @@
 //     enemy and a turret. See traceRay for how the second falls out of order.
 // ===========================================================================
 
+// THE TWIN-RAY SCAN RESOLVES EXACTLY TWO RAYS IN ONE POOL WALK, so the weapon
+// had better still fire two. This is a build error rather than a runtime
+// branch: a third ray is a weapon-design change, and whoever makes it should be
+// told here, by name, instead of discovering that the third ray never hits
+// anything. See collideTwinRays.
+.if (WPN_RAYS != 2) {
+    .error "collision.asm resolves exactly two hitscan rays in one pass; WPN_RAYS is no longer 2 -- see collideTwinRays"
+}
+
 .const HITBOX_W        = 24         // hit iff enemyX <= rayX <= enemyX+23
 .const HITBOX_X_OFF    = 0          // the box starts at logX itself
 .const SHOT_DAMAGE     = 1          // per cannon hit; enemies start at 6 HP
@@ -141,7 +150,12 @@
 // ===========================================================================
 // State. MAIN THREAD ONLY.
 // ===========================================================================
-* = $c5f3 "collision state"
+// MOVED FROM $c5f3, WHERE IT NO LONGER FITS. That run is thirteen bytes between
+// the object pool below and the SFX state above, and the twin-ray scan needs two
+// more for the second ray's candidate. $c616 is the free run above the vic bank
+// state and below the game state -- 234 bytes, where this block's fourteen are
+// comfortable. Nothing reads these by address; every consumer uses the symbol.
+* = $c616 "collision state"
 
 // --- the scan's working set ------------------------------------------------
 csRayLo:     .byte 0                // the ray being traced, nine bits
@@ -151,6 +165,24 @@ csTargetY:   .byte 0                // its Y; greatest Y wins
 csTargetKind: .byte 0               // CS_KIND_ENEMY or CS_KIND_TURRET. Which
                                     // pool csTarget indexes, and nothing else.
 csTmp:       .byte 0                // the nine-bit delta's low byte
+
+// --- the SECOND ray's candidate, for the one-pass twin-ray scan ------------
+// The weapon fires two rays and the pool walk is the expensive part of
+// resolving them, so traceBothRays walks it ONCE and keeps a candidate for each
+// ray. The FIRST ray uses csTarget/csTargetY above, which is also what
+// traceTurretRay and applyDamage already read, so the resolution half of the
+// routine did not have to change at all.
+//
+// NO csRay2Lo/Hi. The two ray coordinates are already in the shot event that
+// src/weapon.asm publishes, so traceBothRays reads shotXLo/shotXHi directly;
+// copying them into locals first cost four stores and two bytes of state to
+// reach the same absolute addressing mode.
+//
+// NO csTarget2Kind. Turrets are resolved per ray by traceTurretRay AFTER the
+// pool walk, against whichever candidate that ray ended up with, so the kind
+// only ever has to exist for the ray being resolved right now.
+csTarget2:   .byte 0                // the second ray's best enemy, or $ff
+csTarget2Y:  .byte 0
 
 // --- the kill event --------------------------------------------------------
 // The only coupling between combat and any future score system: the fact and
@@ -166,7 +198,7 @@ csKillsLo:   .byte 0                // total enemies killed, 16-bit
 csKillsHi:   .byte 0
 
 collisionStateEnd:
-.if (collisionStateEnd > $c600) { .error "the collision state has grown past its $c600 ceiling" }
+.if (collisionStateEnd > $c700) { .error "the collision state has grown past its $c700 ceiling" }
 
 // ===========================================================================
 // Code. MAIN THREAD ONLY, outside VIC bank 0.
@@ -205,34 +237,100 @@ collisionTick:
     rts
 !shot:
 
-    ldx #0                              // X = ray index, 0..shotRays-1
-!rayLoop:
-    cpx shotRays
-    bcc !trace+
-    rts
-!trace:
-    lda shotXLo,x
+    // A VOLLEY IS EXACTLY TWO RAYS, and that is asserted at the top of this
+    // file rather than branched on here. The general "loop over shotRays"
+    // version this replaced was a runtime fallback for a case the weapon
+    // cannot produce -- dead code carrying its own risk of silently doing the
+    // wrong thing. A build error is a better guard than an untested path.
+    // falls through to collideTwinRays
+
+// ---------------------------------------------------------------------------
+// collideTwinRays — the two-ray volley, one pool walk.
+//
+// THE SEQUENTIAL RULE IS THE WHOLE DIFFICULTY, and it is preserved exactly.
+// The old code ran `traceRay` then `applyDamage` per ray, so the LEFT ray's
+// damage was already in objHP when the RIGHT ray scanned. That is observable:
+// a one-HP enemy standing in both rays dies to the left ray, and the right ray
+// then takes whatever was BEHIND it rather than hitting the corpse twice.
+// tests/test_hitscan_twin_ray.py pins that case.
+//
+// A single pass collects both candidates BEFORE any damage, so it cannot see
+// that by itself. The resolution: ray 0's damage can only ever make ray 1's
+// candidate INELIGIBLE -- it cannot move an enemy, change a Y, or make a new
+// one eligible -- so the only divergence is "ray 1's candidate just died". That
+// is detected in three instructions and handled by running the ORIGINAL
+// single-ray scan for ray 1, which by construction then produces exactly what
+// the old code produced.
+//
+// So the fast path is the common case and the rare case falls back to the slow
+// path that was always correct. Nothing approximates anything.
+// ---------------------------------------------------------------------------
+collideTwinRays:
+    jsr traceBothRays                   // one walk; both candidates
+
+    // ---- ray 0 ------------------------------------------------------------
+    // csTarget/csTargetY are already ray 0's. traceTurretRay works on
+    // csRayLo/Hi, so the ray coordinate is published for it here.
+    lda shotXLo + 0
     sta csRayLo
-    lda shotXHi,x
+    lda shotXHi + 0
     sta csRayHi
-    txa
-    pha                                 // traceRay walks X over the pool
-    jsr traceRay
-    bcs !tryBoss+
-    jsr applyDamage                     // X = the chosen target
-    jmp !miss+
-!tryBoss:
-    // NOTHING ORDINARY WAS IN THE WAY, so the ray may reach the boss. One ray
-    // reaches one target here, exactly as it always has, which is the whole
-    // reason a ray crossing a seam between the boss's four render cells cannot
-    // count twice: the cells are not targets, and this is one test against one
-    // rectangle. See src/boss.asm.
-    jsr bossRayHit
-!miss:
-    pla
+    lda #CS_KIND_ENEMY
+    sta csTargetKind
+    jsr traceTurretRay                  // turrets extend the same competition
+    jsr csResolve                       // damage it, or let the ray reach the boss
+
+    // ---- ray 1 ------------------------------------------------------------
+    lda shotXLo + 1
+    sta csRayLo
+    lda shotXHi + 1
+    sta csRayHi
+
+    // DID RAY 0 KILL WHAT RAY 1 WANTED? That is the only way one pass can
+    // differ from two, because ray 0's damage cannot move an enemy, change a Y
+    // or make a new one eligible -- it can only take ray 1's candidate away.
+    lda csTarget2
+    cmp #$ff
+    beq !fast+                          // ray 1 found nothing: nothing to spoil
     tax
-    inx
-    jmp !rayLoop-
+    lda objHP,x
+    bne !fast+                          // still alive: the candidate stands
+
+    // THE RARE PATH, and it is the OLD path. Ray 1 must re-choose from what is
+    // left, which is exactly what the original per-ray scan does -- so run it
+    // rather than approximate it. Reached only when a volley kills an enemy
+    // standing in both lanes.
+    jsr traceRay                        // turrets included; leaves csTarget
+    jmp csResolve
+
+!fast:
+    lda csTarget2
+    sta csTarget
+    lda csTarget2Y
+    sta csTargetY
+    lda #CS_KIND_ENEMY
+    sta csTargetKind
+    jsr traceTurretRay
+    // falls through
+
+// ---------------------------------------------------------------------------
+// csResolve — spend one ray on whatever won it. Entry: csTarget/csTargetKind.
+//
+// ONE PLACE, because the three callers above differ only in how they chose the
+// target, never in what spending it means: a winner takes damage, and a ray
+// that found nothing ordinary in its path is allowed to reach the boss.
+// ---------------------------------------------------------------------------
+csResolve:
+    ldx csTarget
+    cpx #$ff
+    beq !boss+
+    jmp applyDamage                     // X = the chosen target; its rts is ours
+!boss:
+    // NOTHING ORDINARY WAS IN THE WAY, so the ray may reach the boss. One ray
+    // reaches one target, which is why a ray crossing a seam between the
+    // boss's four render cells cannot count twice: the cells are not targets,
+    // and this is one test against one rectangle. See src/boss.asm.
+    jmp bossRayHit
 
 // ---------------------------------------------------------------------------
 // playerBodyTick — the craft meets an enemy's body. MAIN THREAD, once a frame.
@@ -334,6 +432,94 @@ playerBodyTick:
 // A spatial structure over sixteen objects would cost more to maintain than it
 // could save.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// traceBothRays — ONE walk of the object pool, a candidate for EACH ray.
+// Entry: the shot event (shotXLo/shotXHi, shotY) as src/weapon.asm left it.
+// Exit:  csTarget/csTargetY   = ray 0's best enemy (or $ff)
+//        csTarget2/csTarget2Y = ray 1's best enemy (or $ff)
+//        X and A clobbered. Turrets are NOT considered here.
+//
+// WHY THIS EXISTS. traceRay walks all sixteen slots, and resolving two rays ran
+// it twice: every slot's logActive, objType, objHP and both halves of the Y
+// test were paid for TWICE to answer a question about X that differs only in
+// the ray coordinate. Measured at 56 cycles per occupied slot per ray; doing
+// the eligibility once and only the X test twice costs about 89 for the pair
+// instead of about 130, and an empty slot 13 instead of 26.
+//
+// WHAT IS IDENTICAL TO traceRay, deliberately and line for line: the type and
+// liveness filter, both halves of the Y band, the nine-bit X delta against
+// HITBOX_W, and `greatest Y wins, an EQUAL Y replaces` so a tie still goes to
+// the highest slot index. The two rays keep entirely separate candidates, so
+// neither can shadow the other.
+//
+// WHAT IS NOT DONE HERE: turrets, and damage. Both are the caller's, and that
+// is what lets the sequential rule survive -- see collisionTick.
+// ---------------------------------------------------------------------------
+traceBothRays:
+    lda #$ff
+    sta csTarget
+    sta csTarget2
+    lda #0
+    sta csTargetY
+    sta csTarget2Y
+
+    ldx #0
+!scan:
+    // ---- eligibility, ONCE for both rays ---------------------------------
+    lda logActive,x
+    beq !next+
+    lda objType,x
+    cmp #TYPE_ENEMY
+    bne !next+
+    lda objHP,x
+    beq !next+                          // already dying: not a target again
+    lda logY,x
+    cmp #HITSCAN_MIN_Y
+    bcc !next+                          // above the band: still arriving
+    cmp shotY
+    bcs !next+                          // at or below the ship: behind the ray
+
+    // ---- ray 0's X -------------------------------------------------------
+    lda shotXLo + 0
+    sec
+    sbc logX,x
+    sta csTmp
+    lda shotXHi + 0
+    sbc logXHi,x
+    bne !ray1+                          // negative, or 256+: cannot be inside
+    lda csTmp
+    cmp #HITBOX_W
+    bcs !ray1+
+    lda logY,x
+    cmp csTargetY
+    bcc !ray1+                          // strictly farther: keep the incumbent
+    sta csTargetY
+    stx csTarget
+
+!ray1:
+    // ---- ray 1's X, against the SAME object -------------------------------
+    lda shotXLo + 1
+    sec
+    sbc logX,x
+    sta csTmp
+    lda shotXHi + 1
+    sbc logXHi,x
+    bne !next+
+    lda csTmp
+    cmp #HITBOX_W
+    bcs !next+
+    lda logY,x
+    cmp csTarget2Y
+    bcc !next+
+    sta csTarget2Y
+    stx csTarget2
+
+!next:
+    inx
+    cpx #MAX_OBJECTS
+    bne !scan-
+    rts
+
 traceRay:
     lda #$ff
     sta csTarget                        // $ff = nothing has intersected yet
@@ -482,4 +668,4 @@ applyDamage:
 !done:
     rts
 
-.if (* > $4e00) { .error "the collision code has outgrown its $4c00 segment" }
+.if (* > $4e00) { .error "the collision code has outgrown its $4c00 segment by " + toIntString(* - $4e00) + " bytes" }

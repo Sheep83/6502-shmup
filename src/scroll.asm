@@ -619,6 +619,38 @@ publishFrame:
 // ===========================================================================
 // regenTick — rebuild a few rows of the back page, once per frame.
 // ===========================================================================
+// ---------------------------------------------------------------------------
+// ONLY ROW 0 IS NEW. THE OTHER TWENTY-FOUR ALREADY EXIST.
+//
+// A coarse step moves the world by exactly one character row, so the page being
+// rebuilt shows the same terrain as the displayed one shifted down a row:
+//
+//     backRow[r] == frontRow[r - 1]   for r = 1..24
+//
+// Only row 0 carries content that is new to the screen. Rebuilding the other
+// twenty-four from the metatile map was recomputing, at about 1,443 cycles a
+// row, bytes that already sat forty bytes away in the other page.
+//
+// MEASURED, NOT ASSUMED. The relationship was checked at the idle frame of
+// fourteen consecutive coarse steps, with the player firing: delta was -1 and
+// all 24 rows matched byte for byte every time, turret overlay included. See
+// reports/whole-frame-audit-and-regen-optimisation.md.
+//
+// WHY THE TURRET OVERLAY SURVIVES THE COPY. A turret at stage row S appears in
+// the displayed page at row S - stageTopRow and in the back page at
+// S - regenTopRow, which is one row lower -- so a turret is in back row r
+// exactly when it is in front row r-1, which is what the copy reproduces. And
+// a turret DESTROYED mid-cycle is not this routine's problem either: src/
+// turrets.asm repairs BOTH pages against their own top rows, by re-rendering
+// the affected rows through renderTerrainRow, precisely because rows behind the
+// regeneration cursor would otherwise keep a dead body until the next flip.
+// That guarantee is independent of how a row got its contents, so it covers a
+// copied row exactly as it covered a decoded one.
+//
+// WHAT IS UNCHANGED: the schedule. Still ROWS_PER_TICK rows a frame, still
+// finishing in seven of the eight frames between coarse steps, still leaving
+// the eighth idle for TURRET_PREPARE_FINE. Only the cost of a row changed.
+// ---------------------------------------------------------------------------
 regenTick:
     lda regenRow
     cmp #SCREEN_ROWS
@@ -627,7 +659,13 @@ regenTick:
 !loop:
     tya
     pha
-    jsr renderRow
+    lda regenRow
+    bne !copy+
+    jsr renderRow                       // row 0: the one row that is new
+    jmp !stepped+
+!copy:
+    jsr copyRowFromFront                // rows 1..24: already decoded, next door
+!stepped:
     pla
     tay
     inc regenRow
@@ -637,6 +675,57 @@ regenTick:
     dey
     bne !loop-
 !done:
+    rts
+
+// ---------------------------------------------------------------------------
+// copyRowFromFront — back page row `regenRow` = displayed page row regenRow-1.
+// Entry: regenRow in 1..SCREEN_ROWS-1. Exit: X, Y and A clobbered.
+//
+// THE OTHER PAGE'S HIGH BYTE IS ONE EOR. The two matrices are the only two the
+// engine has and their high bytes differ in exactly the bits below, so flipping
+// them selects the other one. Asserted rather than trusted, because it is the
+// kind of trick that silently addresses nothing if a page ever moves.
+// ---------------------------------------------------------------------------
+.const PAGE_HI_FLIP = (SCREEN_A >> 8) ^ (SCREEN_B >> 8)
+.if (((SCREEN_A >> 8) ^ PAGE_HI_FLIP) != (SCREEN_B >> 8)) {
+    .error "the two screen pages no longer differ by a single EOR: copyRowFromFront cannot derive the front page"
+}
+
+copyRowFromFront:
+    ldx regenRow
+    lda rowLo,x
+    sta cpDst + 1
+    lda rowHi,x
+    clc
+    adc regenPageHi
+    sta cpDst + 2
+
+    dex                                 // the row ABOVE, in the other page
+    lda rowLo,x
+    sta cpSrc + 1
+    lda regenPageHi                     // flip the PAGE BASE, then add the row:
+    eor #PAGE_HI_FLIP                   // EORing the sum would also work today
+    clc                                 // only because rowHi never leaves the
+    adc rowHi,x                         // two bits that PAGE_HI_FLIP leaves alone
+    sta cpSrc + 2
+
+    // ROLLED, AND THAT IS THE MEASURED CHOICE. Unrolling four bytes an
+    // iteration saves the dey/bpl three times out of four -- about 90 cycles a
+    // row -- but each unrolled copy carries its OWN absolute operand, so the
+    // setup above would have to patch eight addresses instead of two: about 84
+    // cycles. The two cancel, and the rolled form has a quarter of the
+    // self-modified code to get wrong.
+    //
+    // Counting Y DOWN so the loop test is the sign bit rather than a compare,
+    // which is what keeps a 40-byte row at fourteen cycles a byte.
+    ldy #SCREEN_COLS - 1
+!c:
+cpSrc:
+    lda $ffff,y
+cpDst:
+    sta $ffff,y
+    dey
+    bpl !c-
     rts
 
 // ===========================================================================

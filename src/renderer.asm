@@ -238,7 +238,17 @@
 //     sprite DMA anywhere in the vertical blank OR in the top border -- the
 //     handoff is the one phase in the frame guaranteed to run at full speed;
 //   * it leaves twelve lines before TOP_ARM_LINE and fifteen before the first
-//     legal sprite Y, against a six-entry batch 0 costing about five.
+//     legal sprite Y, against a six-entry batch 0 costing NINE.
+//
+// NINE, NOT FIVE, AND IT WAS MEASURED. This comment said "about five" until
+// reports/mux-glitch-diagnostic-pass-1.md timed 1,242 real batch executions
+// from the emulator's own raster: a six-entry batch 0 runs 41 -> 50. The
+// margin before the first legal sprite Y is therefore FIVE lines, not the ten
+// the old figure implied. Still sound -- batch 0 is capped at MUX_SLOTS, so
+// nine lines is its worst case and nothing measured has ever been late -- but
+// the number a raster constant is justified by should be the measured one.
+// Documentation only: HANDOFF_LINE is unchanged and nothing measured asks for
+// it to move.
 .const HANDOFF_LINE     = 40
 
 // Where the TOP aperture split arms.
