@@ -71,7 +71,10 @@ _MT_ROWS, STAGE_ROWS, _FINAL = stage_geometry()
 SCREEN_ROWS      = 25
 STAGE_START_ROW  = STAGE_ROWS - SCREEN_ROWS
 TYPE_NONE, TYPE_ENEMY, TYPE_EBULLET, TYPE_PICKUP = 0, 1, 2, 3
-PLAYER_SLOT_MASK = 0b00000011
+# 7+1: the player reserves HW0 alone. HW1 is a mux slot now, so plyPresEnable
+# carries exactly one bit and the muzzle flash's slot request lives in
+# plyPresMuzOn. See docs/ENGINE_CONTRACT.md §2.
+PLAYER_SLOT_MASK = 0b00000001
 
 
 def frames(mon, bp_addr, n):
@@ -363,28 +366,27 @@ def main():
             rd1(mon, sym["plyInvuln"]), rd1(mon, sym["plyPresEnable"])))
         mon.cmd(f"delete {bp}")
         mon.cmd("delete")
-        # HW1 IS NO LONGER ALWAYS ON. It carries the muzzle flash now and is
-        # enabled only for the two frames after an accepted shot, so the legal
-        # values are "nothing", "the craft" and "the craft plus its flash".
-        # What must never appear is a bit outside the player's own two slots:
-        # that would mean the player had reached into the gameplay mux.
+        # plyPresEnable IS ONE BIT NOW, and the check got stronger for it.
+        # Under 6+2 this byte carried HW0 and HW1 and the legal values were
+        # "nothing", "the craft" and "the craft plus its flash". Under 7+1 the
+        # flash has no reserved slot to enable -- it asks the mux through
+        # plyPresMuzOn instead -- so the only legal values are 0 and HW0, and
+        # ANY other bit means the player has reached into the gameplay mux.
         illegal = [(i, p) for i, p in presence
                    if p & ~PLAYER_SLOT_MASK & 0xff]
-        check("plyPresEnable never sets a bit outside the player's two slots",
+        check("plyPresEnable never sets a bit outside the craft's own slot",
               not illegal, f"{illegal[:3]}")
-        # HW1 is an OVERLAY on the craft, so it can never be the only slot lit:
-        # any non-zero enable must include HW0. That is what makes "the player
-        # is hidden" a single test rather than two that could disagree.
-        orphan = [(i, bin(p)) for i, p in presence if p and not p & 0b1]
-        check("HW1 is never enabled without the craft it overlays",
-              not orphan, f"{orphan[:3]}")
+        # The "HW1 is never enabled without the craft it overlays" check that
+        # used to live here is gone with the slot it was about: an orphaned
+        # overlay is no longer expressible, because the flash is not in this
+        # byte at all. What replaces it is the assertion above -- plyPresEnable
+        # is HW0 or nothing -- plus the renderer-side guarantee that no schedule
+        # entry may claim HW0 (tests/test_player_ship.py).
         blinked = any(p == 0 for i, p in presence if i > 0)
         check("the player actually blinked while invulnerable "
               "(dark frames are the feature, not a fault)", blinked)
-        # SOLID NOW MEANS THE CRAFT'S OWN SLOT, not both. HW1 stopped being a
-        # permanently-enabled second layer when it became the muzzle flash: it
-        # is lit only for the two frames after an accepted shot, so a ship at
-        # rest ends the blink with HW0 alone.
+        # SOLID MEANS THE CRAFT'S OWN SLOT, and now it is the only slot there
+        # is in this byte. A ship at rest ends the blink with HW0 set.
         final_invuln, final_pres = presence[-1]
         check("invulnerability expired and the ship ended up SOLID",
               final_invuln == 0 and final_pres & 0b1,

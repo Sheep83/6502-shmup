@@ -246,7 +246,15 @@ scrollStateEnd:
 // gained the keyboard read, and the scroller had 239 bytes of slack above it
 // doing nothing. Nothing here is address-sensitive: it is main-thread code
 // reached by label.
-* = $4340 "scroller"
+//
+// AND UP AGAIN, FROM $4340 TO $4350, for the same reason and on the same
+// argument. The 7+1 multiplexer migration gave the player's muzzle flash
+// logical sprite state, so playerEmit gained its logY/logX/logXHi/logPtr/logCol
+// writes and a jsr to the shared logClipAnnotate -- which put the player code
+// eight bytes past $4340 (measured: it ended at $4348). The scroller had 65
+// bytes of slack above it at the time, so sixteen of them moved down to the
+// player and the scroller still clears the weapon at $4600 by fifty.
+* = $4350 "scroller"
 
 // ===========================================================================
 // scrollInit — both pages built, page A displayed, frame 0 published.
@@ -851,7 +859,7 @@ rowLo: .fill SCREEN_ROWS, <(i * 40)
 rowHi: .fill SCREEN_ROWS, >(i * 40)
 
 // ---------------------------------------------------------------------------
-// OUT OF THE SCROLLER SEGMENT, for the same reason rowLo/rowHi are: $4340-$4600
+// OUT OF THE SCROLLER SEGMENT, for the same reason rowLo/rowHi are: $4350-$4600
 // has no room left, and this routine does not care where it lives. It is a leaf
 // reached by jsr, it reads two tables by absolute,X and writes the screen by
 // absolute,Y, so its address is immaterial -- the code that needs the room is

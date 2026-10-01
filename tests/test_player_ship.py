@@ -54,8 +54,10 @@ def ptr(bank, engine=0):
 # heat bar are hires line art, the gameplay mux is multicolour. So there is no
 # single correct value any more -- there are two, and which one is live depends
 # on where the beam is.
-D01C_HUD_PHASE = 0b00000011         # raster 4:  player MC, the HUD's six hires
-D01C_GAMEPLAY  = 0b11111111         # raster 40: player MC, the mux's six MC too
+# 7+1: the craft owns HW0 and HW1 went back to the mux, so the player's half of
+# $d01c is ONE bit now and the mux's half is seven.
+D01C_HUD_PHASE = 0b00000001         # raster 4:  craft MC, the HUD's six hires
+D01C_GAMEPLAY  = 0b11111111         # raster 40: craft MC, the mux's SEVEN MC too
 HUD_ENABLE     = 0b11111100         # the six slots the HUD and the mux share
 COL_SHIP, COL_BLANK = 14, 0
 MC_OUTLINE, MC_WHITE = 11, 1        # SPR_MC_DARK / SPR_MC_LIGHT: shared by
@@ -66,7 +68,11 @@ MC_OUTLINE, MC_WHITE = 11, 1        # SPR_MC_DARK / SPR_MC_LIGHT: shared by
                                     # outline around it.
 JOY_MASK, JOY_LEFT, JOY_RIGHT = 0b00011111, 0b00000100, 0b00001000
 BANK_RATE, ENGINE_RATE = 5, 4
-PLAYER_SLOT_MASK = 0b00000011
+# 7+1: the player reserves HW0 and nothing else. HW1 is a mux slot carrying
+# whatever the scheduler puts there, including -- but not reserved for -- the
+# muzzle flash. See docs/ENGINE_CONTRACT.md §2.
+PLAYER_SLOT_MASK = 0b00000001
+MUZZLE_LOG_ID    = 16
 
 # Everything else the VIC reads, so the new allocation can be proved disjoint
 # from it rather than merely assumed to be.
@@ -179,9 +185,17 @@ def machine():
         for f in range(FLASH_FRAMES):
             for row in unpack(fart[f * 64:f * 64 + 63]):
                 pairs |= set(row)
-        check("the flash art uses only transparent, HW1's own colour and the "
-              "shared white -- never $d025", pairs <= {0, 2, 3},
-              f"bit pairs present: {sorted(pairs)}")
+        # PRE-EXISTING, AND LEFT FAILING ON PURPOSE. The delivered artwork DOES
+        # use bit pair 01, and it did at HEAD too -- the bytes are identical, so
+        # this is not the 7+1 migration's doing and has been proved so rather
+        # than assumed. Either the art or src/player.asm's claim that "pair 01
+        # is never used" is wrong, and deciding which is an artwork question for
+        # its owner, not something to be silenced here. The check is NOT relaxed
+        # to make a slot-architecture change pass.
+        check("the flash art uses only transparent, the flash's own colour and "
+              "the shared white -- never $d025", pairs <= {0, 2, 3},
+              f"bit pairs present: {sorted(pairs)} "
+              f"(PRE-EXISTING: identical at HEAD)")
 
         # TWIN WING GUNS, REGISTERED TO THE CRAFT. Each frame carries two
         # flares, each a contiguous group of columns. The flare's CENTRE is the
@@ -273,14 +287,23 @@ def machine():
         check("the handoff turns all six shared slots multicolour for the mux",
               d01c & HUD_ENABLE == HUD_ENABLE, f"${d01c:02x}")
 
-        # The one thing that must NOT change across the handoff. HW0/HW1 are
-        # outside the mux and are displayed through both phases, so a craft
-        # whose mode changed at raster 40 would visibly switch resolution half
-        # way down itself.
-        check("the player's own two bits are multicolour in BOTH phases",
+        # The one thing that must NOT change across the handoff. HW0 is outside
+        # the mux and is displayed through both phases, so a craft whose mode
+        # changed at raster 40 would visibly switch resolution half way down
+        # itself.
+        #
+        # IT USED TO BE TWO BITS. HW1 was the player's second reserved slot and
+        # had to hold its mode through both phases for the same reason. It is a
+        # mux slot now (7+1), so it is hires at raster 4 -- where it is disabled
+        # and nothing reads its mode -- and multicolour from the handoff with
+        # the rest of the pool. Asserting it were multicolour in BOTH phases
+        # would now be asserting the old architecture.
+        check("the CRAFT's own bit is multicolour in BOTH phases",
               (d01c_hud & PLAYER_SLOT_MASK) == PLAYER_SLOT_MASK
               and (d01c & PLAYER_SLOT_MASK) == PLAYER_SLOT_MASK,
               f"hud=${d01c_hud:02x} gameplay=${d01c:02x}")
+        check("...and HW1 is multicolour in the GAMEPLAY phase, with the mux",
+              (d01c & 0b10) == 0b10, f"gameplay=${d01c:02x}")
 
         # --- banking, through the REAL frame loop ---------------------------
         # Banking is a frame-cadence behaviour, so it is watched by stepping
@@ -386,11 +409,17 @@ def machine():
             poke(mon, sym["joyState"], JOY_MASK & ~bits)
             bp = set_bp(mon, sym["gameFrame"])
             out = step_n(mon, sym["frameCounter"], frames,
+                         # THE FLASH'S PRESENTATION MOVED. It used to be
+                         # plyPresPtr1/plyPresCol1 and $d015 bit 1, because it
+                         # owned HW1. Under 7+1 it is logical sprite
+                         # MUZZLE_LOG_ID, so its pointer and colour are read
+                         # from logPtr/logCol and "is it lit" is plyPresMuzOn --
+                         # a REQUEST for a mux slot rather than an enable bit.
                          lambda: (rd1(mon, sym["shotFired"]),
                                   rd1(mon, sym["plyFlash"]),
-                                  rd1(mon, sym["plyPresPtr1"]),
-                                  rd1(mon, sym["plyPresCol1"]),
-                                  rd1(mon, sym["plyPresEnable"]),
+                                  rd1(mon, sym["logPtr"] + MUZZLE_LOG_ID),
+                                  rd1(mon, sym["logCol"] + MUZZLE_LOG_ID),
+                                  rd1(mon, sym["plyPresMuzOn"]),
                                   rd1(mon, sym["plyBank"]),
                                   rd1(mon, sym["plyPresCol0"]),
                                   rd1(mon, sym["plyVisible"])))
@@ -423,16 +452,23 @@ def machine():
 
         # ONE FLASH PER SHOT, not one per frame the trigger was held.
         #
-        # "Lit" is read from the PUBLISHED FLASH -- HW1's pointer off the blank
-        # block -- not from the enable bit. The enable is the AND of the flash
-        # and the blink, so measuring the flash by it cannot tell a short flash
-        # apart from a dark blink frame. The two are then tied back together
-        # explicitly, one frame at a time, immediately below.
+        # "Lit" is read from the PUBLISHED FLASH -- the flash's own pointer off
+        # the blank block -- not from the slot request. The request is the AND of
+        # the flash and the blink, so measuring the flash by it cannot tell a
+        # short flash apart from a dark blink frame. The two are then tied back
+        # together explicitly, one frame at a time, immediately below.
+        #
+        # plyPresMuzOn IS A PLAIN FLAG, NOT A BIT IN A MASK. This read used to be
+        # `plyPresEnable & ~HW0_BIT`, picking HW1's enable bit out of the craft's
+        # byte. The request is its own byte now and is 0 or 1, so masking HW0's
+        # bit out of it would always yield zero -- which is how this check first
+        # failed after the migration, and is worth the sentence.
         lit = [i for i, r in enumerate(held) if r[2] != PTR_BLANK]
         mismatch = [(i, r) for i, r in enumerate(held)
-                    if bool(r[4] & ~HW0_BIT & 0xff)
+                    if bool(r[4])
                     != (r[2] != PTR_BLANK and bool(r[7]))]
-        check("HW1's enable is exactly the flash AND the ship being visible, "
+        check("the flash's SLOT REQUEST is exactly the flash AND the ship "
+              "being visible, "
               "on every frame", not mismatch, f"{mismatch[:3]}")
         check("HW1 is lit on strictly fewer frames than the button was held",
               0 < len(lit) < len(held),
@@ -460,15 +496,15 @@ def machine():
             for n, fr in ((1, f1), (2, f2)):
                 if fr[2] == PTR_BLANK:
                     bad.append((f"frame{n} not lit", i, fr))
-                if not fr[4] & ~HW0_BIT & 0xff:
-                    bad.append((f"frame{n} not enabled", i, fr))
+                if not fr[4]:
+                    bad.append((f"frame{n} not requesting a slot", i, fr))
                 if fr[3] != COL_FLASH:
                     bad.append((f"frame{n} not red", i, fr))
-            if f3[2] != PTR_BLANK or f3[4] & ~HW0_BIT & 0xff:
+            if f3[2] != PTR_BLANK or f3[4]:
                 bad.append(("still lit on frame3", i, f3))
             if f3[2] != PTR_BLANK:
                 bad.append(("pointer not returned to blank", i, f3))
-        check("each shot holds HW1 RED for both frames then goes dark",
+        check("each shot holds the FLASH RED for both frames then goes dark",
               not bad, f"{bad[:3]}")
 
         # THE FLASH FOLLOWS THE BANK. The artwork leans with the craft, so the
@@ -499,14 +535,21 @@ def machine():
         check("every banking attitude selects its own flash frame",
               not wrong, f"{wrong[:4]}")
 
-        # HW1 MUST NOT BE IN THE MUX. The gameplay schedule names slots
-        # MUX_FIRST_SLOT..7; if the player's second slot ever appeared there,
-        # two writers would own one sprite.
+        # HW0 MUST NOT BE IN THE MUX, AND HW1 MUST BE.
+        #
+        # This check used to read "no entry claims HW0 or HW1", which was the
+        # 6+2 contract. Under 7+1 the schedule names slots 1..7 and HW1 is an
+        # ordinary pool slot -- so the assertion that matters is narrower and
+        # stronger: the CRAFT's slot is never handed to a schedule entry,
+        # because that reservation is the whole of the player's visibility
+        # guarantee.
         cur = rd1(mon, sym["schedCurrent"])
         n = rd1(mon, sym["schedEntries"] + cur)
         slots = rd(mon, sym["schedSlot"] + cur * 24, n) if n else []
-        check("no gameplay schedule entry claims HW0 or HW1",
-              all(sl >= 2 for sl in slots), f"{slots}")
+        check("no gameplay schedule entry claims HW0 -- the craft's slot",
+              all(sl >= 1 for sl in slots), f"{slots}")
+        check("...and every entry's slot is inside the HW1..HW7 pool",
+              all(1 <= sl <= 7 for sl in slots), f"{slots}")
 
         # --- precedence -----------------------------------------------------
         # playerEmit is pure presentation with no cadence of its own, so these
@@ -527,16 +570,18 @@ def machine():
               f"ptr=${base_ptr:02x} col={rd1(mon, sym['plyPresCol0'])} "
               f"en={rd1(mon, sym['plyPresEnable'])}")
 
-        # THE MUZZLE FLASH IS HW1's ALONE. It lights the second sprite and
+        # THE MUZZLE FLASH IS ITS OWN SPRITE. It asks the mux for a slot and
         # leaves BOTH the banked frame and the hull colour where they were --
         # the craft reacting to its own gun is the behaviour that was removed.
         poke(mon, sym["plyFlash"], FLASH_TIME)
         call(mon, sym, "playerEmit")
-        check("the MUZZLE FLASH lights HW1 and leaves the craft untouched",
-              (rd1(mon, sym["plyPresCol1"]), rd1(mon, sym["plyPresCol0"]),
-               rd1(mon, sym["plyPresPtr0"]))
-              == (COL_FLASH, COL_SHIP, ptr(BANK_LEFT, 0)),
-              f"col1={rd1(mon, sym['plyPresCol1'])} "
+        check("the MUZZLE FLASH asks for a slot and leaves the craft untouched",
+              (rd1(mon, sym["logCol"] + MUZZLE_LOG_ID),
+               rd1(mon, sym["plyPresMuzOn"]),
+               rd1(mon, sym["plyPresCol0"]), rd1(mon, sym["plyPresPtr0"]))
+              == (COL_FLASH, 1, COL_SHIP, ptr(BANK_LEFT, 0)),
+              f"muzCol={rd1(mon, sym['logCol'] + MUZZLE_LOG_ID)} "
+              f"muzOn={rd1(mon, sym['plyPresMuzOn'])} "
               f"col0={rd1(mon, sym['plyPresCol0'])} "
               f"ptr0=${rd1(mon, sym['plyPresPtr0']):02x}")
 
@@ -555,16 +600,25 @@ def machine():
               rd1(mon, sym["plyPresEnable"]) == HW0_BIT
               and rd1(mon, sym["plyPresPtr0"]) == ptr(BANK_LEFT, 0))
 
-        check("with no shot in flight HW1 is blank and switched OFF",
-              rd1(mon, sym["plyPresPtr1"]) == PTR_BLANK
+        check("with no shot in flight the flash is blank and asks for NO slot",
+              rd1(mon, sym["logPtr"] + MUZZLE_LOG_ID) == PTR_BLANK
+              and rd1(mon, sym["plyPresMuzOn"]) == 0
               and rd1(mon, sym["plyPresEnable"]) == HW0_BIT,
-              f"ptr1=${rd1(mon, sym['plyPresPtr1']):02x} "
+              f"muzPtr=${rd1(mon, sym['logPtr'] + MUZZLE_LOG_ID):02x} "
+              f"muzOn={rd1(mon, sym['plyPresMuzOn'])} "
               f"enable={rd1(mon, sym['plyPresEnable'])}")
-        check("HW1 stays co-located in X and lifted in Y by the artwork's offset",
-              rd1(mon, sym["plyPresX1"]) == rd1(mon, sym["plyPresX0"])
-              and rd1(mon, sym["plyPresY1"])
+        # THE REGISTRATION IS NOW CHECKED IN LOGICAL COORDINATES, which is
+        # where it lives: the flash is logical sprite MUZZLE_LOG_ID, so its X
+        # and Y are logX/logY and the renderer -- not playerEmit -- turns them
+        # into registers. The lift itself is unchanged and is still what keeps
+        # the flares on the gun barrels.
+        check("the flash stays co-located in X and lifted in Y by the "
+              "artwork's offset",
+              rd1(mon, sym["logX"] + MUZZLE_LOG_ID) == rd1(mon, sym["plyPresX0"])
+              and rd1(mon, sym["logY"] + MUZZLE_LOG_ID)
                   == (rd1(mon, sym["plyPresY0"]) - FLASH_Y_LIFT) & 0xff,
-              f"y0={rd1(mon, sym['plyPresY0'])} y1={rd1(mon, sym['plyPresY1'])}")
+              f"y0={rd1(mon, sym['plyPresY0'])} "
+              f"muzY={rd1(mon, sym['logY'] + MUZZLE_LOG_ID)}")
 
         # --- the engine is unharmed -----------------------------------------
         print("\n--- production health, with the new ship live ---")

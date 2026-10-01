@@ -23,8 +23,11 @@
 //     rather than a named list of fields, so adding a field cannot quietly
 //     leave it carrying the previous occupant's value.
 //
-// The player is not in this pool and never will be: it owns HW0/HW1 outright
-// and never enters the mux, so slot 0 is an ordinary slot.
+// The player is not in this pool and never will be: the craft owns HW0 outright
+// and never enters the mux, so slot 0 is an ordinary slot. Its MUZZLE FLASH is
+// not in this pool either, but for a different reason -- it does enter the mux,
+// as logical sprite MUZZLE_LOG_ID, which is deliberately above the range
+// objectAlloc issues. See the assertion below.
 // ===========================================================================
 
 // Sixteen slots: comfortably under MAX_SCHED, and more than the authored
@@ -33,6 +36,22 @@
 
 .if (MAX_OBJECTS > MAX_LOGICAL) {
     .error "the object pool cannot be larger than the logical sprite arrays"
+}
+
+// AND THE MUZZLE FLASH'S ID MUST BE ABOVE THE POOL'S RANGE.
+//
+// src/renderer.asm merges the player's muzzle flash into the admission pass as
+// logical sprite MUZZLE_LOG_ID. That ID lives in logY/logX/logXHi/logPtr/
+// logCol/logClip like any other, but it must be one this pool can NEVER issue:
+// an object allocated over it would share the flash's presentation and, worse,
+// the flash would acquire an object type, hit points and a collision box.
+//
+// THIS IS THE CHECK AND THIS IS WHERE IT BELONGS. renderer.asm is imported
+// first, so MAX_OBJECTS is not a symbol there; this file is the one place both
+// numbers are in scope, and it is also the file whose objectAlloc defines the
+// range being excluded.
+.if (MUZZLE_LOG_ID < MAX_OBJECTS) {
+    .error "the muzzle's logical ID is one the object pool can allocate"
 }
 
 // Object types. TYPE_NONE is 0 so a zeroed slot is typeless by construction.

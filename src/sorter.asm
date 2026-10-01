@@ -11,7 +11,7 @@
 //   logical sprite ID   stable for the life of the object; indexes logY/logX/...
 //   sorted position     where that sprite currently sits in Y order
 //   accepted index      its position in the schedule, which sets its physical
-//                       slot (MUX_FIRST_SLOT + accepted mod 6) and its
+//                       slot (MUX_FIRST_SLOT + accepted mod MUX_SLOTS) and its
 //                       same-slot predecessor (accepted - 6)
 //
 // A sprite moves between sorted positions freely without changing identity, so

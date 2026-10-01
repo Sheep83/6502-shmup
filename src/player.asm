@@ -26,31 +26,68 @@
 // render correctly, because exHud reads the immutable CURRENT block and nothing
 // else.
 //
-// HW0/HW1 ARE NOT IN THE MUX. docs/ENGINE_CONTRACT.md §2 reserves them, and
-// that is honoured literally: the player never enters logY/logX, is never
-// sorted, never occupies a schedule entry and never competes for a slot.
-// MUX_FIRST_SLOT stays 2 and MAX_SCHED stays 24.
+// HW0 IS NOT IN THE MUX, AND IT IS THE ONLY SLOT THAT IS NOT.
+// docs/ENGINE_CONTRACT.md §2 reserves the CRAFT, and that is honoured
+// literally: the craft never enters logY/logX, is never sorted, never occupies
+// a schedule entry and never competes for a slot. That reservation is the
+// player's visibility guarantee and it is absolute -- no enemy, projectile,
+// pickup or muzzle flash can ever be assigned HW0.
 //
-// THE SHIP IS ONE MULTICOLOUR SPRITE on HW0, with the muzzle flash a second
-// multicolour sprite on HW1. Multicolour is the artwork's native mode -- three
-// colours in twelve double-width pixels -- and is now what EVERY gameplay
-// sprite uses; the player is no longer special in that respect. What the two
-// reserved slots still buy is a second sprite's worth of art co-located with
-// the first, which is how the flash can be drawn at the guns without costing a
-// mux slot.
+// HW1 IS NOW A MUX SLOT. It used to be a second reserved layer for the muzzle
+// flash. reports/mux-slot-architecture-benchmark.md measured what that cost:
+// one of the VIC's eight sprites permanently spent on a two-frame cosmetic
+// effect, while a seven-slot pool was shown to fit the raster timing with
+// margin and an eight-slot pool was not. So HW1 was reclaimed, and the flash
+// now asks the scheduler for a slot like anything else.
+//
+// WHAT THAT MAKES THE FLASH. It is a PSEUDO-SPRITE: presentation-only logical
+// state this file emits, which src/renderer.asm merges into the Y-sorted
+// admission pass under logical ID MUZZLE_LOG_ID. It has no object-pool slot,
+// no object type, no collision, no hit points and no entry in logActive or
+// sortedIDs -- so none of the eight files that walk the object pool can see
+// it, and it cannot be shot, hit, or mistaken for an enemy.
+//
+// AND IT IS BEST-EFFORT. The craft is guaranteed; its flash is not. Under a
+// crowded schedule the flash is the first thing dropped -- see the admission
+// policy in src/renderer.asm, which judges the muzzle one slot more strictly
+// than it judges gameplay so that a cosmetic effect can never take the last
+// slot an enemy could have used.
+//
+// THE SHIP IS ONE MULTICOLOUR SPRITE on HW0, and the flash a second
+// multicolour sprite wherever the mux puts it. Multicolour is the artwork's
+// native mode -- three colours in twelve double-width pixels -- and is what
+// EVERY gameplay sprite uses; the player is not special in that respect.
 //
 // MOVEMENT IS ONE PIXEL PER FRAME PER AXIS, read from joystick port 2, with no
 // acceleration and no momentum -- there is no velocity state in this file, by
 // design.
 // ===========================================================================
 
-// --- the two reserved hardware slots ---------------------------------------
+// --- the one reserved hardware slot -----------------------------------------
 // Bit per slot, for $d015 and $d010. The renderer composes this into the
 // complete values it writes; nothing here touches a register.
-.const PLAYER_SLOT_MASK = %00000011                 // HW0 | HW1
-.const PLAYER_HW0_BIT   = %00000001                // the craft alone: HW1 is
-                                                   // only enabled while the
-                                                   // muzzle flash is running
+//
+// TWO NAMES FOR ONE VALUE, AND THEY ANSWER DIFFERENT QUESTIONS -- the same
+// arrangement src/renderer.asm keeps for MUX_SLOT_MASK and HUD_ENABLE.
+// PLAYER_SLOT_MASK is "which hardware slots does the player reserve", and is
+// what the renderer's and the HUD's guards are written against;
+// PLAYER_HW0_BIT is "which bit is the craft". They are equal today because the
+// reservation is exactly one slot, and the assertion below says so out loud so
+// that a future second reserved layer separates them deliberately rather than
+// by accident.
+.const PLAYER_SLOT_MASK = %00000001                 // HW0, and HW0 alone
+.const PLAYER_HW0_BIT   = %00000001                // the craft's own bit
+.if ((PLAYER_HW0_BIT & PLAYER_SLOT_MASK) != PLAYER_HW0_BIT) {
+    .error "the craft's bit is not inside the slots the player reserves"
+}
+// AND playerEmit RELIES ON THIS BEING EXACTLY 1. It writes one accumulator to
+// both plyPresD010 (where the value is a $d010 BIT MASK for HW0) and to
+// logXHi[MUZZLE_LOG_ID] (where the value is the number 1, meaning "X bit 8 is
+// set"). Those agree only while the craft owns slot 0. See the note at the
+// $d010 write.
+.if (PLAYER_HW0_BIT != 1) {
+    .error "playerEmit writes one value as both HW0's $d010 bit and a logXHi of 1"
+}
 
 // --- bitmaps ----------------------------------------------------------------
 // SIX 64-byte blocks in the reclaimed $2000 VIC0 run: five banking frames and
@@ -186,15 +223,26 @@
 
 .const PLAYER_FLASH_TIME  = 2                       // visible PAL frames
 
-// How far above the craft HW1 sits. The supplied artwork is drawn for this
-// offset and no other: each frame carries TWO flares whose stems end exactly
-// one row above a wing-gun barrel of the matching banked craft, measured with
-// this lift applied. Change it and the flares leave the guns.
+// How far above the craft the flash sits. The supplied artwork is drawn for
+// this offset and no other: each frame carries TWO flares whose stems end
+// exactly one row above a wing-gun barrel of the matching banked craft,
+// measured with this lift applied. Change it and the flares leave the guns.
+//
+// AND IT IS WHY THE FLASH CAN BE CLIPPED. The craft's own floor is
+// PLAYER_MIN_Y (55), so the flash's Y runs down to 55 - 7 = 48 -- seven rasters
+// BELOW the mux admission floor, which is also 55. A pooled flash would
+// therefore be refused outright for the top seven rasters of the player's legal
+// travel, which is "fly to the top and shoot". It is not refused: the renderer
+// annotates it with logClip exactly as it annotates an enemy entering the top
+// edge, and src/clip.asm holds it at Y=55 with a row-shifted bitmap so the
+// flares still land on the gun barrels. See reports/clipmakescratch-performance-audit.md
+// for what that costs and reports/mux-slot-architecture-benchmark.md §6b for
+// why it is the repair rather than a second top-edge renderer.
 .const PLAYER_FLASH_Y_LIFT = 7
 
-// --- $d01c: the two bits the player owns -------------------------------------
-// Bit per sprite, 1 = multicolour. BOTH of the player's slots: HW0 carries the
-// craft and HW1 the muzzle flash, and both are authored multicolour.
+// --- $d01c: the one bit the player owns --------------------------------------
+// Bit per sprite, 1 = multicolour. The player's slot: HW0, carrying the craft,
+// which is authored multicolour.
 //
 // THIS IS THE PLAYER'S HALF OF $d01c AND NOT THE WHOLE REGISTER. Bits 2..7
 // belong to slots the HUD and the gameplay mux time-share, and those two
@@ -203,10 +251,12 @@
 // D01C_HUD_PHASE / D01C_GAMEPLAY in src/renderer.asm; the guard below is what
 // keeps this file from reaching past its own two bits into that decision.
 //
-// HW1's bit is set permanently rather than toggled with the flash: a DISABLED
-// sprite's mode is not read by anything, so there is nothing to switch off and
-// no frame on which the two could disagree.
-.const PLAYER_D01C = %00000011
+// THE MUZZLE FLASH IS NO LONGER NAMED HERE. It lives in the mux now, and the
+// mux's own slots are switched to multicolour wholesale by D01C_GAMEPLAY at the
+// raster-40 handoff -- which is where every other multicolour gameplay sprite
+// gets its mode, and is four rasters past the HUD's last displayed line. A bit
+// for it here would be a second owner for one register bit.
+.const PLAYER_D01C = %00000001
 .if ((PLAYER_D01C & ~PLAYER_SLOT_MASK) != 0) {
     .error "only the player's own reserved slots may be switched to multicolour"
 }
@@ -413,26 +463,59 @@ joyState:    .byte JOY_MASK              // all lines high = nothing pressed
 joyHold:     .byte 0
 
 // --- the presentation block -------------------------------------------------
-// What HW0 and HW1 must look like, and NOTHING about why. The renderer copies
-// this whole block; it never reads plyX, plyVisible or joyState.
+// What the craft must look like, what its muzzle flash WANTS to look like, and
+// NOTHING about why. The renderer consumes this whole block; it never reads
+// plyX, plyVisible or joyState.
 //
 // It is ONE CONTIGUOUS ARRAY on purpose: playerEmit compares the freshly built
 // block against the copy the builder last took, so changing a pointer, a
-// colour or the enable mask raises the dirty flag by itself and nobody has to
-// remember to. The block is the contract, and the block is what is compared.
+// colour, the enable mask or the muzzle's own request raises the dirty flag by
+// itself and nobody has to remember to. The block is the contract, and the
+// block is what is compared.
+//
+// IT IS HW0'S REGISTERS PLUS ONE REQUEST FLAG, AND NOTHING OF THE FLASH'S
+// GEOMETRY. The flash is a logical sprite now, so its Y, X, X bit 8, pointer
+// and colour are written straight into logY/logX/logXHi/logPtr/logCol under
+// MUZZLE_LOG_ID by playerEmit -- the same arrays, by the same kind of write,
+// that src/enemy.asm, src/ebullet.asm and src/pickup.asm use for theirs. There
+// is exactly one record of where the flash is, and it is the one the builder
+// reads.
+//
+// WHAT STAYS HERE IS THE ONE THING THE LOGICAL ARRAYS CANNOT CARRY:
+//
+//   plyPresMuzOn     1 = the flash wants a mux slot this frame. A REQUEST, not
+//                    a promise -- the renderer may refuse it. It lives in this
+//                    block rather than beside the logical state because THIS
+//                    BLOCK IS THE DIRTY TEST: the compare at the bottom of
+//                    playerEmit is what decides whether a schedule is rebuilt
+//                    at all, and a flash that lit up without changing a watched
+//                    byte would never be scheduled.
+//
+// AND THE REST OF THE FLASH IS WATCHED TRANSITIVELY, which is why none of its
+// geometry needs a byte here:
+//
+//   its Y changes      only when plyY does           -> plyPresY0
+//   its X and bit 8    only when plyX does           -> plyPresX0, plyPresD010
+//   its pointer        only when plyBank does, and plyPresPtr0 is
+//                      PLAYER_PTR_FIRST + bank*3 + engine with engine < 3,
+//                      which is injective -- so a bank change ALWAYS moves
+//                      plyPresPtr0                   -> plyPresPtr0
+//   its colour         constant while lit
+//
+// plyPresEnable and plyPresD010 carry the CRAFT'S BIT ONLY. The flash's $d015
+// and $d010 bits are accumulated by the builder from whichever slot it is
+// actually given, which is the same path every enemy's bits take -- so there is
+// exactly one writer for each bit of each register.
 plyPres:
 plyPresX0:     .byte 0                   // HW0 X low byte
 plyPresY0:     .byte 0
 plyPresPtr0:   .byte 0
 plyPresCol0:   .byte 0
-plyPresX1:     .byte 0                   // HW1 X low byte
-plyPresY1:     .byte 0
-plyPresPtr1:   .byte 0
-plyPresCol1:   .byte 0
-plyPresEnable: .byte 0                   // $d015 bits 0/1 ONLY
-plyPresD010:   .byte 0                   // $d010 bits 0/1 ONLY
+plyPresMuzOn:  .byte 0                   // 1 = the flash wants a slot
+plyPresEnable: .byte 0                   // $d015 bit 0 ONLY -- the craft
+plyPresD010:   .byte 0                   // $d010 bit 0 ONLY -- the craft
 plyPresEnd:
-.const PLY_PRES_BYTES = 10
+.const PLY_PRES_BYTES = 7
 .if (plyPresEnd - plyPres != PLY_PRES_BYTES) {
     .error "PLY_PRES_BYTES does not match the presentation block"
 }
@@ -1079,27 +1162,51 @@ playerClampY:
 // drift apart by a frame the way two independently scheduled sprites could.
 // ---------------------------------------------------------------------------
 playerEmit:
+    // X IS WRITTEN TWICE, TO TWO DIFFERENT KINDS OF PLACE. plyPresX0 is HW0's
+    // register value; logX[MUZZLE_LOG_ID] is the flash's logical X, which the
+    // builder turns into a register value against whichever slot it is given.
+    // Both from plyX in one pass, so they cannot drift by a frame.
+    ldx #MUZZLE_LOG_ID
     lda plyX
     sta plyPresX0
-    sta plyPresX1
+    sta logX,x
     lda plyY
     sta plyPresY0
-    // HW1 SITS SEVEN LINES ABOVE THE CRAFT. The flash artwork draws its two
+    // THE FLASH SITS SEVEN LINES ABOVE THE CRAFT. The artwork draws its two
     // flares low in its own block so that, lifted by this much, each one lands
     // on a wing-gun barrel of the craft underneath -- the registration is the
     // artwork's, and this offset is the half of it that lives in code.
     // plyY can never be below PLAYER_MIN_Y, so the subtraction cannot borrow --
     // asserted at assembly time rather than guarded at run time.
+    //
+    // THE RESULT CAN BE BELOW THE MUX FLOOR, and that is deliberate. This is
+    // the flash's TRUE logical Y, in the same units as logY, and the renderer
+    // annotates it with logClip and clamps it exactly as it does an enemy
+    // arriving over the top edge. Clamping it here instead would move the
+    // flares off the guns. See PLAYER_FLASH_Y_LIFT.
     sec
     sbc #PLAYER_FLASH_Y_LIFT
-    sta plyPresY1
+    sta logY,x                          // X is still MUZZLE_LOG_ID
+
+    // AND THE CLIP ANNOTATION, FROM THE ROUTINE THAT OWNS THE RULE.
+    // src/enemy.asm's logClipAnnotate reads logY[X] and writes logClip[X]; its
+    // own note says "nothing in here is enemy-specific", and src/pickup.asm and
+    // src/ebullet.asm already call it for exactly this reason. The flash meets
+    // the top aperture edge by the same rule an enemy does, and is held at
+    // MIN_SPRITE_Y with a row-shifted bitmap by the same src/clip.asm scratch.
+    // X is preserved across the call.
+    jsr logClipAnnotate
     // THE MUZZLE FLASH IS A PRESENTATION CHOICE, MADE HERE.
     //
     // The weapon announces shotFired and knows nothing else about how a shot
-    // looks. Turning that into a lit sprite goes out through the block the
-    // renderer already publishes, so firing costs no new slot and no renderer
-    // change -- and the block compare at the bottom of this routine notices it
-    // without being told.
+    // looks. Turning that into a lit sprite goes out as logical sprite state
+    // plus the one request flag in the published block, and the block compare at
+    // the bottom of this routine notices the flag without being told.
+    //
+    // FIRING NOW COSTS A MUX SLOT, where it used to cost a reserved one. That
+    // is the 7+1 trade: HW1 went back to the pool, so the pool is seven deep
+    // instead of six, and the flash competes for a place in it like everything
+    // else -- and loses first, by design. See bs_muzzle in src/renderer.asm.
     // ---- HW0: which banking frame, and in which colour --------------------
     // THE POINTER COMES FROM THE LEAN, THE COLOUR FROM THE MUZZLE, and the two
     // are independent by construction. The five frames are adjacent and in
@@ -1143,7 +1250,7 @@ playerEmit:
     sta plyPresCol0
 !hw0Done:
 
-    // ---- HW1: the muzzle flash --------------------------------------------
+    // ---- the muzzle flash, as a logical sprite -----------------------------
     // THE TRIGGER IS shotFired, AND THAT IS THE POINT. It is set by weaponFire
     // only on a shot the weapon actually ACCEPTED -- past the overheat test,
     // past the cooldown, with the cadence already armed -- and weaponTick
@@ -1168,51 +1275,77 @@ playerEmit:
     // core in the shared white, so $d028 just holds red underneath it for both
     // frames. No branch on the count, and the same bitmap for both frames.
     lda #PLAYER_COL_FLASH
-    sta plyPresCol1
+    sta logCol,x                        // X is still MUZZLE_LOG_ID
 
     // The flash leans with the craft: one frame per banking attitude, in the
     // same bank order as the hull, so the bank index selects both.
     lda plyBank                         // 0..4
     clc
     adc #PLAYER_PTR_FLASH
-    sta plyPresPtr1
+    sta logPtr,x
 
-    jmp !hw1Done+
+    jmp !flashDone+
 
 !dark:
-    // No flash: HW1 points at the blank block and is switched off below. The
-    // pointer is still written so the published block is a pure function of
-    // the state, never a leftover from the last shot.
+    // No flash: the pointer names the blank block and plyPresMuzOn is cleared
+    // below, so the renderer never offers it a slot. The pointer and colour are
+    // still written so the published block is a pure function of the state,
+    // never a leftover from the last shot -- which is also what keeps the dirty
+    // compare honest.
     lda #PLAYER_PTR_BLANK
-    sta plyPresPtr1
+    sta logPtr,x
     lda #PLAYER_COL_BLANK
-    sta plyPresCol1
-!hw1Done:
+    sta logCol,x
+!flashDone:
 
-    // $d010. Both layers share one X, so their two bits always agree -- but
-    // both are written from the same test rather than one being copied from the
-    // other, so an overlay that ever gains an X offset changes one line here.
+    // X BIT 8, FOR TWO DIFFERENT CONSUMERS, FROM ONE TEST.
+    //
+    // plyPresD010 is the craft's $d010 BIT, which exHud writes into the
+    // register. logXHi[MUZZLE_LOG_ID] is the flash's logical X bit 8 -- 0 or 1
+    // -- which the builder turns into whichever $d010 bit the mux slot it is
+    // given happens to be. Both layers share one X today, so one test settles
+    // both; writing them from that one test rather than copying one from the
+    // other is what makes an overlay that ever gains an X offset a one-line
+    // change here.
+    // ONE LOAD SERVES BOTH, AND THE REASON IS ASSERTED RATHER THAN ASSUMED.
+    // The craft's $d010 bit is PLAYER_HW0_BIT and the flash's logXHi is the
+    // "bit 8 is set" value 1, and those are the same number -- so a single
+    // accumulator holding 0 or PLAYER_HW0_BIT is simultaneously a correct
+    // $d010 mask for HW0 and a correct logXHi for the flash. That is a
+    // coincidence of the craft owning slot 0, not a law, so the guard below
+    // says so: move the craft to another slot and this collapses into two
+    // loads again rather than silently writing a logXHi of 2.
+    //
+    // X is still MUZZLE_LOG_ID here -- nothing between the Y write above and
+    // this point touches it.
     lda #0
     ldy plyXHi
     beq !noMsb+
-    lda #PLAYER_SLOT_MASK
+    lda #PLAYER_HW0_BIT
 !noMsb:
     sta plyPresD010
+    sta logXHi,x
 
-    // $d015. HW0 whenever the craft is visible; HW1 ONLY while the flash is
-    // running, so an idle player costs no second sprite and nothing is ever
-    // enabled over the blank block.
+    // $d015 FOR THE CRAFT, AND A SLOT REQUEST FOR THE FLASH.
+    //
+    // plyPresEnable is HW0's bit and nothing else: the craft's slot is
+    // reserved, so its enable is simply "is the craft visible". The flash has
+    // no reserved slot to enable any more, so what it gets instead is
+    // plyPresMuzOn -- a request the renderer grants from the mux pool, or
+    // refuses. An idle player therefore asks for no second sprite at all, and
+    // nothing is ever offered a slot over the blank block.
     //
     // The invulnerability blink still gates BOTH, because it gates this test:
     // a blinking ship that kept flashing would be the one frame where the
     // player is invisible and their gun is not.
     lda #0
+    sta plyPresMuzOn                    // the flash asks for nothing by default
     ldy plyVisible
     beq !hidden+
     lda #PLAYER_HW0_BIT
     ldy plyFlash                        // the count for the frame JUST emitted
     beq !hidden+
-    lda #PLAYER_SLOT_MASK
+    inc plyPresMuzOn                    // visible AND firing: ask for a slot
 !hidden:
     sta plyPresEnable
 
@@ -1256,6 +1389,6 @@ pt_y:     .byte 0
 // immediately above -- but an explicit `* =` segment without one turns an
 // overlap into a run-time mystery instead of a build error.
 // ---------------------------------------------------------------------------
-.if (* > $4340) {
-    .error "the player code has run into the scroller at $4340"
+.if (* > $4350) {
+    .error "the player code has run into the scroller at $4350"
 }

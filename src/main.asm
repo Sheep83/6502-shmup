@@ -83,6 +83,29 @@
                                         // sprite window; constants only, and
                                         // needed before enemy.asm places art
 
+// ---------------------------------------------------------------------------
+// THE MUZZLE FLASH'S LOGICAL SPRITE ID, and it is up here for a hard reason.
+//
+// The player's muzzle flash is a logical sprite rather than a reserved hardware
+// slot (see the 7+1 note at the top of src/renderer.asm). src/player.asm writes
+// its logY/logX/logXHi/logPtr/logCol/logClip under this ID, and
+// src/renderer.asm's admission pass merges that ID into the Y-sorted scan --
+// so BOTH files need the number, in immediate operands, which KickAssembler
+// must resolve on the first pass.
+//
+// They cannot share it between themselves. renderer.asm reads PLAYER_D01C,
+// PLAYER_SLOT_MASK and PLAYER_MIN_Y/MAX_Y from player.asm, so player.asm must
+// be imported first; player.asm would then be referring forward into
+// renderer.asm. One of the two has to come from above both, and this is above
+// both -- the same reason PTR_A is here rather than in the renderer that
+// patches it.
+//
+// THE TWO FACTS THAT MAKE THE VALUE LEGAL ARE ASSERTED WHERE THEY ARE VISIBLE,
+// not here: src/renderer.asm checks it is inside the logical arrays
+// (MAX_LOGICAL), and src/objects.asm checks the object pool can never allocate
+// it (MAX_OBJECTS). Neither constant exists yet at this point.
+.const MUZZLE_LOG_ID  = 16
+
 .const SCREEN_A       = $0400
 .const SCREEN_B       = $2800
 .const PTR_A          = SCREEN_A + $3f8

@@ -25,23 +25,58 @@
 // ===========================================================================
 
 // --- physical sprite pool ---------------------------------------------------
-// Hardware sprites 0 and 1 are RESERVED for the player's two co-located layers
-// and never enter the mux. The gameplay mux pool is 2..7.
-.const MUX_FIRST_SLOT = 2
-.const MUX_SLOTS      = 6
+// HARDWARE SPRITE 0 IS RESERVED FOR THE PLAYER'S CRAFT and never enters the
+// mux. The gameplay mux pool is 1..7 -- SEVEN slots.
+//
+// IT WAS SIX, AND THE SEVENTH IS HW1. HW1 used to be a second permanently
+// reserved layer carrying the player's muzzle flash.
+// reports/mux-slot-architecture-benchmark.md measured the three candidate
+// architectures against the same scenes and chose this one:
+//
+//   6+2  six slots, craft and flash both reserved      the old arrangement
+//   7+1  seven slots, craft reserved, flash pooled     ADOPTED
+//   8    eight slots, craft pooled too                 REJECTED
+//
+// Eight was rejected on measured raster timing, not on capacity. An eight-entry
+// batch 0 exits at raster 54 against TOP_ARM_LINE 52 and tripped edgeLate 17
+// times in 200 frames; an eight-entry mid-screen batch measured 796 cycles
+// against the REUSE_LEAD budget of 756. Seven exits at 52 and measured 0
+// edgeLate in 1,200 frames, with a worst batch of 699 cycles. Pooling the craft
+// would also have cost the player its frame-long immutability and required a
+// scheduler guarantee to stop a dense formation erasing it -- for 0.6% more
+// scenes drawing one extra sprite.
+//
+// SO HW0 STAYS OUT. That reservation IS the player's visibility guarantee: the
+// craft cannot be refused admission, crowded out, or reused, because it is
+// never offered to the scheduler at all.
+.const MUX_FIRST_SLOT = 1
+.const MUX_SLOTS      = 7
 .const MUX_LAST_SLOT  = MUX_FIRST_SLOT + MUX_SLOTS - 1     // 7
 
 // The mux's six slots as a bit per sprite, for the mode registers that take
 // one. Derived rather than written out, so raising MUX_SLOTS moves it.
 //
-// It is numerically EQUAL to HUD_ENABLE, and that is not a coincidence worth
-// hiding: the HUD and the gameplay mux time-share exactly the same six
-// hardware sprites, which is the whole reason the handoff at raster 40 exists.
-// They stay separate names because they answer different questions -- "which
-// slots does the mux own" and "which slots does the HUD switch on" -- and a
-// future HUD that used five of the six would break the equality without
-// breaking either meaning.
-.const MUX_SLOT_MASK  = ((1 << MUX_SLOTS) - 1) << MUX_FIRST_SLOT    // %11111100
+// IT USED TO BE NUMERICALLY EQUAL TO HUD_ENABLE, AND IT IS NOT ANY MORE.
+// That equality was the statement "the HUD and the gameplay mux time-share
+// exactly the same hardware sprites", which is the whole reason the handoff at
+// raster 40 exists. It is now a STRICT SUPERSET: the HUD owns HW2..HW7
+// (%11111100) and the mux owns HW1..HW7 (%11111110).
+//
+// HW1 IS THEREFORE THE ONE MUX SLOT WITH NO HUD-ERA STATE TO RESTORE. The HUD
+// never enables it, never points it anywhere and never names it in a mode
+// register -- see the assertions below, which say so as a build-time fact
+// rather than as a reading of hud.asm's tables. It arrives at the handoff
+// disabled and untouched, and the first batch programs it from nothing. That is
+// exactly why HW1 was the slot worth reclaiming and HW0 was not.
+.const MUX_SLOT_MASK  = ((1 << MUX_SLOTS) - 1) << MUX_FIRST_SLOT    // %11111110
+
+// THE HUD'S SLOTS MUST BE A SUBSET OF THE MUX'S. Every slot the HUD lights has
+// to be handed back to gameplay at raster 40 by a phase that only ever writes
+// the mux's own mask, so a HUD slot outside that mask would keep its HUD mode,
+// pointer and position for the whole playfield.
+.if ((HUD_ENABLE & ~MUX_SLOT_MASK & $ff) != 0) {
+    .error "the HUD lights a slot the gameplay mux does not own"
+}
 
 // --- what the player's two reserved slots require of everybody else ---------
 // HW0/HW1 are programmed once per frame by exHud and then left alone, so the
@@ -60,14 +95,30 @@
 //   $d01d = 0 in bits 0/1   no X expand      HUD_D01D, and $00 at the handoff
 //   $d01b = 0 in bits 0/1   in front of the  HUD_D01B, and $00 at the handoff
 //                           playfield
-// and that nobody else claims the slots at all:
-//   $d015, $d010            HUD_ENABLE / HUD_D010 must not name them
-//   the mux                 MUX_FIRST_SLOT must start above them
+// and that nobody else claims the slot at all:
+//   $d015, $d010            HUD_ENABLE / HUD_D010 must not name it
+//   the mux                 MUX_SLOT_MASK must not name it
 .if ((HUD_D01B & PLAYER_SLOT_MASK) != 0) { .error "the HUD's $d01b would push the player behind the playfield" }
 .if ((HUD_D01D & PLAYER_SLOT_MASK) != 0) { .error "the HUD's $d01d would X-expand the player" }
 .if ((HUD_ENABLE & PLAYER_SLOT_MASK) != 0) { .error "the HUD's $d015 names a player slot" }
 .if ((HUD_D010 & PLAYER_SLOT_MASK) != 0) { .error "the HUD's $d010 names a player slot" }
-.if (MUX_FIRST_SLOT < 2) { .error "the gameplay mux has been given a slot reserved for the player" }
+
+// THE PLAYER'S GUARANTEE, AS ONE BUILD-TIME FACT.
+//
+// This was `MUX_FIRST_SLOT < 2`, which is the same statement only while the
+// reservation happens to be the bottom TWO slots. It is one slot now, so the
+// check is re-derived against the masks rather than against a slot number:
+// the mux's slots and the player's reserved slots must not intersect, however
+// either set is later moved or resized.
+//
+// It is the hard guarantee the whole 7+1 decision rests on. If this ever
+// passes while HW0 is in the pool, the player can be refused a slot by a dense
+// formation and will disappear -- which is precisely the failure the benchmark
+// declined to accept.
+.if ((MUX_SLOT_MASK & PLAYER_SLOT_MASK) != 0) {
+    .error "the gameplay mux has been given a slot reserved for the player"
+}
+.if (MUX_FIRST_SLOT < 1) { .error "the gameplay mux must start above HW0" }
 
 // --- $d01c: SPRITE RESOLUTION IS A PER-PHASE DECISION ------------------------
 // ===========================================================================
@@ -95,11 +146,16 @@
 // exactly that window, and it is already the phase whose entire job is handing
 // these six slots from one owner to the other. So the mode rides with them.
 //
-// The player's own two bits are set in BOTH values and never change: HW0/HW1
-// are outside the mux, are programmed once at raster 4, and are displayed
-// across the whole frame. A craft that changed resolution at raster 40 would
-// visibly switch half way down itself.
-.const D01C_HUD_PHASE = PLAYER_D01C                        // %00000011
+// The player's own bit is set in BOTH values and never changes: HW0 is outside
+// the mux, is programmed once at raster 4, and is displayed across the whole
+// frame. A craft that changed resolution at raster 40 would visibly switch half
+// way down itself.
+//
+// HW1 IS NOW IN THE MUX HALF OF THIS DECISION, not the player's. It is hires
+// at raster 4 -- where it is disabled and nothing reads its mode -- and
+// multicolour from the handoff, which is what the muzzle flash's artwork needs
+// and what every other gameplay sprite already got.
+.const D01C_HUD_PHASE = PLAYER_D01C                        // %00000001
 .const D01C_GAMEPLAY  = PLAYER_D01C | MUX_SLOT_MASK        // %11111111
 
 // The HUD phase must not leave a single one of its own slots in multicolour.
@@ -190,19 +246,62 @@
 .const MAX_SCHED   = 24
 .const MAX_BATCH   = 24
 
+// --- the muzzle flash's logical ID ------------------------------------------
+// THE ONE LOGICAL ID THE OBJECT POOL DOES NOT OWN.
+//
+// src/objects.asm issues IDs 0..MAX_OBJECTS-1 (sixteen) while every logical
+// array -- logY, logX, logXHi, logPtr, logCol, logClip, logActive -- is
+// MAX_LOGICAL (thirty-two) long, precisely so that "the sorter walks the whole
+// logical ID space and reads a defined answer for every ID". That leaves
+// sixteen IDs the pool can never allocate, and the muzzle flash takes the
+// first of them.
+//
+// WHY AN ID AT ALL, RATHER THAN A SPECIAL CASE IN THE ADMISSION LOOP. Because
+// with one the admission loop needs NO special case: every test, every clamp,
+// every store in bs_accept reads logY/logX/logXHi/logPtr/logCol/logClip by
+// logical ID, so a muzzle that lives in those arrays is admitted, clipped,
+// slotted, batched and published by code that does not know it exists. The
+// merge below chooses the ID; nothing after that is muzzle-aware.
+//
+// WHY IT IS STILL NOT AN OBJECT. logActive[MUZZLE_LOG_ID] is never set, so it
+// is never in sortedIDs, never counted in logCount, has no objType, no objHP
+// and no objTimer -- and therefore cannot be shot by traceRay, cannot be hit
+// by a hostile projectile, cannot be collected, cannot collide with the player
+// and cannot be freed. All eight files that walk the pool do so through
+// logActive or MAX_OBJECTS, and both exclude it by construction.
+// THE VALUE IS DEFINED IN src/main.asm, above both this file and
+// src/player.asm, because both need it in immediate operands and neither can be
+// imported first (the note there sets out why). What belongs HERE is the half of
+// its legality that only this file can see: MAX_LOGICAL is defined three lines
+// up. The other half -- that the object pool can never allocate it -- is
+// asserted in src/objects.asm beside MAX_OBJECTS.
+.if (MUZZLE_LOG_ID >= MAX_LOGICAL) {
+    .error "the muzzle's logical ID is outside the logical sprite arrays"
+}
+
 // Scratch sprite blocks a single schedule may own, for sprites clipped against
 // the vertical aperture edges. The pool is double-buffered exactly like the
 // schedule itself -- see src/clip.asm, which owns the blocks and the copy.
 //
 // SIX IS A BUDGET, NOT A CEILING. The builder's own rules cap clipped entries
-// at MUX_SLOTS PER EDGE: they all present at the same Y, the first six fit
-// with no slot to reuse, and the seventh finds a zero gap against the entry
-// six places back and is refused. Both edges can be busy at once, so a legal
-// schedule can ask for twelve. Twelve blocks double-buffered is 1536 bytes
-// against the 832 VIC bank 0 can spare, so the pool is six and the overflow is
-// explicit: an entry that cannot get a block is not scheduled that frame and
-// clipPoolFull counts it. It is unreachable by current authored content, whose
-// peak enemy count is seven across the whole aperture.
+// at MUX_SLOTS PER EDGE: they all present at the same Y, the first MUX_SLOTS
+// fit with no slot to reuse, and the next finds a zero gap against the entry
+// MUX_SLOTS places back and is refused. Both edges can be busy at once, so a
+// legal schedule can ask for fourteen. Fourteen blocks double-buffered is 1792
+// bytes against the 832 VIC bank 0 can spare, so the pool is six and the
+// overflow is explicit: an entry that cannot get a block is not scheduled that
+// frame and clipPoolFull counts it.
+//
+// AND THE 7+1 MIGRATION MADE THIS POOL REACHABLE, which it was not before.
+// reports/mux-slot-architecture-benchmark.md §5c measured the asymmetry: at six
+// mux slots the seventh top-edge clipped sprite was refused by the REUSE RULE
+// before it ever asked for a block, so clipPoolFull could not be reached and the
+// pool looked infinite. At seven slots it gets as far as asking. The player's
+// muzzle flash competes for the same six blocks whenever the craft is in the top
+// seven rasters of its travel and firing, which is exactly the band where
+// top-edge enemy clipping is likeliest. The pool is NOT enlarged to compensate:
+// mux capacity and clipping scratch capacity are independent resources and
+// growing this one is a memory decision, not a slot-count one.
 .const CLIP_POOL_SLOTS = 6
 
 // The frame IRQ sits in the lower border, so batch 0 (the first up-to-six
@@ -338,28 +437,32 @@ schedEnable:   .byte 0, 0               // complete $D015 value for the frame
 schedEntries:  .byte 0, 0               // accepted entry count
 
 // --- the PLAYER block, [buffer] ---------------------------------------------
-// HW0 and HW1 are reserved for the player (contract §2) and are NOT in the mux,
-// so they have no schedule entry, no slot and no batch. They still have to be
+// HW0 is reserved for the player's craft (contract §2) and is NOT in the mux,
+// so it has no schedule entry, no slot and no batch. It still has to be
 // PUBLISHED, though, or the main thread would be programming VIC registers
 // behind the executor's back -- which is the one thing this architecture exists
-// to prevent. So the player rides in the schedule it is not part of: the
-// builder copies src/player.asm's presentation block in here, publishSchedule
-// hands it over with the same byte, exFrame adopts it at raster 250 with
-// everything else, and exHud programs the two slots from the ADOPTED copy.
+// to prevent. So the craft rides in the schedule it is not part of: the
+// builder copies the HW0 half of src/player.asm's presentation block in here,
+// publishSchedule hands it over with the same byte, exFrame adopts it at raster
+// 250 with everything else, and exHud programs the one slot from the ADOPTED
+// copy.
 //
-// The two enable/MSB bytes name ONLY bits 0 and 1. They are composed into the
-// complete $d015 and $d010 values the renderer writes; see bs_enable / bs_d010
-// below, and exHud.
+// THE HW1 HALF IS GONE FROM HERE, and that is the whole 7+1 migration in one
+// place. The muzzle flash used to need four published register values because
+// it owned a hardware slot outright. It is now an ordinary logical sprite
+// merged into the admission pass (see bs_muzzle), so its Y, X, pointer and
+// colour are published the way every enemy's are -- in schedY/schedX/schedPtr/
+// schedCol, against whichever slot the mux gave it.
+//
+// The two enable/MSB bytes name ONLY bit 0. They are composed into the complete
+// $d015 and $d010 values the renderer writes; see bs_enable / bs_d010 below,
+// and exHud.
 schedPlyX0:     .byte 0, 0              // HW0 X low byte
 schedPlyY0:     .byte 0, 0
 schedPlyPtr0:   .byte 0, 0
 schedPlyCol0:   .byte 0, 0
-schedPlyX1:     .byte 0, 0              // HW1 X low byte
-schedPlyY1:     .byte 0, 0
-schedPlyPtr1:   .byte 0, 0
-schedPlyCol1:   .byte 0, 0
-schedPlyEnable: .byte 0, 0              // $d015 bits 0/1 only
-schedPlyD010:   .byte 0, 0              // $d010 bits 0/1 only
+schedPlyEnable: .byte 0, 0              // $d015 bit 0 only
+schedPlyD010:   .byte 0, 0              // $d010 bit 0 only
 
 // --- publication state ------------------------------------------------------
 schedCurrent:  .byte 0                  // buffer the EXECUTOR reads
@@ -631,10 +734,15 @@ buildSchedule:
     sta bs_base
 
     // ---- the player block, copied into the buffer being built -----------
-    // Ten bytes, straight across, from the main thread's presentation record.
-    // It happens HERE, after the pending publication has been withdrawn above,
-    // for exactly the reason that withdrawal exists: schedNext is the buffer
-    // the frame IRQ promotes, and only this routine may write it.
+    // SIX BYTES, straight across, from the main thread's presentation record --
+    // the HW0 half of it. It happens HERE, after the pending publication has
+    // been withdrawn above, for exactly the reason that withdrawal exists:
+    // schedNext is the buffer the frame IRQ promotes, and only this routine may
+    // write it.
+    //
+    // It was ten bytes. The other four were HW1's registers; the muzzle flash
+    // is staged into the logical arrays below instead and published as an
+    // ordinary schedule entry.
     ldx schedNext
     lda plyPresX0
     sta schedPlyX0,x
@@ -644,18 +752,51 @@ buildSchedule:
     sta schedPlyPtr0,x
     lda plyPresCol0
     sta schedPlyCol0,x
-    lda plyPresX1
-    sta schedPlyX1,x
-    lda plyPresY1
-    sta schedPlyY1,x
-    lda plyPresPtr1
-    sta schedPlyPtr1,x
-    lda plyPresCol1
-    sta schedPlyCol1,x
     lda plyPresEnable
     sta schedPlyEnable,x
     lda plyPresD010
     sta schedPlyD010,x
+
+    // ---- the muzzle flash: is it asking, and where would it present? -----
+    // THE ONLY MUZZLE-AWARE CODE IN THE BUILDER IS THIS BLOCK AND THE MERGE.
+    // Everything after it -- the clamp, the Y bounds, the capacity test, the
+    // reuse test, the clip block, the slot assignment, the $d010 and enable
+    // accumulators, the batch pass and the whole executor -- handles the flash
+    // as logical sprite MUZZLE_LOG_ID and cannot tell it from an enemy.
+    //
+    // ITS GEOMETRY IS NOT READ FROM THE PLAYER BLOCK. src/player.asm's
+    // playerEmit writes logY/logX/logXHi/logPtr/logCol/logClip under
+    // MUZZLE_LOG_ID directly, exactly as src/enemy.asm, src/ebullet.asm and
+    // src/pickup.asm write theirs, and calls the shared logClipAnnotate for the
+    // aperture annotation. So there is one record of where the flash is, this
+    // routine reads it the same way it reads every other sprite's, and there is
+    // no staging copy to fall out of step.
+    //
+    // WHAT THE PLAYER BLOCK DOES CARRY is the one bit the logical arrays cannot
+    // express: whether the flash is asking for a slot this frame. It has to be
+    // in that block because that block is the dirty test.
+    lda plyPresMuzOn
+    sta bs_muzPend
+    beq !noMuzzle+
+
+    // ITS PRESENTED Y, CLAMPED ONCE. The merge below has to compare the flash
+    // against each candidate BEFORE deciding which of the two to admit, so it
+    // needs the Y the VIC will really be programmed with in hand ahead of the
+    // loop rather than half way down it.
+    ldx #MUZZLE_LOG_ID
+    lda logY,x
+    sta bs_muzY
+    lda logClip,x
+    sta bs_muzClip
+    beq !noMuzzle+
+    bmi !muzLow+
+    lda #MIN_SPRITE_Y                   // hanging above the top edge: held at 55
+    bne !muzStore+                      // (55, so always taken)
+!muzLow:
+    lda #MAX_SPRITE_Y                   // unreachable while the lift is upward
+!muzStore:                              // -- but the rule is the rule
+    sta bs_muzY
+!noMuzzle:
 
     lda #0
     sta bs_pos                          // position in the SORTED list
@@ -663,20 +804,27 @@ buildSchedule:
     sta bs_slotcycle                    // round-robin cursor: MUST reset per build,
                                         // or a rebuild inherits the previous frame's
                                         // slot phase and the schedule stops matching
-                                        // the documented "accepted mod 6" rule.
+                                        // the documented "accepted mod MUX_SLOTS"
+                                        // rule.
 
-    // THE PLAYER'S BITS ARE THE SEED, NOT A LATER MERGE.
+    // THE CRAFT'S BIT IS THE SEED, NOT A LATER MERGE.
     //
     // bs_enable and bs_d010 accumulate the complete $d015 and $d010 for this
     // frame during the acceptance pass, and every batch's $d010 is a snapshot
-    // of the running value (bs_d010cum). Starting both from the player's two
-    // bits therefore puts HW0/HW1 into EVERY complete value the executor ever
-    // writes -- schedEnable, and every batchD010 -- without the executor
-    // knowing the player exists, and without a single read-modify-write.
+    // of the running value (bs_d010cum). Starting both from the craft's bit
+    // therefore puts HW0 into EVERY complete value the executor ever writes --
+    // schedEnable, and every batchD010 -- without the executor knowing the
+    // player exists, and without a single read-modify-write.
     //
-    // The acceptance pass only ever touches bits 2..7 (bitMask is indexed by a
-    // slot, and slots are MUX_FIRST_SLOT..MUX_LAST_SLOT), so the two seeded bits
-    // survive it by construction.
+    // THE MUZZLE FLASH IS NOT SEEDED HERE ANY MORE. It used to be the second
+    // seeded bit, because it owned HW1. It is accumulated during the pass now,
+    // from whichever slot the mux gives it, by the same two instructions that
+    // accumulate an enemy's.
+    //
+    // The acceptance pass only ever touches bits 1..7 (bitMask is indexed by a
+    // slot, and slots are MUX_FIRST_SLOT..MUX_LAST_SLOT), so the one seeded bit
+    // survives it by construction. It was bits 2..7 and two seeded bits before
+    // the 7+1 migration gave HW1 to the mux.
     lda plyPresEnable
     sta bs_enable
     lda plyPresD010
@@ -685,15 +833,45 @@ buildSchedule:
 // ---- acceptance pass -------------------------------------------------------
 // THE SCAN WALKS SORTED POSITIONS AND DEREFERENCES EACH TO A LOGICAL ID. It
 // must never walk logical storage order directly: the reuse rule below compares
-// an entry against accepted entry i-6 and is only sound on a list in ascending
-// Y, which is what sortedIDs -- and nothing else -- guarantees.
+// an entry against accepted entry i-MUX_SLOTS and is only sound on a list in
+// ascending Y, which is what sortedIDs -- and nothing else -- guarantees.
+//
+// ---------------------------------------------------------------------------
+// AND IT IS A TWO-WAY MERGE NOW, because of the muzzle flash.
+// ---------------------------------------------------------------------------
+// The flash is a logical sprite that is NOT in sortedIDs -- it has no object
+// pool slot and no membership bit, so the sorter never sees it. It still has to
+// enter the admission pass IN Y ORDER, because the ascending-Y precondition is
+// what makes the reuse rule sound; dropping it in afterwards would compare
+// later entries against a predecessor that is not their predecessor.
+//
+// So this loop merges two ascending sequences: sortedIDs, and the single
+// pending flash. At each step it takes whichever has the lower PRESENTED Y.
+//
+// TIES GO TO THE SORTED ENTRY, and that is the degradation policy showing up
+// as one branch. `bcs` keeps the enemy first when the two Y values are equal,
+// so the flash is admitted after everything at its own raster -- which is
+// exactly the order in which a cosmetic sprite should be asked to fit.
 bs_loop:
     lda bs_pos
     cmp sortedCount
-    bcc !more+
-    jmp bs_accepted_done
-!more:
+    bcc !haveSorted+
 
+    // THE SORTED LIST IS EXHAUSTED. If the flash is still pending it is the
+    // last candidate; its Y is below nothing, so taking it here keeps the
+    // sequence ascending. Both arms go out through an absolute jmp: the
+    // acceptance pass is several hundred bytes long and neither target is
+    // within a relative branch.
+    lda bs_muzPend
+    beq !noneLeft+
+    jmp bs_muzzle
+!noneLeft:
+    jmp bs_accepted_done
+!haveSorted:
+
+    lda #0
+    sta bs_isMuz                        // this candidate consumes a sorted
+                                        // position (see bs_next)
     ldy bs_pos
     lda sortedIDs,y
     sta bs_id                           // the logical sprite under consideration
@@ -731,6 +909,55 @@ bs_loop:
     sta bs_y
 !presented:
 
+    // ---- the merge decision, now that this candidate's presented Y is known
+    // Six cycles per iteration when no flash is pending, which is every frame
+    // the player is not firing.
+    lda bs_muzPend
+    beq bs_judge
+    lda bs_muzY
+    cmp bs_y
+    bcs bs_judge                        // flash is at or below this candidate:
+                                        // the candidate goes first, ties too
+    // the flash is strictly ABOVE this candidate, so it is next in Y order.
+    // bs_pos is NOT advanced: this sorted entry has not been judged yet.
+bs_muzzle:
+    lda #1
+    sta bs_isMuz                        // consumes NO sorted position
+    lda #0
+    sta bs_muzPend                      // offered once per build, however it ends
+    lda #MUZZLE_LOG_ID
+    sta bs_id
+    lda bs_muzY
+    sta bs_y
+    lda bs_muzClip
+    sta bs_clip
+
+    // THE FLASH IS JUDGED ONE SLOT MORE STRICTLY THAN GAMEPLAY, and this byte
+    // is the whole of the overload policy.
+    //
+    // bs_reuseBack is how far back the reuse test looks: MUX_SLOTS for an
+    // ordinary sprite, because entry i physically reuses the slot of entry
+    // i-MUX_SLOTS. Setting it to MUX_SLOTS-1 for the flash tests it against a
+    // sprite one position LATER in Y -- a smaller gap, so a strictly harder
+    // test, which is always safe because passing it implies passing the real
+    // one.
+    //
+    // What it BUYS is that the flash can never take the last slot in its own
+    // neighbourhood. Without it, a flash admitted as accepted entry 6 would
+    // consume the free pass that the seventh gameplay sprite gets (entries
+    // below MUX_SLOTS are accepted with no reuse test at all), and an enemy
+    // would vanish so that a two-frame cosmetic effect could be drawn. With it,
+    // the flash is refused instead. That is the documented degradation: under
+    // crowding the muzzle loses, deterministically, and gameplay does not.
+    lda #MUX_SLOTS - 1
+    sta bs_reuseBack
+    jmp bs_bounds
+
+bs_judge:
+    lda #MUX_SLOTS
+    sta bs_reuseBack
+
+bs_bounds:
     // PRODUCTION Y BOUNDS, CHECKED BEFORE EVERYTHING ELSE.
     //
     // This is a property of the sprite alone -- not of how full the schedule
@@ -768,14 +995,17 @@ bs_loop:
 !room:
 
     lda bs_acc
-    cmp #MUX_SLOTS
-    bcc bs_accept                       // first six always fit: no slot to reuse
+    cmp bs_reuseBack
+    bcc bs_accept                       // the first bs_reuseBack entries always
+                                        // fit: there is no slot to reuse yet
 
-    // Reuse test against the entry that currently owns this physical slot:
-    // accepted index (acc - MUX_SLOTS).  <-- SIX, not eight.
+    // Reuse test against the entry that owns the slot this one is about to
+    // take: accepted index (acc - bs_reuseBack). SEVEN for gameplay, SIX for
+    // the muzzle flash -- see the note at bs_muzzle for why the flash is held
+    // to the harder of the two.
     sec
     lda bs_acc
-    sbc #MUX_SLOTS
+    sbc bs_reuseBack
     clc
     adc bs_base
     tay
@@ -786,20 +1016,51 @@ bs_loop:
     cmp #MIN_REUSE_GAP
     bcs bs_accept
     cmp #SPRITE_HEIGHT
-    bcs bs_margin                       // 21..23: legal on hardware, inside OUR margin
-bs_outOfRange:
-    lda statRejRange                    // saturating: the count matters, the
+    bcs bs_margin                       // 21..32: legal on hardware, inside OUR margin
+
+// ---------------------------------------------------------------------------
+// A GAP OF 0..20 FALLS THROUGH TO HERE, AND IT USED TO FALL SOMEWHERE ELSE.
+//
+// This `cmp #SPRITE_HEIGHT / bcs bs_margin` used to drop straight into
+// bs_outOfRange, so a genuine overlap -- two sprites closer together than a
+// sprite is tall -- incremented statRejRange, whose job is to count sprites
+// refused for being OUTSIDE THE APERTURE. bs_unsafe, whose own comment says
+// "< 21: the two sprites genuinely overlap", was reachable only by the `bcc`
+// above it, i.e. only on a descending list, which the sorted precondition
+// forbids. So statRejUnsafe was dead and statRejRange conflated two causes
+// that want opposite responses from a level author: "your wave is too tightly
+// packed" and "your wave is off the top of the screen".
+//
+// Measured on the machine before the change (reports/mux-slot-architecture-benchmark.md
+// §2c): six sprites at a gap of 0, 10 or 20 all landed on statRejRange, as did
+// three sprites below the aperture floor, and statRejUnsafe read zero in every
+// case. Now each lands where it belongs.
+//
+// AND statRejUnsafe HAS TO SATURATE NOW. It never did, because it was never
+// reached; a dense wave reaches it dozens of times a frame and an unsaturated
+// counter would wrap through zero and read as "no faults".
+bs_unsafe:
+    lda statRejUnsafe                   // saturating: the count matters, the
     cmp #$ff                            // exact value past 255 does not
     beq !saturated+
+    inc statRejUnsafe
+!saturated:
+    jmp bs_next
+
+bs_outOfRange:
+    lda statRejRange                    // saturating, and now counting ONE
+    cmp #$ff                            // cause: a presented Y outside
+    beq !saturated+                     // MIN_SPRITE_Y..MAX_SPRITE_Y
     inc statRejRange
 !saturated:
     jmp bs_next
 
-bs_unsafe:
-    inc statRejUnsafe                   // < 21: the two sprites genuinely overlap
-    jmp bs_next
 bs_margin:
+    lda statRejMargin                   // saturating for the same reason as
+    cmp #$ff                            // statRejUnsafe above: this one was
+    beq !saturated+                     // always reachable and always wrapped
     inc statRejMargin
+!saturated:
     jmp bs_next
 
 bs_accept:
@@ -825,6 +1086,15 @@ bs_accept:
 !haveBlock:
 
     // physical slot = MUX_FIRST_SLOT + (accepted mod MUX_SLOTS)
+    //
+    // MUX_SLOTS HERE, NOT bs_reuseBack, AND THE DIFFERENCE IS THE POINT. The
+    // round robin is a property of the HARDWARE POOL: entry i takes slot
+    // (i mod MUX_SLOTS) and therefore physically reuses the slot of entry
+    // i-MUX_SLOTS, whoever the entry is. bs_reuseBack is a property of the
+    // ADMISSION POLICY -- how much headroom this particular candidate is
+    // required to leave. A muzzle flash admitted as entry 6 really does take a
+    // fresh slot, so it really is not a reuse, and counting it as one would
+    // make statReuse disagree with the slot assignment three lines below.
     lda bs_acc
     cmp #MUX_SLOTS
     bcc !noWrap+
@@ -912,6 +1182,13 @@ bs_accept:
     inc bs_acc
 
 bs_next:
+    // ONLY A SORTED CANDIDATE ADVANCES THE SCAN. The muzzle flash was taken out
+    // of band -- bs_muzPend is already clear, so it cannot be offered twice --
+    // and the sorted entry it jumped ahead of has not been judged yet.
+    lda bs_isMuz
+    beq !advance+
+    jmp bs_loop                         // bs_loop is ~400 bytes back: absolute
+!advance:
     inc bs_pos
     jmp bs_loop
 
@@ -1191,6 +1468,14 @@ bs_line:      .byte 0                  // the open batch's chosen raster
 bs_bcur:      .byte 0                  // the open batch's record index
 bs_enable:    .byte 0
 bs_d010:      .byte 0
+bs_reuseBack: .byte 0                  // how far back the reuse test looks for
+                                       // THIS candidate: MUX_SLOTS normally,
+                                       // MUX_SLOTS-1 for the muzzle flash
+bs_muzPend:   .byte 0                  // 1 = the flash has been offered a place
+                                       // in the merge and not yet taken one
+bs_muzY:      .byte 0                  // its PRESENTED Y, clamped once
+bs_muzClip:   .byte 0                  // its logClip, read once
+bs_isMuz:     .byte 0                  // 1 = the candidate in hand is the flash
 bs_slot:      .byte 0                  // the slot just assigned, so the enable
                                        // and $D010 accumulators can index by it
                                        // without re-reading schedSlot
@@ -1320,11 +1605,14 @@ exSetD018:
     sta exPtrStore + 2                  // THE pointer-table destination, decided
     sta huPtrStore + 2                  // ONCE per frame from the frame record
     sta plPtr0Store + 2                 // and patched into every instruction
-    sta plPtr1Store + 2                 // that writes a pointer -- the batch
-                                        // executor's, the HUD's and the
-                                        // player's two. Four stores,
-                                        // one source, one decision: neither
-                                        // phase can choose a page, and they
+                                        // that writes a pointer -- the batch
+                                        // executor's, the HUD's and the craft's.
+                                        // THREE stores, not four: the muzzle
+                                        // flash's used to be the fourth, and it
+                                        // now goes out through the batch
+                                        // executor's store like every other
+                                        // mux entry. One source, one decision:
+                                        // no phase can choose a page, and they
                                         // cannot disagree about which one was
                                         // adopted. PTR_A and PTR_B share the
                                         // low byte $f8, so a single byte selects
@@ -1441,7 +1729,7 @@ huPtrStore:
     dex
     bpl !slot-
 
-    // ---- HW0 and HW1: the player, from the ADOPTED block ------------------
+    // ---- HW0: the player's craft, from the ADOPTED block ------------------
     //
     // WHY HERE AND NOT AT THE HANDOFF. Raster 4 is the quietest line in the
     // frame -- far below the badline range, and $d015 is still zero so there is
@@ -1455,10 +1743,20 @@ huPtrStore:
     // belongs in the phase that has a line to spare, not the one that does not.
     //
     // It is also programmed ONCE per frame and then left alone: no batch, no
-    // phase and no main-thread routine touches $d000-$d003, $d027/$d028 or the
-    // two pointer table entries again before the next raster 4. The player's
-    // presentation is therefore immutable for the whole displayed frame in the
-    // strongest sense -- not merely unmodified, but unreachable.
+    // phase and no main-thread routine touches $d000/$d001, $d027 or pointer
+    // table entry 0 again before the next raster 4. The craft's presentation is
+    // therefore immutable for the whole displayed frame in the strongest sense
+    // -- not merely unmodified, but unreachable. That is what HW0's reservation
+    // buys and it is the reason the 7+1 migration did not pool it.
+    //
+    // HW1 IS NOT PROGRAMMED HERE ANY MORE, and the omission is load-bearing.
+    // HW1 is a mux slot now, so this phase must leave it exactly as exFrame
+    // left it: DISABLED. $d015 is cleared at raster 250 and the only writer
+    // that turns a mux slot back on is the one after batch 0, by which time
+    // batch 0 has programmed every slot schedEnable names (batch 0 holds
+    // min(accepted, MUX_SLOTS) entries, which is precisely the first use of
+    // each slot). So there is no window in which HW1 is enabled carrying last
+    // frame's muzzle flash -- it is enabled only after it has been written.
     ldx schedCurrent
     lda schedPlyX0,x
     sta $d000
@@ -1470,23 +1768,13 @@ huPtrStore:
 plPtr0Store:
     sta PTR_A + 0                       // high byte patched by exFrame, from the
                                         // same frame record that chose $d018
-    lda schedPlyX1,x
-    sta $d002
-    lda schedPlyY1,x
-    sta $d003
-    lda schedPlyCol1,x
-    sta $d028
-    lda schedPlyPtr1,x
-plPtr1Store:
-    sta PTR_A + 1                       // PTR_A+1 and PTR_B+1 share the low byte
-                                        // $f9, exactly as PTR_A/PTR_B share $f8
 
     lda schedPlyD010,x                  // complete value, one store, no RMW:
-    ora #HUD_D010                       // the HUD's bit 7 and the player's bits
-    sta $d010                           // 0/1, composed in a register
+    ora #HUD_D010                       // the HUD's bit 7 and the craft's bit
+    sta $d010                           // 0, composed in a register
     lda #$00
     sta $d017                           // NEVER non-zero: see above
-    lda #D01C_HUD_PHASE                 // the player's two slots multicolour,
+    lda #D01C_HUD_PHASE                 // the player's slot multicolour,
     sta $d01c                           // the HUD's six HIRES -- its score font
                                         // and heat bar are line art and need
                                         // every column. The handoff at raster
@@ -1559,9 +1847,10 @@ exHandoff:
     sta $d01b                           // sprites in front of the playfield
     sta $d01d                           // no X expand: X is a 9-bit position
     lda #D01C_GAMEPLAY                  // EVERY gameplay sprite multicolour: the
-    sta $d01c                           // six mux slots this phase is handing
-                                        // over, plus the player's two, which
-                                        // keep the mode raster 4 gave them.
+    sta $d01c                           // seven mux slots -- six handed over by
+                                        // the HUD and HW1, which the HUD never
+                                        // touched -- plus the craft's own, which
+                                        // keeps the mode raster 4 gave it.
                                         // This is the write the HUD's hires
                                         // score font cannot see -- it is four
                                         // rasters past the HUD's last line.
@@ -1581,11 +1870,11 @@ exHandoff:
     bne exBatch                         // the normal case: run batch 0
     lda schedEnable,x                   // NO GAMEPLAY SPRITES. Not "nothing to
     sta $d015                           // enable": schedEnable still carries the
-                                        // player's two bits, and writing zero
-                                        // here would switch the player off for
-                                        // every frame the mux pool is empty --
-                                        // which, until enemies arrive, is every
-                                        // frame there is.
+                                        // craft's bit, and writing zero here
+                                        // would switch the player off for every
+                                        // frame the mux pool is empty -- which,
+                                        // until enemies arrive, is every frame
+                                        // there is.
 
     lda $d012                           // AND THE HANDOFF IS COMPLETE HERE.
     cmp handoffExitMax                  // Without this the production path --

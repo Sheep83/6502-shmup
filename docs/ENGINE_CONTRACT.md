@@ -36,13 +36,43 @@ that order, once per frame, from the main thread.
 ## 2. Hardware sprite slots
 
 ```
-HW0        reserved — future player base
-HW1        reserved — future player overlay
-HW2-HW7    gameplay multiplex pool, time-shared with the top-border HUD
+HW0        reserved — the player's craft, and nothing else, ever
+HW1-HW7    gameplay multiplex pool, SEVEN slots
+HW2-HW7    ...of which these six are also time-shared with the top-border HUD
 ```
 
-`MUX_FIRST_SLOT = 2`, `MUX_SLOTS = 6`. Accepted sprite *i* uses slot
-`2 + (i mod 6)`, and its same-slot predecessor is accepted entry *i-6*.
+`MUX_FIRST_SLOT = 1`, `MUX_SLOTS = 7`. Accepted sprite *i* uses slot
+`1 + (i mod 7)`, and its same-slot predecessor is accepted entry *i-7*.
+
+**HW0's reservation is the player's visibility guarantee**, and it is the whole
+of it: the craft is never offered to the scheduler, so it cannot be refused
+admission, crowded out by a dense formation, or have its slot reused. It is
+programmed once per frame by `exHud` at raster 4 and is unreachable thereafter.
+The guard is a build-time assertion that `MUX_SLOT_MASK & PLAYER_SLOT_MASK == 0`.
+
+**HW1 was reserved and is not any more.** It carried the player's muzzle flash
+as a permanently reserved second layer. `reports/mux-slot-architecture-benchmark.md`
+measured 6+2, 7+1 and fully pooled 8 against the same scenes and chose 7+1:
+eight slots exceeded the raster timing (an eight-entry batch 0 exits at raster 54
+against `TOP_ARM_LINE` 52 and tripped `edgeLate`; an eight-entry mid-screen batch
+measured 796 cycles against a 756-cycle budget), while seven measured clean.
+
+The muzzle flash is now a **pseudo-sprite**: logical sprite `MUZZLE_LOG_ID` (16),
+above the range `objectAlloc` issues, written by `playerEmit` into
+`logY/logX/logXHi/logPtr/logCol/logClip` and merged into the Y-sorted admission
+pass by `buildSchedule`. It has no object type, no membership bit, no collision
+and no hit points, so nothing that walks the object pool can see it.
+
+It is **best-effort, and it loses first**. `bs_reuseBack` is `MUX_SLOTS` for an
+ordinary sprite and `MUX_SLOTS - 1` for the flash, so the flash is held to a
+harder reuse test than gameplay and can never consume the last slot an enemy
+could have used. Under crowding the flash is refused; no enemy is ever dropped
+to draw it.
+
+Its Y is `plyY - PLAYER_FLASH_Y_LIFT` (7), so it runs down to 48 — below
+`MIN_SPRITE_Y`. It is **not** range-rejected there: `playerEmit` calls the shared
+`logClipAnnotate`, and `src/clip.asm` holds it at Y=55 with a row-shifted bitmap,
+spending one of the six clip scratch blocks.
 
 ## 3. Sprite admission rules
 
@@ -88,7 +118,18 @@ selected for a whole frame — a black screen.
 ## 5. HUD ownership
 
 The HUD owns **HW2-HW7 only** between rasters 4 and 40, and hands them back
-completely. HW0/HW1 are never touched by either side.
+completely. HW0 is never touched by either side.
+
+**HW1 is in the mux but not in the HUD**, which makes it the one pool slot with
+no HUD-era state to restore: the HUD never enables it, never points it anywhere
+and never names it in a mode register. It arrives at the handoff disabled — `$d015`
+is cleared at raster 250 and `exHud` writes only the craft's bit — and the first
+batch programs it from nothing. `MUX_SLOT_MASK` is therefore a strict superset of
+`HUD_ENABLE`, asserted at build time.
+
+No slot is ever enabled carrying the previous frame's contents: batch 0 holds
+`min(accepted, MUX_SLOTS)` entries, which is exactly the first use of every slot
+`schedEnable` names, and `$d015` is written after batch 0 has run.
 
 `exHandoff` writes, unconditionally, every register the HUD might have dirtied:
 `$d017`, `$d01b`, `$d01c`, `$d01d`, then batch 0 sets per-slot X/Y/colour/

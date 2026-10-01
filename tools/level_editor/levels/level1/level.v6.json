@@ -4001,6 +4001,124 @@
     },
     {
       "worldProgress": 41,
+      "waveDefinition": "dive_4",
+      "species": "RING_3",
+      "fireMask": [
+        0,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 50,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 90,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4,
+      "dropperProgram": "dive_bomb"
+    },
+    {
+      "worldProgress": 91,
+      "waveDefinition": "loop",
+      "species": "RING_3",
+      "fireMask": [
+        0
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 101,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 140,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 141,
+      "waveDefinition": "up_n_over",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0,
+        2,
+        4
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 4
+    },
+    {
+      "worldProgress": 145,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 190,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "RIGHT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 191,
       "waveDefinition": "sweep_l",
       "species": "SPACE_WHISK",
       "fireMask": [
@@ -4013,7 +4131,341 @@
       "speed": 6
     },
     {
-      "worldProgress": 50,
+      "worldProgress": 201,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 240,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 241,
+      "waveDefinition": "sweep_l",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 251,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 300,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "RIGHT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 301,
+      "waveDefinition": "sweep_l",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 311,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 350,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 351,
+      "waveDefinition": "sweep_l",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 361,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 400,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4,
+      "dropperProgram": "dive_bomb"
+    },
+    {
+      "worldProgress": 401,
+      "waveDefinition": "sweep_l",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 411,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 450,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 451,
+      "waveDefinition": "sweep_l",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 460,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 500,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 501,
+      "waveDefinition": "sweep_l",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 511,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 550,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 551,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 561,
+      "waveDefinition": "sweep_l",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 600,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 601,
+      "waveDefinition": "sweep_r",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 611,
+      "waveDefinition": "sweep_l",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 650,
+      "waveDefinition": "dive_4",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 651,
+      "waveDefinition": "sweep_l",
+      "species": "SPACE_WHISK",
+      "fireMask": [
+        0
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "AIMED",
+      "speed": 6
+    },
+    {
+      "worldProgress": 661,
       "waveDefinition": "sweep_r",
       "species": "SPACE_WHISK",
       "fireMask": [
