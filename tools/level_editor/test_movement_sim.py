@@ -482,10 +482,46 @@ check("an ordinary trigger resolves through its wave to its movement program",
       sim.wave_id == fx.triggers[ordinary].wave_definition
       and sim.program_id == fxwaves[sim.wave_id].movement_program,
       f"{sim.wave_id} -> {sim.program_id}")
-refuses("a DROPPER trigger is REFUSED rather than drawn as an ordinary wave",
-        lambda: ms.simulate_trigger(fx, dropper), "not previewed")
-refuses("...and says why", lambda: ms.simulate_trigger(fx, dropper),
-        "taken off its wave's authored path")
+# A DROPPER TRIGGER IS NOW DRAWN, AND THIS USED TO ASSERT THE OPPOSITE. The
+# refusal was correct while a Dropper had no path of its own: src/waves.asm took
+# it off the escorts' path immediately and an ordinary-wave picture was a
+# fiction. Now member 0 flies either the legacy trajectory or a program the
+# trigger named, and both are simulable -- so what must hold is that member 0 is
+# NOT on the escorts' path while members 1..N-1 are.
+dsim = ms.simulate_trigger(fx, dropper)
+dwave = fxwaves[fx.triggers[dropper].wave_definition]
+# ONE OBJECT, AND THAT IS THE WHOLE CONTRACT NOW. This block used to assert a
+# composite encounter: member 0 the Dropper, members 1..N-1 escorts from the same
+# trigger, the escorts keeping their formation offsets around a member-0 "hole".
+# That encounter no longer exists -- a Dropper Trigger spawns exactly one object
+# and an author who wants company writes a second, ordinary trigger a row away.
+check("a DROPPER trigger draws exactly ONE object",
+      dsim.count == 1 and len(dsim.paths) == 1,
+      f"{dsim.count} object(s) from a definition that sends {dwave.count}")
+check("...however many members its definition nominally sends",
+      dwave.count > 1, f"definition sends {dwave.count}")
+check("...and that object is on the legacy trajectory",
+      all(f.stage_kind == "DROPPER" for f in dsim.paths[0]),
+      f"kinds {sorted({f.stage_kind for f in dsim.paths[0]})}")
+check("...with no escort drawn from this trigger at all",
+      len(dsim.frames[0]) == 1 and all(len(fr) <= 1 for fr in dsim.frames),
+      f"max {max(len(fr) for fr in dsim.frames)} object(s) on any frame")
+# LEFT AND RIGHT ARE DIFFERENT FLIGHTS, which is what makes the side control
+# meaningful in legacy mode and is the property the preview cache must notice.
+fx.triggers[dropper].dropper_side = "LEFT"
+left = ms.simulate_trigger(fx, dropper).paths[0]
+fx.triggers[dropper].dropper_side = "RIGHT"
+right = ms.simulate_trigger(fx, dropper).paths[0]
+check("LEFT and RIGHT are different legacy flights",
+      left[0].x != right[0].x and left[0].vx == -right[0].vx,
+      f"x {left[0].x} vs {right[0].x}; vx {left[0].vx} vs {right[0].vx}")
+fx.triggers[dropper].dropper_side = "LEFT"
+# AN ORDINARY TRIGGER IS UNAFFECTED: it still sends its whole formation, which is
+# how "a Dropper with escorts" is authored now -- two independent triggers.
+osim = ms.simulate_trigger(fx, ordinary)
+check("an ordinary trigger beside it still sends its full wave",
+      osim.count == fxwaves[fx.triggers[ordinary].wave_definition].count > 1,
+      f"{osim.count} members")
 refuses("no trigger selected is refused cleanly",
         lambda: ms.simulate_trigger(fx, 99), "no trigger selected")
 

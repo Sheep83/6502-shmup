@@ -234,9 +234,12 @@ class EncounterWorkspace(tk.Toplevel):
         self.trig_tree = ttk.Treeview(
             f, columns=("progress", "wave", "species", "fire", "side"),
             show="headings", selectmode="browse", height=10)
+        # "sends" RATHER THAN "fires", because the column now answers two
+        # questions: which members of an ordinary wave shoot, or -- for a
+        # Dropper -- that the encounter is one object.
         for cid, txt, w in (("progress", "progress", 80), ("wave", "wave", 130),
-                            ("species", "species", 90), ("fire", "fires", 110),
-                            ("side", "side", 70)):
+                            ("species", "species", 90), ("fire", "sends", 110),
+                            ("side", "flight", 80)):
             self.trig_tree.heading(cid, text=txt)
             self.trig_tree.column(cid, width=w, anchor="w")
         self.trig_tree.grid(row=0, column=0, sticky="nsew")
@@ -261,10 +264,21 @@ class EncounterWorkspace(tk.Toplevel):
         self.t_where = ttk.Label(d, text="", font=("TkDefaultFont", 9))
         self.t_where.grid(row=0, column=2, sticky="w", padx=(8, 0))
 
-        ttk.Label(d, text="wave definition").grid(row=1, column=0, sticky="w")
+        # THE LABEL CHANGES WITH THE ENEMY, because the field means two
+        # different things. For an ordinary trigger it is the FORMATION: how
+        # many, how far apart, along which path. For a Dropper -- one object --
+        # the count, interval and per-member steps are inert and what is left is
+        # a START POSITION and a LAUNCH HEADING, which is exactly what one
+        # object needs. Saying "wave definition" over a single Dropper is what
+        # would imply the escorts this model removed.
+        self.t_wave_label = ttk.Label(d, text="wave definition")
+        self.t_wave_label.grid(row=1, column=0, sticky="w")
         self.t_wave = ttk.Combobox(d, state="readonly", width=20)
         self.t_wave.grid(row=1, column=1, sticky="w")
         self.t_wave.bind("<<ComboboxSelected>>", self._trigger_apply)
+        self.t_wave_note = ttk.Label(d, text="", font=("TkDefaultFont", 9),
+                                     wraplength=PROG_TEXT_WRAP, justify="left")
+        self.t_wave_note.grid(row=1, column=2, sticky="w", padx=(8, 0))
 
         # THE ENEMY, BY NAME. This used to be `sorted(C.SPECIES)` -- the
         # engine's three legacy species -- which is the whole reason only
@@ -283,12 +297,32 @@ class EncounterWorkspace(tk.Toplevel):
                                    values=sorted(C.DROPPER_SIDES))
         self.t_side.grid(row=3, column=1, sticky="w")
         self.t_side.bind("<<ComboboxSelected>>", self._trigger_apply)
+        self.t_side_note = ttk.Label(d, text="", font=("TkDefaultFont", 9),
+                                     wraplength=PROG_TEXT_WRAP, justify="left")
+        self.t_side_note.grid(row=3, column=2, sticky="w", padx=(8, 0))
 
-        ttk.Label(d, text="fires").grid(row=4, column=0, sticky="nw")
+        # WHAT THE DROPPER ITSELF FLIES -- MEMBER 0 ONLY. The wave definition
+        # above paths the ESCORTS, members 1..N-1, and always has; this is the
+        # one member the definition never described, because before this control
+        # existed a Dropper was taken off its wave's path the instant it spawned.
+        #
+        # NOT A SECOND WAVE DEFINITION SELECTOR. The formation, the count, the
+        # interval and the escorts' path stay one choice made once above. This
+        # names a movement PROGRAM, which is the vocabulary a path is authored in.
+        ttk.Label(d, text="Dropper movement").grid(row=4, column=0, sticky="w")
+        self.t_dropmove = ttk.Combobox(d, state="readonly", width=20)
+        self.t_dropmove.grid(row=4, column=1, sticky="w")
+        self.t_dropmove.bind("<<ComboboxSelected>>", self._trigger_apply)
+        self.t_dropmove_note = ttk.Label(d, text="", font=("TkDefaultFont", 9),
+                                         wraplength=PROG_TEXT_WRAP,
+                                         justify="left")
+        self.t_dropmove_note.grid(row=4, column=2, sticky="w", padx=(8, 0))
+
+        ttk.Label(d, text="fires").grid(row=5, column=0, sticky="nw")
         self.t_fire = ttk.Frame(d)
-        self.t_fire.grid(row=4, column=1, columnspan=2, sticky="w")
+        self.t_fire.grid(row=5, column=1, columnspan=2, sticky="w")
         self.t_fire_note = ttk.Label(d, text="", font=("TkDefaultFont", 9))
-        self.t_fire_note.grid(row=5, column=1, columnspan=2, sticky="w")
+        self.t_fire_note.grid(row=6, column=1, columnspan=2, sticky="w")
 
         # ---- how THIS appearance is coloured -----------------------------
         # ON THE TRIGGER, not on the wave definition, and that is the whole
@@ -296,56 +330,56 @@ class EncounterWorkspace(tk.Toplevel):
         # vocabulary; the same `sweep` can now arrive cyan at one row and mixed
         # at another without being cloned, and editing one occurrence cannot
         # reach any other.
-        ttk.Label(d, text="colour mode").grid(row=6, column=0, sticky="w")
+        ttk.Label(d, text="colour mode").grid(row=7, column=0, sticky="w")
         self.t_colmode = ttk.Combobox(
             d, state="readonly", width=18,
             values=[C.COLOUR_MODE_LABELS[m] for m in ("FIXED", "RANDOM")])
-        self.t_colmode.grid(row=6, column=1, sticky="w")
+        self.t_colmode.grid(row=7, column=1, sticky="w")
         self.t_colmode.bind("<<ComboboxSelected>>", self._trigger_apply)
         ttk.Label(d, text="random gives each enemy of this appearance its own "
                           "colour at spawn, avoiding black, the shared sprite "
                           "colours and the terrain",
                   font=("TkDefaultFont", 9), wraplength=PROG_TEXT_WRAP,
-                  justify="left").grid(row=6, column=2, sticky="w", padx=(8, 0))
+                  justify="left").grid(row=7, column=2, sticky="w", padx=(8, 0))
 
         # HOW THIS APPEARANCE ATTACKS. Directly under the fire mask, because
         # the two are one question asked twice: the mask says WHICH members
         # shoot, this says HOW the ones that do aim. An empty mask is still the
         # only way to say "this appearance does not shoot at all".
-        ttk.Label(d, text="fire mode").grid(row=8, column=0, sticky="w")
+        ttk.Label(d, text="fire mode").grid(row=9, column=0, sticky="w")
         self.t_firemode = ttk.Combobox(
             d, state="readonly", width=18,
             values=[C.FIRE_MODE_LABELS[m] for m in ("DOWN", "AIMED")])
-        self.t_firemode.grid(row=8, column=1, sticky="w")
+        self.t_firemode.grid(row=9, column=1, sticky="w")
         self.t_firemode.bind("<<ComboboxSelected>>", self._trigger_apply)
         self.t_firemode_note = ttk.Label(d, text="", font=("TkDefaultFont", 9),
                                          wraplength=PROG_TEXT_WRAP,
                                          justify="left")
-        self.t_firemode_note.grid(row=8, column=2, sticky="w", padx=(8, 0))
+        self.t_firemode_note.grid(row=9, column=2, sticky="w", padx=(8, 0))
 
         # HOW FAST THIS APPEARANCE CROSSES. Beside the other occurrence
         # properties, because it is one: the wave definition owns the SHAPE of
         # the path and the trigger owns the pace it is walked at, so the same
         # formation can be a lazy pass here and an attack run three rows later.
-        ttk.Label(d, text="movement speed").grid(row=9, column=0, sticky="w")
+        ttk.Label(d, text="movement speed").grid(row=10, column=0, sticky="w")
         self.t_speed = ttk.Combobox(
             d, state="readonly", width=18,
             values=[C.SPEED_LABELS[v] for v in C.SPEED_CHOICES])
-        self.t_speed.grid(row=9, column=1, sticky="w")
+        self.t_speed.grid(row=10, column=1, sticky="w")
         self.t_speed.bind("<<ComboboxSelected>>", self._trigger_apply)
         ttk.Label(d, text="physical travel speed only -- it does not change "
                           "spawn interval, wave spacing or firing cadence, so "
                           "a faster wave spends less time in the firing band",
                   font=("TkDefaultFont", 9), wraplength=PROG_TEXT_WRAP,
-                  justify="left").grid(row=9, column=2, sticky="w", padx=(8, 0))
+                  justify="left").grid(row=10, column=2, sticky="w", padx=(8, 0))
 
-        ttk.Label(d, text="colour").grid(row=7, column=0, sticky="w")
+        ttk.Label(d, text="colour").grid(row=8, column=0, sticky="w")
         self.t_colour = ttk.Entry(d, width=8)
-        self.t_colour.grid(row=7, column=1, sticky="w")
+        self.t_colour.grid(row=8, column=1, sticky="w")
         self.t_colour.bind("<Return>", self._trigger_apply)
         self.t_colour.bind("<FocusOut>", self._trigger_apply)
         self.t_colour_note = ttk.Label(d, text="", font=("TkDefaultFont", 9))
-        self.t_colour_note.grid(row=7, column=2, sticky="w", padx=(8, 0))
+        self.t_colour_note.grid(row=8, column=2, sticky="w", padx=(8, 0))
 
     # ------------------------------------------------------------------ waves
     def _build_waves(self, nb):
@@ -832,8 +866,18 @@ class EncounterWorkspace(tk.Toplevel):
         tree = self.trig_tree
         tree.delete(*tree.get_children())
         for i, t in enumerate(self.controller.project.triggers):
-            fires = ", ".join(str(m) for m in t.fire_mask) or "—"
-            side = t.dropper_side if _is_dropper(t.species) else "—"
+            # WHAT THIS TRIGGER SENDS, IN TWO COLUMNS, and a Dropper reads
+            # differently in both because it is a different kind of encounter.
+            # The mask is not read for it, so showing member numbers would imply
+            # a formation; and the last column carries the entry side for a
+            # legacy flight or the program for an authored one.
+            if not _is_dropper(t.species):
+                fires = ", ".join(str(m) for m in t.fire_mask) or "—"
+                side = "—"
+            else:
+                fires = "1 Dropper"
+                side = (t.dropper_side if t.dropper_is_legacy
+                        else t.dropper_program)
             tree.insert("", "end", iid=str(i),
                         values=(t.world_progress, t.wave_definition,
                                 C.identity_label(t.species), fires, side))
@@ -845,10 +889,19 @@ class EncounterWorkspace(tk.Toplevel):
         ts = self.controller.project.triggers
         ids = [d.id for d in self.controller.project.wave_definitions]
         self.t_wave["values"] = ids
+        # RE-OFFERED EVERY REFRESH, like the wave definitions above: adding,
+        # renaming or deleting a movement program has to change what a Dropper
+        # trigger can select without the workspace being reopened.
+        self.t_dropmove["values"] = self._dropmove_values()
         if self.sel_trigger is None or not (0 <= self.sel_trigger < len(ts)):
             for w in (self.t_prog,):
                 w.delete(0, "end")
             self.t_wave.set(""); self.t_species.set(""); self.t_side.set("")
+            self.t_dropmove.set("")
+            self.t_dropmove_note.configure(text="")
+            self.t_side_note.configure(text="")
+            self.t_wave_label.configure(text="wave definition")
+            self.t_wave_note.configure(text="", foreground="")
             self.t_where.configure(text="")
             self.t_fire_note.configure(text="")
             self.t_colmode.set("")
@@ -866,10 +919,15 @@ class EncounterWorkspace(tk.Toplevel):
         self.t_wave.set(t.wave_definition)
         self.t_species.set(C.identity_label(t.species))
         self.t_side.set(t.dropper_side)
-        # A RING carries a side and ignores it, so the control is disabled
-        # rather than inviting a meaningless choice.
-        self.t_side.configure(
-            state="readonly" if _is_dropper(t.species) else "disabled")
+        # A REFERENCE THAT NO LONGER RESOLVES IS SHOWN AS ITSELF, not silently
+        # replaced by Legacy. The validator reports it as an error and the author
+        # has to see which name it was to fix it -- quietly selecting Legacy here
+        # would repair the display and lose the information.
+        self.t_dropmove.set(t.dropper_program
+                            if t.dropper_program is not None
+                            else C.DROPPER_MOVEMENT_LEGACY)
+        self._sync_dropper_controls(t)
+        self._sync_placement_label(t)
 
         # THIS APPEARANCE'S COLOUR. Written while the entry is enabled: a
         # disabled ttk.Entry ignores insert and delete from code as well as
@@ -901,6 +959,20 @@ class EncounterWorkspace(tk.Toplevel):
         for child in self.t_fire.winfo_children():
             child.destroy()
         self._fire_vars = []
+
+        # ---- A DROPPER TRIGGER HAS NO MEMBERS TO MASK ----------------------
+        # NO CHECKBOXES AT ALL, rather than one disabled box for a notional
+        # member 0. A fire mask is a mask over member index, and this encounter
+        # is a single object -- offering even one box would imply the formation
+        # this model exists to remove. src/dropper.asm withdraws the firing
+        # permission outright and src/waves.asm never consults the mask for it.
+        if _is_dropper(t.species):
+            self.t_fire_note.configure(
+                text="a Dropper is one object and does not fire — "
+                     "for company, add an ordinary trigger a row away",
+                foreground="")
+            return
+
         count = self.controller.trigger_members(self.sel_trigger)
         for m in range(max(count, 0)):
             v = tk.IntVar(value=1 if m in t.fire_mask else 0)
@@ -1606,6 +1678,112 @@ class EncounterWorkspace(tk.Toplevel):
         if getattr(self, "t_species", None) is not None:
             self.t_species.configure(values=self._identity_labels())
 
+    def _sync_placement_label(self, t, *, dropper=None):
+        """What the wave-definition field means for THIS trigger.
+
+        ONE FIELD, TWO MEANINGS, AND THE LABEL SAYS WHICH. See the note beside
+        the widget: for a Dropper only the start position and launch heading are
+        read, and the definition's count is forced to one by src/waves.asm.
+        """
+        if dropper is None:
+            dropper = _is_dropper(t.species)
+        wave = next((w for w in self.controller.project.wave_definitions
+                     if w.id == t.wave_definition), None)
+        if not dropper:
+            self.t_wave_label.configure(text="wave definition")
+            self.t_wave_note.configure(text="", foreground="")
+            return
+        self.t_wave_label.configure(text="placement")
+        if wave is None:
+            self.t_wave_note.configure(text="", foreground="")
+        elif wave.count != 1:
+            # STATED, NOT SILENTLY IGNORED. The definition is not wrong -- it may
+            # be shared with an ordinary trigger that really does send several --
+            # but the author must not believe this Dropper sends six.
+            self.t_wave_note.configure(
+                text=f"one Dropper: start position and launch heading only "
+                     f"({wave.id} sends {wave.count}, which is not read here)",
+                foreground=COL_WARN)
+        else:
+            self.t_wave_note.configure(
+                text="one Dropper: start position and launch heading",
+                foreground="")
+
+    def _sync_dropper_controls(self, t, *, dropper=None, legacy=None):
+        """The two Dropper controls, and which of them currently means anything.
+
+        THREE STATES, AND THE MIDDLE ONE IS THE NEW PART:
+
+          * NOT A DROPPER -- neither control is read, both are disabled. A Ring
+            wave carries a side byte and ignores it, and would carry a Dropper
+            program and ignore that too.
+          * A DROPPER ON THE LEGACY FLIGHT -- both are live. LEFT/RIGHT is the
+            edge src/dropper.asm enters from, exactly as it always was.
+          * A DROPPER ON AN AUTHORED PROGRAM -- the movement control is live and
+            LEFT/RIGHT is not read by anything. It is DISABLED AND LABELLED,
+            never silently repurposed: the field keeps the meaning it has always
+            had, and the author is told it is idle rather than left to infer it
+            from a path that ignores the choice.
+
+        `dropper` and `legacy` override what the stored trigger says, so the
+        controls can follow an edit in progress rather than lagging a refresh
+        behind it -- the same thing _sync_trigger_colour_enabled does for the
+        colour entry.
+        """
+        if dropper is None:
+            dropper = _is_dropper(t.species)
+        if legacy is None:
+            legacy = t.dropper_is_legacy
+
+        self.t_side.configure(
+            state="readonly" if (dropper and legacy) else "disabled")
+        self.t_dropmove.configure(
+            state="readonly" if dropper else "disabled")
+
+        if not dropper:
+            self.t_side_note.configure(text="")
+            self.t_dropmove_note.configure(
+                text="this enemy does not drop a token, so it has no Dropper "
+                     "flight to author")
+            return
+        if legacy:
+            self.t_side_note.configure(text="")
+            self.t_dropmove_note.configure(
+                text="the built-in flight: three crossings above the aperture "
+                     "from the side chosen above, at its own fixed pace -- "
+                     "movement speed does not scale it")
+        else:
+            self.t_side_note.configure(
+                text="not used: the authored path decides where the Dropper "
+                     "enters")
+            self.t_dropmove_note.configure(
+                text="member 0 flies this program at this trigger's movement "
+                     "speed and launch heading; the escorts keep the wave "
+                     "definition above. A faster loop is a WIDER loop")
+
+    def _dropmove_values(self):
+        """Legacy first, then this project's movement programs.
+
+        LEGACY IS AN ITEM IN THE LIST, not a blank or a checkbox beside it,
+        because it is a choice of equal standing -- the one every existing level
+        made -- and a list with a default at the top is how the author already
+        picks a wave definition or a firing mode.
+        """
+        return [C.DROPPER_MOVEMENT_LEGACY] + [
+            p.id for p in self.controller.project.movement_programs]
+
+    def _dropmove_from_label(self, label):
+        """The label the combobox shows -> what the document stores.
+
+        None IS A VALUE HERE and means the legacy flight, so an unrecognised or
+        empty label resolves to it rather than to a program: the safe answer for
+        a control that has not been filled in is the behaviour every level
+        already had.
+        """
+        if not label or label == C.DROPPER_MOVEMENT_LEGACY:
+            return None
+        return label
+
     def _trigger_apply(self, _e=None):
         if self._syncing or self.sel_trigger is None:
             return
@@ -1616,9 +1794,28 @@ class EncounterWorkspace(tk.Toplevel):
             # The combobox shows a LABEL; the document stores the identity.
             "species": self._identity_from_label(self.t_species.get()) or t.species,
         }
-        if _is_dropper(self._identity_from_label(self.t_species.get())) \
-                and self.t_side.get():
+        chosen = self._identity_from_label(self.t_species.get())
+        is_dropper = _is_dropper(chosen)
+        if is_dropper and self.t_side.get():
             fields["dropper_side"] = self.t_side.get()
+        # WHAT THE DROPPER FLIES, and only when this trigger's enemy is one. A
+        # non-Dropper's control is disabled and its field is cleared by the
+        # controller when the species changes, so there is nothing to write.
+        #
+        # THE KEY IS SENT EVEN WHEN THE ANSWER IS None, because None is the
+        # legacy flight and not an absence -- omitting it would make returning
+        # from an authored program to Legacy impossible.
+        self._sync_placement_label(t, dropper=is_dropper)
+        if is_dropper:
+            fields["dropper_program"] = self._dropmove_from_label(
+                self.t_dropmove.get())
+            # THE CONTROLS FOLLOW THE CHOICE IMMEDIATELY, before the refresh
+            # this edit triggers, so selecting an authored program greys
+            # LEFT/RIGHT out as the author watches rather than on the next
+            # selection. Exactly what the colour entry does above.
+            self._sync_dropper_controls(
+                t, dropper=True,
+                legacy=fields["dropper_program"] is None)
         fields["colour"] = _int_or(self.t_colour.get(), t.resolved_colour)
         label = self.t_colmode.get()
         for key, text in C.COLOUR_MODE_LABELS.items():

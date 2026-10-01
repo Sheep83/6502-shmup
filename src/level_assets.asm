@@ -16,34 +16,37 @@
 // claims into the pointer table the animation already reads.
 //
 //   resident   the window's address and size          (engine memory map)
-//              a species' identity                    (SPECIES_RING, ...)
-//              a species' animation SHAPE             (enemyAnimShape)
+//              how many enemy SLOTS a level has        (SPECIES_COUNT)
+//              how many animation STEPS a slot walks   (ENEMY_ANIM_STEPS)
 //
-//   per level  which slot a species was loaded into   (levelAssetDescs)
-//              and, once there is a loader, the bytes in those blocks
+//   per level  which roster IDENTITY each slot holds, how many physical frames
+//              that identity owns, the order those frames are walked in, and
+//              the bytes in the blocks -- all of it, as data, in the package
 //
 // Gameplay code is unchanged and never learns an address: enemyAnimPtr asks
 // for a species' current frame exactly as it did before.
 //
 // NO FRAMEWORK. A byte table and one loop. There is no asset manager, no
-// vtable and no per-species record, because the only thing that actually
-// varies per level is where a species' blocks landed -- so that is the only
-// thing the descriptor carries.
+// vtable and no per-species record.
 // ===========================================================================
 
-// --- the packages ----------------------------------------------------------
-// One row of SPECIES_COUNT slot indices per package.
+// --- WHAT THE PACKAGE CARRIES, AND WHY NOTHING IS COMPOSED HERE -------------
+// A PACKAGE SHIPS ONE WINDOW-RELATIVE BLOCK PER (SLOT, STEP): the whole
+// SPECIES_COUNT * ENEMY_ANIM_STEPS table, already resolved, as LEVELPKG_ANIM.
+// tools/sprite_export/import_spd.py composes it from the roster -- each
+// identity's frame count decides how many blocks it occupies and where the next
+// slot starts, and each identity's own step order decides which block a step
+// shows. So levelAssetsLoad adds the window base and nothing else.
 //
-// LEVEL B IS A TEST PACKAGE AND NOTHING ELSE. It exists to prove the pointer
-// table is genuinely rebuilt from data rather than baked at assembly time, so
-// it deliberately disagrees with level 1 about BOTH species: a different slot
-// each, and the two species in the OPPOSITE ORDER within the window. A package
-// that merely shifted both by a constant could pass while the loader ignored
-// the descriptor entirely.
+// IT USED TO BE COMPOSED HERE, out of two separately owned tables: a resident
+// SHAPE (enemyAnimShape -- frame indices per species) and a per-package SLOT row
+// (levelAssetDescs -- where this level put that species' frames), combined as
+// `window base + slot + frame index`. Both are gone. That model could only
+// express a FIXED FRAME COUNT PER SPECIES, because a shape of frame indices says
+// nothing about how many frames exist and the slot arithmetic assumed every
+// species was the same size; an identity with six frames beside one with four
+// could not be described at all.
 //
-// It carries no artwork. Proving the address contract does not need a second
-// set of drawings, and inventing enemy art is not this task's job. Level 1's
-// own claims live with level 1, in level1/stage_enemies.asm.
 // THE RESIDENT DESCRIPTOR TABLE IS GONE, and with it the whole idea that the
 // ENGINE knows where a level put its artwork. It held one row of slot claims
 // per package, assembled from the build-time level's stage_enemies.asm, and it
@@ -84,24 +87,27 @@ levelAssetStateEnd:
 * = $4b00 "level assets"
 
 // ---------------------------------------------------------------------------
-// levelAssetsLoad — resolve a package's slot claims into the animation table.
-// Entry: X = package index (LEVEL_PACKAGE_1 or LEVEL_PACKAGE_B).
-// Exit:  enemyAnimSeq holds a sprite POINTER for every species and every step.
+// levelAssetsLoad — resolve the RESIDENT package's animation table.
+// Entry: no arguments. It reads LEVELPKG_ANIM, so it always resolves whatever
+//        package is currently in the package region.
+// Exit:  enemyAnimSeq holds a sprite POINTER for every slot and every step.
 //        A, X, Y clobbered.
 //
 // THIS IS THE WHOLE INDIRECTION. enemyAnimSeq used to be a table of constants
-// assembled from ENEMY_PTR_FIRST and DROPPER_PTR_FIRST. It is now RAM, built
-// here from two separately owned things:
+// assembled from ENEMY_PTR_FIRST and DROPPER_PTR_FIRST; it is RAM now, and the
+// one thing that turns package data into a pointer is:
 //
-//     the SHAPE   enemyAnimShape  -- frame indices; resident species behaviour
-//     the SLOT    levelAssetDescs -- where this level put that species' frames
+//     pointer = LEVELPKG_ANIM entry + LEVEL_PTR_FIRST
 //
-//     pointer = window base + slot + frame index
+// IT TOOK A PACKAGE INDEX IN X while the descriptor rows were resident and the
+// engine chose between them. It does not any more -- a package brings its own
+// table, so there is nothing to select -- and the argument is simply gone
+// rather than ignored-but-documented.
 //
-// A species owns exactly one run of ENEMY_ANIM_STEPS consecutive entries, so
-// an entry index's high bits ARE its species. That is the same arithmetic
-// enemyAnimPtr already relies on, used here in reverse, which is why no third
-// table is needed to say which entry belongs to whom.
+// A slot owns exactly one run of ENEMY_ANIM_STEPS consecutive entries, so an
+// entry index's high bits ARE its slot. That is the same arithmetic enemyAnimPtr
+// already relies on, which is why no second table says which entry belongs to
+// whom.
 //
 // CALLED ONCE PER LEVEL, from gameInit. Nothing per-frame calls it, so it is
 // written to be read rather than to be fast.

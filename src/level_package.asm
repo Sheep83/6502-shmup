@@ -233,7 +233,7 @@ levelDefsEnd2:
 // ---------------------------------------------------------------------------
 // THE ABSOLUTE TRIGGER LIST, above the definitions.
 //
-// NINE PARALLEL COLUMNS, each LEVELPKG_TRIG_SLOTS bytes long whatever this level
+// TEN PARALLEL COLUMNS, each LEVELPKG_TRIG_SLOTS bytes long whatever this level
 // authors, because the engine addresses them as fixed bases: a column that
 // shrank with the trigger count would move every column above it and the
 // engine's labels would point at the wrong data. The unused tail of each column
@@ -279,7 +279,36 @@ levelTrigStart:
 .for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
     .byte t < WAVE_TRIGGERS ? trigSpeed.get(t) : TRIG_SPEED_1X
 }
+// ...AND WHAT THIS APPEARANCE'S DROPPER FLIES: TRIG_DROP_LEGACY for the
+// hard-coded three-pass flight, or the BYTE OFFSET of a movement program that
+// member 0 flies on the ordinary movement engine.
+//
+// A BYTE OFFSET, RESOLVED HERE, exactly as a wave definition's tenth byte is.
+// The authored column holds a program INDEX, which is what a level can say
+// without knowing how the pool is laid out; progAt turns it into the offset the
+// runtime stores straight into wmStage, so the 6502 never multiplies.
+//
+// THE PADDING IS TRIG_DROP_LEGACY, NOT ZERO, for the same reason the speed
+// column above it pads with the default: zero is a perfectly valid movement
+// offset -- it is the FIRST program's -- so a zero tail would tell the engine
+// that 100-odd triggers that do not exist fly program 0.
+.for (var t = 0; t < LEVELPKG_TRIG_SLOTS; t++) {
+    .var authored = t < WAVE_TRIGGERS && trigDropProg.get(t) != TRIG_DROP_LEGACY
+    .byte authored ? progAt.get(trigDropProg.get(t)) : TRIG_DROP_LEGACY
+}
 levelTrigEnd:
+
+// THE SENTINEL MUST NOT ALIAS AN OFFSET THIS LEVEL ACTUALLY EMITS, and with the
+// pool this level authored that is provable rather than assumed. The general
+// proof lives beside TRIG_DROP_LEGACY in src/encounter_format.asm -- no program
+// can start above LEVELPKG_MOVE_MAX - WM_STAGE_SIZE -- and this is the same
+// claim checked against the real offsets, so a future pool layout that broke it
+// would fail here as well as there.
+.for (var p = 0; p < progAt.size(); p++) {
+    .if (progAt.get(p) == TRIG_DROP_LEGACY) {
+        .error "a movement program starts at the offset TRIG_DROP_LEGACY uses as its sentinel: a Dropper trigger naming it would be read as the legacy flight"
+    }
+}
 
 .if (levelTrigEnd - levelTrigStart != LEVELPKG_TRIG_COLS * LEVELPKG_TRIG_SLOTS) {
     .error "the emitted trigger list is not LEVELPKG_TRIG_COLS columns of LEVELPKG_TRIG_SLOTS"

@@ -135,10 +135,32 @@ drPhase:     .byte 0      // index into the weave table, 0..DROP_PHASES-1
 drHold:      .byte 0      // frames until the weave advances one phase
 drPing:      .byte 0      // frames until the next sonar ping
 
+// --- WHICH MOVER THE LIVE DROPPER USES ---------------------------------------
+// DROP_MODE_LEGACY, and src/enemy.asm sends it to dropperFly; DROP_MODE_PROGRAM,
+// and src/enemy.asm sends it to wmTick like any other enemy and calls
+// dropperPing afterwards. Set once, at spawn, by whichever of dropperLaunch and
+// dropperArmAuthored the trigger asked for.
+//
+// MODULE STATE, NOT PER-OBJECT, FOR THE SAME REASON EVERYTHING ABOVE IT IS.
+// There is at most ONE live Dropper -- src/waves.asm's one-live interlock is
+// what guarantees it, and drPassLeft and drPhase have relied on that since this
+// file was written. A per-object byte would cost MAX_OBJECTS bytes to express a
+// fact about a single object and would put two answers where the interlock
+// already promises one.
+//
+// LEGACY IS ZERO, which is what makes a cold start and a package that says
+// nothing agree: dropperInit clears this byte with the rest of the block, so
+// the flight the engine has always flown is what an uninitialised machine does.
+.const DROP_MODE_LEGACY  = 0
+.const DROP_MODE_PROGRAM = 1
+drMode:      .byte 0      // DROP_MODE_*
+
 // --- diagnostics, saturating -------------------------------------------------
 drLaunched:  .byte 0      // Droppers given this flight
 drEscaped:   .byte 0      // ...that completed three passes and left
 drPinged:    .byte 0      // pings requested
+drProgrammed: .byte 0     // ...of drLaunched, the ones flying an authored
+                          // movement program rather than the legacy trajectory
 
 dropperStateEnd:
 .if (dropperStateEnd > $c4c0) {
@@ -161,9 +183,13 @@ dropperInit:
     sta drPhase
     sta drHold
     sta drPing
+    sta drMode                          // DROP_MODE_LEGACY: see the note beside
+                                        // the byte for why zero is the right
+                                        // cold-start answer
     sta drLaunched
     sta drEscaped
     sta drPinged
+    sta drProgrammed
     rts
 
 // ---------------------------------------------------------------------------
@@ -185,6 +211,9 @@ dropperInit:
 // ---------------------------------------------------------------------------
 dropperLaunch:
     tay                                 // the side, while A is needed
+
+    lda #DROP_MODE_LEGACY
+    sta drMode                          // src/enemy.asm will call dropperFly
 
     lda #DROP_PASSES
     sta drPassLeft
@@ -255,6 +284,73 @@ dropperLaunch:
     cmp #$ff
     beq !done+
     inc drLaunched
+!done:
+    rts
+
+// ---------------------------------------------------------------------------
+// dropperArmAuthored — this Dropper flies the movement program its trigger
+// named, so make it a Dropper WITHOUT touching where it is or where it is going.
+// Entry: X = the object's pool slot. Exit: X preserved.
+//
+// THE OTHER HALF OF dropperLaunch, AND THAT SPLIT IS THE POINT. Everything
+// above does two separable jobs: it decides the TRAJECTORY, and it decides what
+// being a Dropper means regardless of trajectory. Only the second half belongs
+// to an authored Dropper, so only the second half is here.
+//
+// WHAT IS DELIBERATELY NOT OVERRIDDEN, each for its own reason:
+//
+//   * THE POSITION. src/waves.asm placed member 0 at the formation's slot-0
+//     start, and that is now where the Dropper begins. Forcing it to the legacy
+//     left or right edge would mean an authored path could never choose its own
+//     entry -- and the edge is a property of the hard-coded flight, not of
+//     being a Dropper.
+//   * THE VELOCITY, wmVX and wmVY. The wave armed this member's first stage
+//     from the Dropper's OWN program before calling here, so wmVX and wmVY are
+//     that program's opening leg, already scaled by the trigger's speed. A
+//     vertical velocity is now legitimate -- an authored Dropper may climb and
+//     dive, and src/enemy.asm's top despawn edge reads wmVY to decide whether
+//     it is leaving, which is exactly the right answer for a path that means it.
+//   * THE MODE, TIMER AND STAGE. This object is running the ordinary movement
+//     interpreter, and every one of those bytes belongs to it.
+//
+// WHAT IS OVERRIDDEN, AND WHY EACH ONE:
+//
+//   * THE MOVER, so src/enemy.asm calls wmTick and not dropperFly.
+//   * THE SONAR PING, because finding the Dropper is the fight and the cue that
+//     makes that possible is a property of the ENEMY, not of the trajectory.
+//     Its period is driven from src/enemy.asm's authored-Dropper branch, which
+//     calls dropperPing after wmTick for exactly this reason.
+//   * THE FIRING PERMISSION, withdrawn as it always was. A Dropper's challenge
+//     is not its gun, and an authored path must not quietly promote it to a
+//     normal firing enemy -- bit 0 of the authored mask still belongs to the
+//     Dropper and is still inert. Whether a Dropper should ever shoot is a
+//     firing-behaviour decision and not this pass's.
+// ---------------------------------------------------------------------------
+dropperArmAuthored:
+    lda #DROP_MODE_PROGRAM
+    sta drMode                          // src/enemy.asm will call wmTick
+
+    // NO PASSES LEFT TO MAKE, and the byte is cleared rather than left stale so
+    // that a diagnostic read of it after an authored flight says what is true.
+    // dropperFly is the only reader and it does not run in this mode.
+    lda #0
+    sta drPassLeft
+    sta drPhase
+    lda #DROP_PING_FIRST
+    sta drPing
+
+    lda #ENEMY_FIRE_NONE
+    sta enyFire,x
+
+    lda drLaunched
+    cmp #$ff
+    beq !counted+
+    inc drLaunched
+!counted:
+    lda drProgrammed
+    cmp #$ff
+    beq !done+
+    inc drProgrammed
 !done:
     rts
 

@@ -25,7 +25,7 @@
 
 .var progs = List()
 
-// --- 0: SWEEP -----------------------------------------------------
+// --- 0: SWEEP_L ---------------------------------------------------
 .eval progs.add(List()
     .add(List().add(WM_STRAIGHT, 34, 6, 0))
     .add(List().add(WM_ARC, 16, 4, 0))
@@ -62,12 +62,19 @@
     .add(List().add(WM_ARC, 16, 4, 56))
     .add(List().add(WM_EXIT, 0, 0, 0)))
 
-.const PROG_SWEEP             = 0
+// --- 6: SWEEP_R ---------------------------------------------------
+.eval progs.add(List()
+    .add(List().add(WM_STRAIGHT, 34, -6, 0))
+    .add(List().add(WM_ARC_MIRROR, 16, 4, 32))
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
+.const PROG_SWEEP_L           = 0
 .const PROG_S                 = 1
 .const PROG_LINGER            = 2
 .const PROG_LOOP              = 3
 .const PROG_DIVE_BOMB         = 4
 .const PROG_UP_N_OVER         = 5
+.const PROG_SWEEP_R           = 6
 
 // Byte offsets of each program's first record, computed rather than
 // authored: a hand-maintained offset is a number that is right until

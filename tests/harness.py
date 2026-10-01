@@ -772,17 +772,24 @@ def step_n(mon, frame_counter_addr, n, read_fn, max_tries=None):
     return out
 
 
-def call(mon, sym, routine, x=None):
+def call(mon, sym, routine, x=None, a=None):
     """Call a routine to completion via a synthetic return address, then
     resume at mainLoop. Only for routines that are genuinely self-contained
     (constraint #4) -- anything whose behaviour depends on frame cadence
     belongs in a free-running production loop instead, driven by set_bp +
-    free_run/step, not by this."""
+    free_run/step, not by this.
+
+    `x` and `a` set the registers the routine's own entry contract names. X was
+    enough while every callable routine took a pool slot; tokenReinforce takes
+    the post role in A, so the accumulator is settable too. Both default to
+    None, so no existing caller changes behaviour."""
     mon.cmd("> 01ff c0"); mon.cmd("> 01fe fd")
-    if x is None:
-        mon.cmd(f"r sp=fd, pc={sym[routine]:04x}")
-    else:
-        mon.cmd(f"r sp=fd, pc={sym[routine]:04x}, x={x:02x}")
+    regs = [f"sp=fd", f"pc={sym[routine]:04x}"]
+    if x is not None:
+        regs.append(f"x={x:02x}")
+    if a is not None:
+        regs.append(f"a={a:02x}")
+    mon.cmd("r " + ", ".join(regs))
     bb = set_bp(mon, 0xc0fe); mon.cmd("x"); mon.cmd(f"delete {bb}")
     mon.cmd(f"r pc={sym['mainLoop']:04x}")
 

@@ -838,10 +838,31 @@ class EditorController:
             # neutral the validator expects, so switching species away from
             # DROPPER returns the byte to it rather than leaving a stale RIGHT
             # that would warn for ever.
-            if t.species != "DROPPER":
+            #
+            # BY BEHAVIOUR, NOT BY NAME. This used to compare against the
+            # literal "DROPPER", which meant an identity that carries
+            # BEHAVIOUR_DROPPER under any other name had its side reset on every
+            # edit -- and the validator, which has always asked the behaviour,
+            # disagreed with it. Asking the same authority as the validator is
+            # what makes the two agree; see validation_v6._triggers.
+            if C.identity_behaviour(t.species) != C.BEHAVIOUR_DROPPER:
                 t.dropper_side = "LEFT"
+                # AND THE DROPPER'S PATH GOES WITH IT, for the same reason and
+                # to the same canonical neutral: a Ring wave that still named a
+                # Dropper movement program would fail the engine's build-time
+                # check (src/waves.asm refuses the combination) for a field the
+                # author can no longer see. Switching species is not the place
+                # to leave that behind.
+                t.dropper_program = None
         if "dropper_side" in fields:
             t.dropper_side = str(fields["dropper_side"])
+        # WHAT THIS APPEARANCE'S DROPPER FLIES. None is a real value here -- the
+        # legacy trajectory -- so the key being present is what authorises the
+        # write, never its truthiness. An empty string is normalised to None
+        # because that is what a cleared control would otherwise store.
+        if "dropper_program" in fields:
+            value = fields["dropper_program"]
+            t.dropper_program = str(value) if value else None
         if "fire_mask" in fields:
             t.fire_mask = sorted({int(m) for m in fields["fire_mask"]})
         # COLOUR IS THIS TRIGGER'S, so setting it here cannot reach any other

@@ -67,7 +67,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
-                     free_run, check, report)
+                     free_run, call, check, report)
 
 sym = symbols(SYM)
 
@@ -92,6 +92,7 @@ TK_GUARDS = 3
 TK_RADIUS_X = 46
 TK_X_MIN, TK_X_MAX = 28, 330
 TK_REINFORCE_FRAMES = 24
+TK_SPAWN_Y = 30                 # where a reinforcement enters, above the ring
 
 # --- how long each phase is allowed to take ---------------------------------
 # HUNT: an ordinary run, watched until an authored Dropper is on screen. The
@@ -833,17 +834,64 @@ def main():
                   if end["role"][i] == ROLE_EGRESS))
 
         # ==================================================================
-        # PHASE 5 -- the survivors actually LEAVE
+        # PHASE 5 -- a dismissed protector actually LEAVES, UPWARD
         # ==================================================================
-        # This is where the dismissal is judged, not during the encounter: the
-        # transition usually has nothing to dismiss (three or fewer enemies are
-        # on screen when the Dropper dies), whereas tokenEnd always dismisses
-        # every surviving guard. Watching them here proves the same statement
-        # against the case that always happens -- the screen empties visibly,
-        # and the objects are still in the pool while it does.
+        # THE PROTECTORS ARE STAGED, NOT INHERITED.
+        #
+        # This used to watch whatever survived phase 4 and hope something was
+        # left. Phase 4 deliberately destroys a guard to prove the defence is
+        # attritional, and `tkEnlisted` then closes the reinforcement gate for
+        # the rest of the encounter -- so the encounter can, entirely correctly,
+        # end with nothing alive. It did: the check reported `runs {}`, which is
+        # the honest "the case did not occur" signal rather than a finding, and
+        # the neighbouring "no guard remains" check passed on the same empty set.
+        #
+        # So the condition is built. tokenReinforce is the production spawner --
+        # "an ordinary enemy in every respect except that it is born already
+        # posted" -- and tokenDismissUp is the production dismissal. Calling them
+        # directly stages exactly the state phase 5 is about, and the CLAIM is
+        # unchanged: a dismissed protector rises, never descends through the
+        # player, and is retired by the ordinary despawn rule.
+        #
+        # tokenReinforce reads tkTokXLo/Hi and TK_SPAWN_Y for the entry, so the
+        # ring's centre is pinned here rather than left wherever the last
+        # encounter's token happened to fall.
+        poke(mon, sym["tkTokXLo"], 160)
+        poke(mon, sym["tkTokXHi"], 0)
+        poke(mon, sym["tkTokY"], 120)
+        poke(mon, sym["tkEnlisted"], 0)         # the gate is a creation count
+        before_egress = rd1(mon, sym["tkEgressed"])
+        for post in range(TK_GUARDS):
+            call(mon, sym, "tokenReinforce", a=ROLE_GUARD + post)
+        staged = stepper.step()
+        posted = [i for i in enemies(staged)
+                  if staged["role"][i] >= ROLE_GUARD]
+        check("three protectors were staged for the dismissal, born posted",
+              len(posted) == TK_GUARDS,
+              f"slots {posted}, roles "
+              f"{[staged['role'][i] for i in posted]}")
+
+        # Let them walk down into the aperture, so "rose" is measured over real
+        # travel rather than from the spawn line.
+        for _ in range(40):
+            staged = stepper.step()
+        posted = [i for i in enemies(staged)
+                  if staged["role"][i] >= ROLE_GUARD]
+        check("...and they walked down into the aperture before being dismissed",
+              posted and all(staged["logY"][i] > TK_SPAWN_Y for i in posted),
+              f"logY {[staged['logY'][i] for i in posted]} vs spawn line "
+              f"{TK_SPAWN_Y}")
+
+        for i in posted:
+            call(mon, sym, "tokenDismissUp", x=i)
+        check("every staged protector was dismissed UPWARD through the "
+              "production routine",
+              rd1(mon, sym["tkEgressed"]) == before_egress + len(posted),
+              f"tkEgressed {before_egress} -> {rd1(mon, sym['tkEgressed'])}")
+
         egress_runs = {}
         egress_retired = False
-        for _ in range(60):
+        for _ in range(120):
             s = stepper.step()
             live = set()
             for i in enemies(s):

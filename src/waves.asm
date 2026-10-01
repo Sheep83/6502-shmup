@@ -179,6 +179,37 @@
     .return v < 0 ? -mag : mag
 }
 
+// ---------------------------------------------------------------------------
+// WHAT THE MEMBER BEING SPAWNED IS, as far as the Dropper is concerned. Written
+// once by the species block in waveSpawnMember and read twice by the movement
+// block below it; see wvDropMode near the bottom of this file for the byte and
+// for why it is scratch rather than per-object.
+//
+// DECLARED UP HERE BECAUSE KICKASSEMBLER RESOLVES CONSTANTS IN IMPORT ORDER and
+// waveSpawnMember is a long way above the byte's own definition.
+// ---------------------------------------------------------------------------
+.const WV_DROP_NONE     = 0             // not a Dropper: an ordinary wave member
+.const WV_DROP_LEGACY   = 1             // the hard-coded three-pass flight
+.const WV_DROP_AUTHORED = 2             // a movement program the level authored
+
+// ---------------------------------------------------------------------------
+// THE LEGACY SENTINEL MUST NOT BE A REACHABLE MOVEMENT-POOL OFFSET, and this is
+// where that is provable: TRIG_DROP_LEGACY is declared in
+// src/encounter_format.asm, which imports nothing and therefore cannot see the
+// pool size or the record size it depends on.
+//
+// Every program ends in a WM_STAGE_SIZE-byte WM_EXIT record inside a pool of
+// LEVELPKG_MOVE_MAX bytes, so the highest offset a program can START at is
+// LEVELPKG_MOVE_MAX - WM_STAGE_SIZE -- 252 today. That leaves 253, 254 and 255
+// unreachable by construction, so $ff can mean "no program" without ambiguity.
+// A pool or record size that made it reachable would turn a Dropper trigger's
+// legacy selection into a silent reference to a real program, which is precisely
+// the class of bug a sentinel is supposed to avoid.
+// ---------------------------------------------------------------------------
+.if (TRIG_DROP_LEGACY <= LEVELPKG_MOVE_MAX - WM_STAGE_SIZE) {
+    .error "TRIG_DROP_LEGACY is a reachable movement-program offset: a Dropper trigger could no longer tell the legacy flight from a program"
+}
+
 .const SIM_FRAME_BUDGET = 900        // frames before a path is called stuck
 .const SIM_ENTER_BUDGET = 240        // frames a pattern may spend off-screen
                                      // before it has to have shown itself
@@ -192,25 +223,27 @@
      || trigSpecies.size() != WAVE_TRIGGERS || trigFire.size() != WAVE_TRIGGERS
      || trigSide.size() != WAVE_TRIGGERS || trigColour.size() != WAVE_TRIGGERS
      || trigFireMode.size() != WAVE_TRIGGERS
-     || trigSpeed.size() != WAVE_TRIGGERS) {
+     || trigSpeed.size() != WAVE_TRIGGERS
+     || trigDropProg.size() != WAVE_TRIGGERS) {
     .error "the trigger list is not WAVE_TRIGGERS entries on every axis"
 }
 
-.for (var d = 0; d < WAVE_DEFS; d++) {
-    .var def = waveDefs.get(d)
-    .if (def.size() != WAVEDEF_SIZE) { .error "a wave definition is not WAVEDEF_SIZE bytes" }
-    .if (def.get(0) < 1) { .error "a wave definition sends no enemies" }
-    .if (def.get(1) < 1) { .error "a wave interval of zero would spawn the whole wave in one frame" }
-    // BYTE 7 IS RESERVED AND MUST BE ZERO. Anything here is a colour or a
-    // firing mode left behind by the move to trigger ownership, and a value the
-    // runtime silently ignores is exactly how stale authored data survives.
-    .if (def.get(WAVEDEF_RESERVED_7) != 0) {
-        .error "a wave definition's reserved byte 7 is not zero -- colour and firing mode belong to the trigger now"
-    }
-    .if (def.get(8) < 0 || def.get(8) >= WM_HEAD_LEN) { .error "a wave launches on a heading that does not exist" }
-    .if (def.get(9) >= progs.size()) { .error "a wave names a stage program that does not exist" }
-
-    .var prog = progs.get(def.get(9))
+// ---------------------------------------------------------------------------
+// EVERY MOVEMENT PROGRAM IS STRUCTURALLY SOUND, whatever references it.
+//
+// THIS USED TO BE INSIDE THE PER-DEFINITION LOOP, and a Dropper trigger is why
+// it moved out. A movement program can now be reached two ways -- by a wave
+// definition's tenth byte, or by a trigger's trigDropProg -- so checking it
+// from inside the definition loop would have left a Dropper-only program
+// unchecked, and would have checked a shared one once per definition using it.
+// The pool is the thing being proved, so the pool is what is walked.
+//
+// THE SPEED-DEPENDENT HALF IS NOT HERE. Whether a leg out-runs the left
+// clearance window depends on the speed it is walked at, and a program does not
+// know its own speeds; that check lives beside each caller below, which does.
+.for (var p = 0; p < progs.size(); p++) {
+    .var prog = progs.get(p)
+    .if (prog.size() < 1) { .error "a movement program has no stages" }
     .if (prog.get(prog.size() - 1).get(0) != WM_EXIT) {
         .error "a stage program does not end in WM_EXIT and would run off the table"
     }
@@ -234,6 +267,158 @@
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// THE TWO SPEED-DEPENDENT PROOFS, AS FUNCTIONS, because there are now two kinds
+// of caller. A movement program is flown by every member of every wave that
+// references it AND, since a Dropper trigger can name one, by member 0 of a
+// Dropper wave at that trigger's own speed. Both need the identical proof at
+// the identical fidelity, and a second copy of it would be a second thing to
+// keep in step with src/enemy.asm's despawn rules.
+//
+// FUNCTIONS RATHER THAN MACROS so that nothing is emitted and nothing depends
+// on where they are invoked from: each returns "" for a clean result or the
+// sentence to fail the build with, and the caller raises it.
+// ---------------------------------------------------------------------------
+
+// waveScaledBoundFault — can any leg of this program, at this speed, step clean
+// over the left clearance window?
+//
+// A STATIC BOUND BEATS A SIMULATED ONE HERE, because whether a too-fast leg
+// actually lands on a negative X depends on where it happened to start:
+// stepping 8 pixels left from px=8 lands on 0 and is freed correctly, from
+// px=7 it lands on -1 and wraps. A simulation only catches the members whose
+// alignment happens to expose it.
+//
+// THE RULE IS THE WINDOW WIDTH. ENEMY_CLEAR_X_LEFT is 4 pixels and the despawn
+// test runs once a frame, so a step of at most 4 pixels can never jump the
+// window: from any px >= 4 it lands at >= 0, and anything landing inside 0..3
+// while travelling left is freed. Hold every SCALED velocity to that and no
+// alignment can wrap, whatever the path does.
+//
+// AND THIS IS WHERE ARCS GET CHECKED AT ALL. The per-record test in the pool
+// walk above guards STRAIGHT and HOLD only -- an arc has no authored velocity
+// to look at -- so until speed existed nothing bounded an arc. It did not need
+// to while every arc was WM_ARC_SPEED; it does now.
+.function waveScaledBoundFault(prog, speed) {
+    .for (var s = 0; s < prog.size(); s++) {
+        .var rec = prog.get(s)
+        .if (rec.get(0) == WM_STRAIGHT || rec.get(0) == WM_HOLD) {
+            .if (abs(wmScaleSim(rec.get(2), speed)) > ENEMY_CLEAR_X_LEFT * 4) {
+                .return "a straight or hold leg, at a speed some trigger asks for, moves in X fast enough to step over the left clearance window and wrap"
+            }
+        }
+    }
+    .if (wmScaleSim(WM_ARC_SPEED, speed) > ENEMY_CLEAR_X_LEFT * 4) {
+        .return "an arc, at a speed some trigger asks for, moves in X fast enough to step over the left clearance window and wrap"
+    }
+    .return ""
+}
+
+// waveFlightFault — fly this program from (x0, y0) on this heading at this
+// speed, and report the first of the four flight properties it breaks: it never
+// wraps X past zero, it reaches a despawn edge, it becomes visible, and it does
+// so within SIM_ENTER_BUDGET frames.
+//
+// THE SIMULATION IS src/movement.asm PLUS src/enemy.asm's DESPAWN RULES, at
+// quarter-pixel fidelity and with the direction tests the runtime uses -- a
+// sprite behind a border counts as gone only if it is still travelling that
+// way, which is what lets a pattern ENTER through one.
+.function waveFlightFault(prog, x0, y0, head0, speed) {
+    .var x = x0 * 4
+    .var y = y0 * 4
+    .var head = head0
+    .var vx = 0
+    .var vy = 0
+    .var frames = 0
+    .var freed = false
+    .var wrapped = false
+    .var seen = false
+    .var seenAt = 0
+
+    .for (var s = 0; s < prog.size() && !freed && frames <= SIM_FRAME_BUDGET; s++) {
+        .var rec = prog.get(s)
+        .var isArc = (rec.get(0) == WM_ARC || rec.get(0) == WM_ARC_MIRROR)
+        // AN ARC NAMES THE HEADING IT STARTS ON, or asks to continue from the
+        // one already held. The simulation has to honour that or it would be
+        // proving a path the engine does not fly; see the record format in
+        // src/movement_format.asm.
+        .if (isArc && rec.get(3) != WM_HEAD_CONT) {
+            .eval head = rec.get(3)
+        }
+        // An EXIT keeps the velocity it inherited and runs until an edge;
+        // everything else has an authored length.
+        .var outer = rec.get(0) == WM_EXIT ? SIM_FRAME_BUDGET : (isArc ? rec.get(1) : 1)
+        .if (!isArc && rec.get(0) != WM_EXIT) {
+            .eval vx = wmScaleSim(rec.get(2), speed)
+            .eval vy = wmScaleSim(rec.get(3), speed)
+        }
+        .for (var k = 0; k < outer && !freed && frames <= SIM_FRAME_BUDGET; k++) {
+            .if (isArc) {
+                .eval head = mod(head + (rec.get(0) == WM_ARC ? 1 : WM_HEAD_LEN - 1), WM_HEAD_LEN)
+                .eval vx = wmScaleSim(headVX.get(head), speed)
+                .eval vy = wmScaleSim(headVY.get(head), speed)
+            }
+            .var inner = isArc ? rec.get(2) : (rec.get(0) == WM_EXIT ? 1 : rec.get(1))
+            .for (var f = 0; f < inner && !freed; f++) {
+                .eval x = x + vx
+                .eval y = y + vy
+                .eval frames = frames + 1
+                .var px = floor(x / 4)
+                .var py = floor(y / 4)
+                // src/enemy.asm's four rules, direction and all. The TOP rule
+                // is the one every pattern here crosses on its way in, which is
+                // exactly why it asks the direction.
+                .if (px < 0) { .eval wrapped = true }
+                .if ((px < ENEMY_CLEAR_X_LEFT && vx < 0)
+                     || (px >= ENEMY_CLEAR_X_RIGHT && vx > 0)
+                     || (py < ENEMY_CLEAR_Y_TOP && vy < 0)
+                     || py >= ENEMY_CLEAR_Y) {
+                    .eval freed = true
+                }
+                // Visible = admitted by the renderer AND inside the display
+                // window horizontally.
+                .if (!freed && py >= MIN_SPRITE_Y && py <= MAX_SPRITE_Y
+                     && (px + 23) >= 24 && px <= 343) {
+                    .if (!seen) { .eval seenAt = frames }
+                    .eval seen = true
+                }
+            }
+        }
+    }
+
+    .if (wrapped) {
+        .return "a pattern walks X past zero, where a borrow into logXHi reappears the sprite on the far side"
+    }
+    .if (!freed) {
+        .return "a pattern never reaches any despawn edge inside SIM_FRAME_BUDGET frames"
+    }
+    .if (!seen) {
+        .return "a pattern is never visible inside the aperture: it is authored entirely off-screen"
+    }
+    .if (seenAt > SIM_ENTER_BUDGET) {
+        .return "a pattern spends longer than SIM_ENTER_BUDGET frames off-screen before entering view"
+    }
+    .return ""
+}
+
+.for (var d = 0; d < WAVE_DEFS; d++) {
+    .var def = waveDefs.get(d)
+    .if (def.size() != WAVEDEF_SIZE) { .error "a wave definition is not WAVEDEF_SIZE bytes" }
+    .if (def.get(0) < 1) { .error "a wave definition sends no enemies" }
+    .if (def.get(1) < 1) { .error "a wave interval of zero would spawn the whole wave in one frame" }
+    // BYTE 7 IS RESERVED AND MUST BE ZERO. Anything here is a colour or a
+    // firing mode left behind by the move to trigger ownership, and a value the
+    // runtime silently ignores is exactly how stale authored data survives.
+    .if (def.get(WAVEDEF_RESERVED_7) != 0) {
+        .error "a wave definition's reserved byte 7 is not zero -- colour and firing mode belong to the trigger now"
+    }
+    .if (def.get(8) < 0 || def.get(8) >= WM_HEAD_LEN) { .error "a wave launches on a heading that does not exist" }
+    .if (def.get(9) >= progs.size()) { .error "a wave names a stage program that does not exist" }
+
+    // ITS STRUCTURE WAS PROVED ABOVE, with every other program in the pool.
+    .var prog = progs.get(def.get(9))
 
     // ---- AT EVERY SPEED ANY TRIGGER ACTUALLY ASKS FOR ---------------------
     // FLYING THE PATH ONCE AT 1x WOULD NO LONGER PROVE ANYTHING. A trigger may
@@ -270,33 +455,8 @@
     .var speed = speeds.get(si)
 
     // ---- THE WRAP GUARD, AT THIS SPEED, BEFORE FLYING ANYTHING -----------
-    // A STATIC BOUND BEATS A SIMULATED ONE HERE, because whether a too-fast
-    // leg actually lands on a negative X depends on where it happened to
-    // start: stepping 8 pixels left from px=8 lands on 0 and is freed
-    // correctly, from px=7 it lands on -1 and wraps. The simulation below
-    // only catches the members whose alignment happens to expose it.
-    //
-    // THE RULE IS THE WINDOW WIDTH. ENEMY_CLEAR_X_LEFT is 4 pixels, and the
-    // despawn test runs once a frame, so a step of at most 4 pixels can never
-    // jump the window: from any px >= 4 it lands at >= 0, and anything landing
-    // inside 0..3 while travelling left is freed. Hold every SCALED velocity
-    // to that and no alignment can wrap, whatever the path does.
-    //
-    // AND THIS IS WHERE ARCS FINALLY GET CHECKED. The per-record test further
-    // up guards STRAIGHT and HOLD only -- an arc has no authored velocity to
-    // look at -- so until speed existed nothing bounded an arc at all. It did
-    // not need to while every arc was WM_ARC_SPEED; it does now.
-    .for (var s = 0; s < prog.size(); s++) {
-        .var rec = prog.get(s)
-        .if (rec.get(0) == WM_STRAIGHT || rec.get(0) == WM_HOLD) {
-            .if (abs(wmScaleSim(rec.get(2), speed)) > ENEMY_CLEAR_X_LEFT * 4) {
-                .error "a straight or hold leg, at a speed some trigger asks for, moves in X fast enough to step over the left clearance window and wrap"
-            }
-        }
-    }
-    .if (wmScaleSim(WM_ARC_SPEED, speed) > ENEMY_CLEAR_X_LEFT * 4) {
-        .error "an arc, at a speed some trigger asks for, moves in X fast enough to step over the left clearance window and wrap"
-    }
+    .var boundFault = waveScaledBoundFault(prog, speed)
+    .if (boundFault != "") { .error boundFault }
 
     // ---- fly every member -------------------------------------------------
     .for (var m = 0; m < def.get(0); m++) {
@@ -315,85 +475,64 @@
         .if (x0 < 0 || x0 > 511) { .error "a wave member spawns outside the nine-bit X world" }
         .if (y0 < 0 || y0 > 255) { .error "a wave member spawns outside the eight bits logY has" }
 
-        // ---- the flight, in quarter pixels --------------------------------
-        .var x = x0 * 4
-        .var y = y0 * 4
-        .var head = def.get(8)
-        .var vx = 0
-        .var vy = 0
-        .var frames = 0
-        .var freed = false
-        .var wrapped = false
-        .var seen = false
-        .var seenAt = 0
-
-        .for (var s = 0; s < prog.size() && !freed && frames <= SIM_FRAME_BUDGET; s++) {
-            .var rec = prog.get(s)
-            .var isArc = (rec.get(0) == WM_ARC || rec.get(0) == WM_ARC_MIRROR)
-            // AN ARC NAMES THE HEADING IT STARTS ON, or asks to continue from
-            // the one already held. The simulation has to honour that or it
-            // would be proving a path the engine does not fly; see the record
-            // format in src/movement_format.asm.
-            .if (isArc && rec.get(3) != WM_HEAD_CONT) {
-                .eval head = rec.get(3)
-            }
-            // An EXIT keeps the velocity it inherited and runs until an edge;
-            // everything else has an authored length.
-            .var outer = rec.get(0) == WM_EXIT ? SIM_FRAME_BUDGET : (isArc ? rec.get(1) : 1)
-            .if (!isArc && rec.get(0) != WM_EXIT) {
-                .eval vx = wmScaleSim(rec.get(2), speed)
-                .eval vy = wmScaleSim(rec.get(3), speed)
-            }
-            .for (var k = 0; k < outer && !freed && frames <= SIM_FRAME_BUDGET; k++) {
-                .if (isArc) {
-                    .eval head = mod(head + (rec.get(0) == WM_ARC ? 1 : WM_HEAD_LEN - 1), WM_HEAD_LEN)
-                    .eval vx = wmScaleSim(headVX.get(head), speed)
-                    .eval vy = wmScaleSim(headVY.get(head), speed)
-                }
-                .var inner = isArc ? rec.get(2) : (rec.get(0) == WM_EXIT ? 1 : rec.get(1))
-                .for (var f = 0; f < inner && !freed; f++) {
-                    .eval x = x + vx
-                    .eval y = y + vy
-                    .eval frames = frames + 1
-                    .var px = floor(x / 4)
-                    .var py = floor(y / 4)
-                    // src/enemy.asm's four rules, direction and all: a
-                    // sprite behind a border counts as gone only if it
-                    // is still traveling that way, which is what lets a
-                    // pattern ENTER through one. The TOP rule is the newest
-                    // and is the one every pattern here crosses on its way in
-                    // -- which is exactly why it asks the direction.
-                    .if (px < 0) { .eval wrapped = true }
-                    .if ((px < ENEMY_CLEAR_X_LEFT && vx < 0)
-                         || (px >= ENEMY_CLEAR_X_RIGHT && vx > 0)
-                         || (py < ENEMY_CLEAR_Y_TOP && vy < 0)
-                         || py >= ENEMY_CLEAR_Y) {
-                        .eval freed = true
-                    }
-                    // Visible = admitted by the renderer AND inside the
-                    // display window horizontally.
-                    .if (!freed && py >= MIN_SPRITE_Y && py <= MAX_SPRITE_Y
-                         && (px + 23) >= 24 && px <= 343) {
-                        .if (!seen) { .eval seenAt = frames }
-                        .eval seen = true
-                    }
-                }
-            }
-        }
-
-        .if (wrapped) {
-            .error "a pattern walks X past zero, where a borrow into logXHi reappears the sprite on the far side"
-        }
-        .if (!freed) {
-            .error "a pattern never reaches any despawn edge inside SIM_FRAME_BUDGET frames"
-        }
-        .if (!seen) {
-            .error "a pattern is never visible inside the aperture: it is authored entirely off-screen"
-        }
-        .if (seenAt > SIM_ENTER_BUDGET) {
-            .error "a pattern spends longer than SIM_ENTER_BUDGET frames off-screen before entering view"
-        }
+        // ---- the flight, at this speed ------------------------------------
+        // THE SAME PROOF A DROPPER PROGRAM GETS, from the same function. The
+        // launch heading is the definition's, which is what member 0 of a
+        // Dropper wave is given too.
+        .var fault = waveFlightFault(prog, x0, y0, def.get(8), speed)
+        .if (fault != "") { .error fault }
     }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AND EVERY AUTHORED DROPPER PATH, AT THE SPEED ITS OWN TRIGGER ASKS FOR.
+//
+// PER TRIGGER, NOT PER PROGRAM, and that is the whole reason this is a separate
+// loop rather than another entry in the one above. A Dropper program's flight is
+// a function of three things the TRIGGER owns or reaches -- which program, at
+// which speed, from which formation start -- so two triggers naming the same
+// program at different speeds are two different flights and both must be flown.
+// The definition loop above cannot express that: it is indexed by definition.
+//
+// THE SAME FOUR PROPERTIES, THE SAME FUNCTIONS, THE SAME FIDELITY. There is no
+// Dropper-specific bound and no Dropper-specific despawn rule, because at run
+// time there is no Dropper-specific mover: an authored Dropper is flown by
+// wmTick and freed by src/enemy.asm's ordinary edges, so the ordinary proof is
+// the correct proof. A LEGACY Dropper is not flown here at all -- its
+// trajectory is src/dropper.asm's own, bounded by that file's own assertions.
+//
+// THE DEFINITION'S START POSITION, WHICH IS THE DROPPER'S PLACEMENT. A Dropper
+// Trigger spawns one object, so the definition it references is being used as
+// that object's placement and launch heading rather than as a formation: the
+// per-member step is never applied because there is no second member to apply
+// it to. See waveArm, which forces the count to one.
+.for (var t = 0; t < WAVE_TRIGGERS; t++) {
+    .if (trigDropProg.get(t) != TRIG_DROP_LEGACY) {
+        .if (trigDropProg.get(t) < 0 || trigDropProg.get(t) >= progs.size()) {
+            .error "a trigger names a Dropper movement program that does not exist"
+        }
+        // AUTHORED ON A NON-DROPPER TRIGGER IS A MISTAKE WORTH FAILING ON. The
+        // runtime reads the column only for a Dropper wave, so the path would
+        // silently never be flown -- and a level that says a Ring wave flies a
+        // Dropper program has either changed species and left the field behind
+        // or believes something untrue. Either way it should hear about it.
+        .if (trigSpecies.get(t) != SPECIES_DROPPER) {
+            .error "a trigger that is not a Dropper's names a Dropper movement program: the column is read only for a Dropper wave and the path would never be flown"
+        }
+
+        .var dprog = progs.get(trigDropProg.get(t))
+        .var ddef = waveDefs.get(trigDef.get(t))
+        .var dspeed = trigSpeed.get(t)
+
+        .var dBound = waveScaledBoundFault(dprog, dspeed)
+        .if (dBound != "") { .error dBound }
+
+        .var dFault = waveFlightFault(dprog,
+                                      ddef.get(2) + 256 * ddef.get(3),
+                                      ddef.get(4),
+                                      ddef.get(8), dspeed)
+        .if (dFault != "") { .error dFault }
     }
 }
 
@@ -537,6 +676,19 @@ wvFire:    .fill WAVE_SLOTS, 0      // the authored fire mask over member
 wvSide:    .fill WAVE_SLOTS, 0      // the entry side a Dropper in this wave
                                     // flies in from, latched with the species
                                     // below and for the same reason
+wvDropProg: .fill WAVE_SLOTS, 0     // WHAT MEMBER 0 OF A DROPPER WAVE FLIES:
+                                    // TRIG_DROP_LEGACY for the hard-coded
+                                    // three-pass flight, or a movement-pool
+                                    // byte offset for an authored path.
+                                    // Latched from the trigger with the side
+                                    // above and for the same reason -- and it
+                                    // has to be per INSTANCE rather than read
+                                    // at spawn, because the cursor has moved
+                                    // on by the time member 0 goes out.
+                                    // Meaningless for a wave that is not a
+                                    // Dropper's, and latched anyway: one
+                                    // unconditional copy beats a branch that
+                                    // has to know what a species is.
 wvColour:  .fill WAVE_SLOTS, 0      // THIS APPEARANCE'S colour byte, latched
                                     // from the trigger with the species below
                                     // and for the same reason: the cursor has
@@ -589,6 +741,13 @@ wvStarted:   .byte 0                // waves begun
 wvDropped:   .byte 0                // triggers that found no free instance
 wvDeferred:  .byte 0                // spawns postponed because the pool was full
 wvSpawned:   .byte 0                // enemies actually created
+wvDropRefused: .byte 0              // Dropper triggers that created NOTHING
+                                    // because one was already alive. NOT a
+                                    // fault: it is the authored encounter
+                                    // meeting the one-live interlock, and the
+                                    // count is here so a test can prove the
+                                    // refusal happened rather than infer it
+                                    // from an absence of enemies
 
 // --- enemy firing -----------------------------------------------------------
 // THREE BYTES FOR THE WHOLE SUBSYSTEM. There is no per-enemy clock and no
@@ -949,6 +1108,10 @@ waveStartNext:
                                         // latched anyway: one unconditional
                                         // copy beats a branch that has to know
                                         // what a species is
+    lda waveTrigDropProg,y              // ...and WHAT its Dropper flies -- the
+    sta wvDropProg,x                    // legacy trajectory or an authored
+                                        // program -- for the same reason and at
+                                        // the same moment as the side above it
     lda waveTrigSpeed,y                 // ...and how fast it crosses, which is
     sta wvSpeed,x                       // an encounter decision exactly like
                                         // the two below: one reusable path,
@@ -971,6 +1134,28 @@ waveStartNext:
     // armed completely: nothing below can leave it half-configured.
     jsr waveDefBase                     // Y = def * WAVEDEF_SIZE
     lda waveDefTable + 0,y
+
+    // ---- ...EXCEPT A DROPPER TRIGGER, WHICH IS EXACTLY ONE OBJECT ---------
+    // A DROPPER TRIGGER SPAWNS ONE DROPPER AND NOTHING ELSE. It does not send a
+    // formation, so the definition's count is not its member count -- the
+    // definition is being used as the Dropper's PLACEMENT (its start position
+    // and launch heading), and a count of one is what that means.
+    //
+    // FORCED HERE RATHER THAN REQUIRED OF THE DATA, and the reason is sharing.
+    // A definition may legitimately be referenced by a Dropper trigger AND by
+    // an ordinary trigger that really does want six members; rewriting the
+    // definition's count would break the ordinary one. It is also what makes a
+    // project authored under the short-lived Dropper+escort model load as one
+    // Dropper with no migration of authored data at all.
+    //
+    // THE EDITOR SAYS SO TOO: validation_v6 warns when a Dropper trigger's
+    // definition sends more than one, so an author sees the inert field rather
+    // than inferring it.
+    ldy wvSpecies,x
+    cpy lvlDropRow
+    bne !count+
+    lda #1
+!count:
     sta wvLeft,x
     lda #1
     sta wvTimer,x                       // the first member goes out next frame
@@ -1230,6 +1415,39 @@ waveSpawnMember:
                                         // but the arithmetic below needs it
     stx wvInst
 
+    // ---- ONE LIVE DROPPER, AND A REFUSED ONE CREATES NOTHING ---------------
+    // A Dropper's death is what drops the token, so two alive at once would
+    // mean two tokens and two overlapping encounters. The interlock is older
+    // than this routine and stays.
+    //
+    // WHAT CHANGED IS WHAT A REFUSAL MEANS. Under the Dropper+escort model a
+    // refused Dropper was SUBSTITUTED with the level's ordinary enemy, because
+    // the wave around it had an authored shape, count and timing that silently
+    // losing a member would have rewritten. There is no wave around it any
+    // more: a Dropper trigger is one object. So a refusal now creates nothing
+    // at all, which is the honest answer -- the encounter the author wrote was
+    // "a Dropper here", and if one is already flying then this moment has
+    // nothing to say. Manufacturing an unrelated ordinary enemy in its place
+    // would be inventing content the level never asked for.
+    //
+    // TESTED BEFORE objectAlloc, so a refused Dropper does not take a pool slot
+    // and hand it straight back, and CONSUMED rather than deferred: carry clear
+    // tells waveRunInstance the member is spent, so the instance retires
+    // instead of retrying for as long as the first Dropper stays alive.
+    //
+    // X IS STILL THE INSTANCE HERE -- waveDefBase preserves it -- so wvSpecies
+    // and the guard are one indexed load and one compare on a path every
+    // ordinary member also walks. Two cycles for the ordinary case.
+    // The jmp is out of branch range, and a jmp is this repository's documented
+    // answer to that -- the same shape `jmp waveSpawnFull` below uses.
+    lda wvSpecies,x
+    cmp lvlDropRow
+    bne !mayspawn+
+    lda tkDropperLive
+    beq !mayspawn+
+    jmp waveSpawnRefused
+!mayspawn:
+
     jsr objectAlloc                     // X = a zeroed free slot, or carry set
     bcc !got+
     jmp waveSpawnFull                   // the whole spawn body sits between
@@ -1293,29 +1511,63 @@ waveSpawnMember:
     ldy wvInst
     lda wvSpecies,y
 
-    // ONE LIVE DROPPER, EVER, AND THIS IS THE WHOLE RULE. A Dropper's death is
-    // what drops the token, so two of them alive at once would mean two tokens
-    // and two overlapping encounters. The check is made HERE, at the single
-    // instruction that commits a species to an object, rather than at the
-    // trigger or at the instance: this is the last moment before the enemy
-    // exists and the only place the answer can be wrong.
+    // ---- A DROPPER TRIGGER IS ONE DROPPER ---------------------------------
     //
-    // A REFUSED DROPPER STILL FLIES. It is substituted with a Ring rather than
-    // dropped, because the authored wave's shape, count and timing are the
-    // content -- silently spawning one fewer member would quietly rewrite an
-    // encounter the level author wrote, where a different enemy on the same
-    // path keeps it.
+    // AND THAT IS THE WHOLE OF IT NOW. There is no member index to consult, no
+    // escort to manufacture and no formation slot being consumed: the instance
+    // was armed with wvLeft = 1, so this is the only object it will ever make.
+    //
+    // WHAT USED TO BE HERE, AND WHY IT IS GONE. The Dropper was member 0 of a
+    // wave and members 1..N-1 were substituted with lvlPlainRow to become
+    // "escorts". That composite encounter was really two independent things
+    // wearing one Trigger: the Dropper and an ordinary wave. It forced them to
+    // share a start position, gave fire-mask bit 0 an inert special meaning,
+    // made LEFT/RIGHT apply to only one member, and left the runtime, the
+    // editor and the preview each having to understand a formation with a hole
+    // in it. An author who wants a Dropper with company now writes two
+    // Triggers a row apart, which is independently editable, independently
+    // previewable and needs no engine concept at all.
+    //
+    // THE INTERLOCK WAS ALREADY CHECKED, at the top of this routine and before
+    // objectAlloc: a Dropper that reaches here is one the interlock admitted,
+    // so the claim below cannot fail and there is no refusal path to take.
+    //
+    // Y RATHER THAN A for the default, because A is the authored species and
+    // the comparison below needs it: storing through Y costs the same five
+    // cycles and saves reloading the species afterwards.
+    ldy #WV_DROP_NONE
+    sty wvDropMode                      // UNCONDITIONALLY, before the branch:
+                                        // the byte is module scratch and still
+                                        // holds the previous member's answer
     cmp lvlDropRow
-    bne !species+
-    ldy tkDropperLive
-    beq !claim+
-    lda lvlPlainRow                     // one is already out there
-    jmp !species+
-!claim:
+    bne !species+                       // not a Dropper: the authored species,
+                                        // untouched
+
     ldy #1
     sty tkDropperLive                   // this one is now THE Dropper;
                                         // src/enemy.asm clears it when this
                                         // object dies or leaves
+
+    // ---- ...AND WHAT IT FLIES, decided at the same instant ----------------
+    // TRIG_DROP_LEGACY means the hard-coded three-pass flight in
+    // src/dropper.asm, which is what every level authored before that column
+    // existed says. Anything else is a movement-pool byte offset and the
+    // Dropper flies it on the ordinary movement engine.
+    //
+    // RECORDED, NOT ACTED ON YET: the movement block below is where a stage is
+    // armed, and arming one here would be overwritten there.
+    ldy wvInst
+    lda wvDropProg,y
+    cmp #TRIG_DROP_LEGACY
+    beq !legacy+
+    lda #WV_DROP_AUTHORED
+    jmp !mode+
+!legacy:
+    lda #WV_DROP_LEGACY
+!mode:
+    sta wvDropMode
+
+    lda lvlDropRow                      // the loads above clobbered A
 !species:
     sta enySpecies,x
 
@@ -1327,6 +1579,18 @@ waveSpawnMember:
     // -- and the species says whether this ENEMY can fire at all. Neither can
     // override the other, and the answer is resolved HERE, once, rather than
     // being re-derived every frame by the firing tick.
+    //
+    // A DROPPER IS NOT ASKED AT ALL, and skipping it is the removal of a special
+    // case rather than the addition of one. A fire mask is a mask over MEMBER
+    // INDEX, and a Dropper Trigger has no members to index -- under the
+    // composite model bit 0 nominally addressed the Dropper and was documented
+    // as inert, which is two rules where none is needed. The Dropper's firing
+    // is decided by src/dropper.asm, which withdraws the permission outright;
+    // consulting the mask first and having it overridden a hundred
+    // instructions later was only ever a way to reach the same answer twice.
+    lda wvDropMode
+    bne !noFire+                        // a Dropper: src/dropper.asm decides
+
     lda wvFire,y                        // Y is still the instance
     beq !noFire+                        // this formation does not shoot
     sta wvFireBit
@@ -1422,6 +1686,34 @@ waveSpawnMember:
     sta wmPhase,x                       // launch heading
     lda waveDefTable + 9,y
     sta wmStage,x                       // its pattern's first stage record
+
+    // ---- ...EXCEPT AN AUTHORED DROPPER, WHICH BRINGS ITS OWN PROGRAM -------
+    // THE SUBSTITUTION IS OF THE PROGRAM, NOT OF THE MACHINERY, and it happens
+    // HERE -- before wmEnterStage rather than after it -- so that there is
+    // exactly ONE arming. Pointing wmStage somewhere else and calling
+    // wmEnterStage a second time would work and would also mean an object
+    // briefly armed with a path it never flies; a Dropper that is going to fly
+    // its own program is simply never armed with the definition's.
+    //
+    // THE LAUNCH HEADING IS THE DEFINITION'S, AND DELIBERATELY SO. The trigger
+    // owns one heading, by way of the definition that places it, and an arc
+    // asking to continue from the heading the object already holds gets the
+    // authored one -- which is what makes one program shareable between a
+    // Dropper and an ordinary wave. There is no second heading field.
+    //
+    // THE SPEED IS THE TRIGGER'S, applied below by the same instruction that
+    // applies it to every other member. A faster authored Dropper therefore
+    // traces a WIDER loop, because linear velocity scales and angular
+    // progression does not; that is the engine's documented speed semantics and
+    // not a defect to correct here. See TRIG_SPEED_1X in
+    // src/encounter_format.asm.
+    lda wvDropMode
+    cmp #WV_DROP_AUTHORED
+    bne !stage+
+    ldy wvInst
+    lda wvDropProg,y                    // a movement-pool BYTE OFFSET, emitted
+    sta wmStage,x                       // by src/level_package.asm via progAt
+!stage:
     lda #0
     sta wmAccX,x                        // objectAlloc zeroed these; setting
     sta wmAccY,x                        // them again is two bytes for a
@@ -1445,7 +1737,7 @@ waveSpawnMember:
     sta wmSpeed,x
     jsr wmEnterStage                    // X preserved; it reloads Y itself
 
-    // ---- ...AND A DROPPER IS THEN TAKEN OFF THAT PATH ---------------------
+    // ---- ...AND A *LEGACY* DROPPER IS THEN TAKEN OFF THAT PATH ------------
     // AFTER wmEnterStage, not before, and the order is the whole of it: the
     // stage the wave just armed writes wmMode, wmVX, wmVY and wmTimer, so a
     // flight installed above would be overwritten a dozen instructions later.
@@ -1453,16 +1745,32 @@ waveSpawnMember:
     // there is never a half-configured object -- it is a complete wave member
     // right up to the instant it becomes a complete Dropper.
     //
-    // WHY A DROPPER DOES NOT FLY ITS WAVE'S PATH. Its death is the only death
-    // in the game that is worth something, so WHERE it dies is a gameplay fact:
-    // killed low, the P it drops has no room for the encounter it starts. A
-    // formation path authored for Rings cannot promise that. See src/dropper.asm.
-    lda enySpecies,x
-    cmp lvlDropRow
-    bne !ordinary+
+    // WHY A LEGACY DROPPER DOES NOT FLY ITS WAVE'S PATH. Its death is the only
+    // death in the game that is worth something, so WHERE it dies is a gameplay
+    // fact: killed low, the P it drops has no room for the encounter it starts.
+    // A formation path authored for Rings cannot promise that, and before this
+    // column existed a Dropper had no path of its own to promise it either.
+    // See src/dropper.asm.
+    //
+    // AN AUTHORED ONE IS NOT TAKEN OFF IT, BECAUSE IT IS ALREADY ON ITS OWN.
+    // wmStage was pointed at the trigger's Dropper program above, so the stage
+    // this member just entered is the Dropper's; there is nothing to override
+    // and dropperArmAuthored deliberately touches neither position nor
+    // velocity. What it DOES do is the part of dropperLaunch that is about
+    // being a Dropper rather than about the trajectory -- the sonar cue, the
+    // withdrawn firing permission, and telling src/enemy.asm which mover to
+    // call. That separation is the point of this pass.
+    lda wvDropMode
+    beq !ordinary+                      // WV_DROP_NONE: an ordinary wave
+                                        // member, which is not a Dropper
+    cmp #WV_DROP_LEGACY
+    bne !authored+
     ldy wvInst
     lda wvSide,y                        // the side this appearance authored
     jsr dropperLaunch                   // X preserved
+    jmp !ordinary+
+!authored:
+    jsr dropperArmAuthored              // X preserved
 !ordinary:
 
     // ---- combat: an ordinary enemy, exactly as before ---------------------
@@ -1487,6 +1795,28 @@ waveSpawnMember:
 waveSpawnFull:
     ldx wvInst
     sec
+    rts
+
+// ---------------------------------------------------------------------------
+// waveSpawnRefused — this member is SPENT and nothing was created.
+// Entry: wvInst holds the instance. Exit: X = the instance, carry CLEAR.
+//
+// CARRY CLEAR, AND THAT IS THE WHOLE DIFFERENCE FROM waveSpawnFull ABOVE. A
+// full pool is a temporary condition and deferring is right: the member keeps
+// its place and is tried again next frame. A Dropper refused by the one-live
+// interlock is not temporary in the same way -- the live Dropper may be on
+// screen for hundreds of frames -- and the encounter is one object, so there is
+// nothing to hold a place for. Consuming the member retires the instance
+// immediately and the schedule moves on.
+// ---------------------------------------------------------------------------
+waveSpawnRefused:
+    lda wvDropRefused                   // saturating, and observable: a test
+    cmp #$ff                            // can prove the refusal happened rather
+    beq !counted+                       // than infer it from an absence
+    inc wvDropRefused
+!counted:
+    ldx wvInst
+    clc
     rts
 
 // ---------------------------------------------------------------------------
@@ -1518,6 +1848,18 @@ wvCount:    .byte 0                     // fan-out repeat counter
 wvFireBit:  .byte 0                     // the authored mask, while Y is re-aimed
                                         // at the member index that indexes it
 wvScratch:  .byte 0                     // waveDefBase's partial product
+// WHAT THE MEMBER BEING SPAWNED IS, as far as the Dropper is concerned. Written
+// once by the species block in waveSpawnMember and read twice by the movement
+// block below it, so the question "is this THE Dropper, and what does it fly?"
+// is decided at the one instruction that can answer it and never asked again.
+//
+// SCRATCH RATHER THAN PER-OBJECT, because its whole life is one call: the
+// species block and the movement block are a hundred instructions apart in the
+// same routine and nothing between them spawns anything. A per-object byte
+// would cost MAX_OBJECTS bytes to hold a value that is dead by the time the
+// routine returns.
+wvDropMode: .byte 0                     // WV_DROP_*, declared at the top of this
+                                        // file with the assembly-time proofs
 
 // ---------------------------------------------------------------------------
 // The authored content, as bytes.
@@ -1584,6 +1926,10 @@ wvScratch:  .byte 0                     // waveDefBase's partial product
 .label waveTrigColour  = LEVELPKG_TRIG + 6 * LEVELPKG_TRIG_SLOTS
 .label waveTrigFireMode = LEVELPKG_TRIG + 7 * LEVELPKG_TRIG_SLOTS
 .label waveTrigSpeed   = LEVELPKG_TRIG + 8 * LEVELPKG_TRIG_SLOTS
+// WHAT MEMBER 0 OF A DROPPER TRIGGER FLIES: TRIG_DROP_LEGACY for the hard-coded
+// three-pass flight in src/dropper.asm, or a movement-pool BYTE OFFSET for a
+// path the level authored. Read only for a Dropper wave, exactly as trigSide is.
+.label waveTrigDropProg = LEVELPKG_TRIG + 9 * LEVELPKG_TRIG_SLOTS
 
 .if (WAVE_TRIGGERS > LEVELPKG_TRIG_SLOTS) {
     .error "more authored triggers than the level package reserves room for"

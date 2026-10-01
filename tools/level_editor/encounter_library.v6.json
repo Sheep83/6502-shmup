@@ -3,7 +3,7 @@
   "kind": "encounterLibrary",
   "movementPrograms": [
     {
-      "id": "sweep",
+      "id": "sweep_l",
       "stages": [
         {
           "kind": "STRAIGHT",
@@ -159,19 +159,39 @@
           "kind": "EXIT"
         }
       ]
+    },
+    {
+      "id": "sweep_r",
+      "stages": [
+        {
+          "kind": "STRAIGHT",
+          "frames": 34,
+          "vx": -6,
+          "vy": 0
+        },
+        {
+          "kind": "ARC_MIRROR",
+          "steps": 16,
+          "framesPerStep": 4,
+          "entryHeading": 32
+        },
+        {
+          "kind": "EXIT"
+        }
+      ]
     }
   ],
   "waveDefinitions": [
     {
-      "id": "sweep",
-      "count": 4,
+      "id": "sweep_l",
+      "count": 3,
       "interval": 22,
       "startX": 0,
       "startY": 64,
       "xStep": 0,
       "yStep": 20,
       "heading": 0,
-      "movementProgram": "sweep"
+      "movementProgram": "sweep_l"
     },
     {
       "id": "s",
@@ -238,6 +258,17 @@
       "yStep": 0,
       "heading": 0,
       "movementProgram": "up_n_over"
+    },
+    {
+      "id": "sweep_r",
+      "count": 3,
+      "interval": 22,
+      "startX": 350,
+      "startY": 48,
+      "xStep": 0,
+      "yStep": 20,
+      "heading": 32,
+      "movementProgram": "sweep_r"
     }
   ]
 }

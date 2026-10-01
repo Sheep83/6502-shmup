@@ -55,6 +55,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 from harness import (PRG, SYM, symbols, Vice, rd, rd1, poke, set_bp,
                      free_run, check, report)
+import campaign_data as CD                                       # noqa: E402
 
 sym = symbols(SYM)
 
@@ -86,13 +87,28 @@ FLIGHT_FRAMES = 700             # three passes at 3 px/frame is ~600
 PING_SPAN_WANTED = 3            # pings to time before believing the cadence
 
 
+# THE FLIGHT STATE BLOCK, BY NAME. The order is src/dropper.asm's; the offsets
+# are read from the symbol file, so inserting a field shifts nothing here.
+DR_FIELDS = ("drPassLeft", "drPhase", "drHold", "drPing", "drMode",
+             "drLaunched", "drEscaped", "drPinged", "drProgrammed")
+DR = {n: sym[n] - sym["drPassLeft"] for n in DR_FIELDS}
+DR_SPAN = max(DR.values()) + 1
+
+
 def sample(mon):
     """One frame's judgement, in six bulk reads."""
     pos = rd(mon, sym["logY"], 3 * MAX_LOGICAL)         # logY, logX, logXHi
     pool = rd(mon, sym["logActive"], 0x60 + MAX_OBJECTS)  # logActive..objTimer
     spec = rd(mon, sym["enySpecies"], MAX_OBJECTS)
     mv = rd(mon, sym["wmMode"], 0x60 + MAX_OBJECTS)     # wmMode..wmVY
-    dr = rd(mon, sym["drPassLeft"], 7)                  # the whole flight state
+    # THE WHOLE FLIGHT STATE IN ONE READ, INDEXED BY SYMBOL. It used to be
+    # `dr[4]` and friends -- fixed positions in a block whose contents are a
+    # runtime decision. src/dropper.asm gained drMode between drPing and
+    # drLaunched, every field after it shifted by one, and this read went on
+    # reporting drMode as the launch counter: a Dropper launched on every frame
+    # and the test believed none ever had. Reading through DR_SPAN means the next
+    # field costs nothing here and cannot silently re-point an existing one.
+    dr = rd(mon, sym["drPassLeft"], DR_SPAN)
     snd = rd(mon, sym["sfxChId"], 3)
     fc = rd(mon, sym["frameCounter"], 2)
     return {
@@ -109,8 +125,12 @@ def sample(mon):
         "wmStage": mv[0x10:0x10 + MAX_OBJECTS],
         "wmVX": mv[0x50:0x50 + MAX_OBJECTS],
         "wmVY": mv[0x60:0x60 + MAX_OBJECTS],
-        "passLeft": dr[0], "phase": dr[1], "hold": dr[2], "ping": dr[3],
-        "launched": dr[4], "escaped": dr[5], "pinged": dr[6],
+        "passLeft": dr[DR["drPassLeft"]], "phase": dr[DR["drPhase"]],
+        "hold": dr[DR["drHold"]], "ping": dr[DR["drPing"]],
+        "mode": dr[DR["drMode"]],
+        "launched": dr[DR["drLaunched"]], "escaped": dr[DR["drEscaped"]],
+        "pinged": dr[DR["drPinged"]],
+        "programmed": dr[DR["drProgrammed"]],
         "voice2": snd[SFX_CH_KILL],
     }
 
@@ -128,9 +148,15 @@ def check_layout():
           sym["wmStage"] == sym["wmMode"] + 0x10
           and sym["wmVX"] == sym["wmMode"] + 0x50
           and sym["wmVY"] == sym["wmMode"] + 0x60)
-    check("the dropper flight state is one contiguous block",
-          sym["drPhase"] == sym["drPassLeft"] + 1
-          and sym["drPinged"] == sym["drPassLeft"] + 6)
+    # CONTIGUOUS, AND THAT IS THE WHOLE CLAIM. This used to assert
+    # `drPinged == drPassLeft + 6`, which is a picture of the block on the day it
+    # was written rather than a property of it -- adding a field to the middle
+    # made it fail while saying nothing about the field that had moved. What the
+    # bulk read above actually needs is that every named byte lies inside one run
+    # with no gap, whatever order they are in and however many there are.
+    check("the dropper flight state is one contiguous block with no gaps",
+          sorted(DR.values()) == list(range(len(DR_FIELDS))),
+          f"{len(DR_FIELDS)} fields spanning {DR_SPAN} bytes")
 
 
 class Stepper:
@@ -330,6 +356,31 @@ def main():
         stepper = Stepper(mon)
 
         # ==================================================================
+        # THE ENTRY SIDES ARE THIS FILE'S, NOT THE CAMPAIGN'S
+        # ==================================================================
+        # Phase 2 proves the MIRRORED appearance runs through the same routine,
+        # so the two flights have to enter from opposite sides. That used to
+        # depend on Level 1 happening to author one Dropper trigger LEFT and
+        # another RIGHT. It authors both LEFT today -- a perfectly legal choice
+        # -- so the mirrored case stopped existing and the check failed with
+        # "first entered x=0, second x=0" about an engine that was correct.
+        #
+        # So the condition is CONSTRUCTED: every live trigger is forced LEFT for
+        # phase 1 and RIGHT for phase 2. The side column is package data like any
+        # other and this is the same technique tests/test_wave_triggers.py uses on
+        # the rows. Nothing on disk is touched, and the test now exercises both
+        # sides whatever the campaign says.
+        def force_side(value):
+            for t in range(rd1(mon, CD.TRIGN_ADDR)):
+                poke(mon, sym["waveTrigSide"] + t, value)
+            return [rd1(mon, sym["waveTrigSide"] + t)
+                    for t in range(rd1(mon, CD.TRIGN_ADDR))]
+
+        sides = force_side(DROP_SIDE_LEFT)
+        check("every trigger is forced to the LEFT entry for flight 1",
+              set(sides) == {DROP_SIDE_LEFT}, f"trigSide {sides}")
+
+        # ==================================================================
         # PHASE 1 -- find a Dropper and watch its whole flight out
         # ==================================================================
         first = hunt_launch(stepper, "flight 1")
@@ -343,9 +394,9 @@ def main():
         a = watch_flight(stepper, first, "flight 1")
 
         # ---- the entry was the authored one -------------------------------
-        check("it entered from an authored side, at the authored X",
-              a["entry_x"] in (DROP_ENTRY_LEFT, DROP_ENTRY_RIGHT),
-              f"entry x={a['entry_x']}")
+        check("it entered from the authored side, at the authored X",
+              a["entry_x"] == DROP_ENTRY_LEFT,
+              f"entry x={a['entry_x']}, trigSide forced LEFT")
         entered_left = a["entry_x"] == DROP_ENTRY_LEFT
         check("...travelling INTO the playfield from that side",
               (a["entry_dir"] > 0) == entered_left,
@@ -435,6 +486,12 @@ def main():
         # ==================================================================
         # PHASE 2 -- the mirrored appearance, through the same routine
         # ==================================================================
+        # THE MIRROR IS ARRANGED HERE. Phase 1 ran every trigger LEFT; the next
+        # Dropper to launch must therefore come in from the RIGHT, and it must do
+        # it through the same routine with the same pass count and centreline.
+        sides = force_side(DROP_SIDE_RIGHT)
+        check("every trigger is now forced to the RIGHT entry for flight 2",
+              set(sides) == {DROP_SIDE_RIGHT}, f"trigSide {sides}")
         second = hunt_launch(stepper, "flight 2")
         check("a second authored Dropper was launched", second is not None)
         if second is None:
@@ -447,9 +504,9 @@ def main():
         entered_left_b = b_entry == DROP_ENTRY_LEFT
         print(f"  info flight 2: slot {b_slot}, entered x={b_entry} dir={b_dir}")
         check("the second Dropper entered from the OTHER authored side",
-              b_entry in (DROP_ENTRY_LEFT, DROP_ENTRY_RIGHT)
-              and entered_left_b != entered_left,
-              f"first entered x={a['entry_x']}, second x={b_entry}")
+              b_entry == DROP_ENTRY_RIGHT and entered_left_b != entered_left,
+              f"first entered x={a['entry_x']} (forced LEFT), "
+              f"second x={b_entry} (forced RIGHT)")
         check("...through the same routine: same pass count, same centreline",
               second["passLeft"] == DROP_PASSES
               and second["logY"][b_slot] == DROP_CENTRE_Y,

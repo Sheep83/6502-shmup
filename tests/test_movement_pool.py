@@ -51,11 +51,11 @@ WAVEDEF = CD.WAVEDEF_BASE       # wave definitions, 10 bytes each
 TRIG = CD.TRIG_BASE             # the parallel trigger columns
 
 TRIG_SLOTS = C.LEVELPKG_TRIG_SLOTS
-TRIG_COLS = ("rowLo", "rowHi", "def", "species", "fire", "side",
-             "colour", "fireMode", "speed")
-assert len(TRIG_COLS) == C.LEVELPKG_TRIG_COLS, (
-    f"this test names {len(TRIG_COLS)} trigger columns and src/levelpkg.asm "
-    f"declares {C.LEVELPKG_TRIG_COLS}")
+# THE COLUMN NAMES, FROM THE ONE PLACE THAT KEEPS THEM. They were written out
+# here as well as in tests/campaign_data.py, so a new column meant two lists to
+# find and this one was the second. The assertion that the list matches the
+# engine lives there too, and runs on import.
+TRIG_COLS = CD.TRIG_COLS
 WAVEDEF_SIZE = C.LEVELPKG_WAVEDEF_SIZE
 
 # The authored content, from the level the engine was actually built against.

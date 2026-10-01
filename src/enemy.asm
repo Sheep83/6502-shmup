@@ -585,7 +585,7 @@ enemyTick:
     // A DISMISSED enemy is NOT routed away: ROLE_EGRESS is flown by the
     // ordinary wmTick, because the encounter gave it a terminal WM_EXIT and
     // the movement interpreter already knows how to fly one of those.
-    // ...OR UNLESS IT IS THE DROPPER, WHICH FLIES ITS OWN PATH. A Dropper is
+    // ...OR UNLESS IT IS THE DROPPER, WHICH MAY FLY ITS OWN PATH. A Dropper is
     // checked FIRST and never reaches the role test, because a Dropper can
     // never be anything but ROLE_NORMAL: roles are handed out by the token
     // encounter, which only exists once a Dropper has died, and the
@@ -603,8 +603,32 @@ enemyTick:
     jmp !moved+
 
 !dropper:
+    // WHICH DROPPER, THOUGH. The trigger that sent it either asked for the
+    // hard-coded three-pass flight or named a movement program for it, and
+    // src/dropper.asm records which in drMode at spawn. One byte, tested once a
+    // frame for the at-most-one Dropper alive.
+    //
+    // AN AUTHORED DROPPER USES THE ORDINARY MOVER, and that is the whole
+    // architectural claim of this branch: there is no second Dropper-specific
+    // interpreter, no Dropper-aware code inside src/movement.asm, and an
+    // authored Dropper's arcs, straights, timers, heading and trigger speed are
+    // the same ones every other enemy gets. The only thing this file does
+    // differently for it is the ping.
+    //
+    // ...WHICH IT STILL GETS, BECAUSE THE PING IS NOT PART OF THE TRAJECTORY.
+    // dropperPing is driven from the movement call for the reason its own
+    // comment gives -- that is what makes it stop by itself when the Dropper
+    // dies or despawns -- and an authored Dropper needs announcing exactly as
+    // much as a legacy one does. Calling it here keeps that property: a DYING
+    // enemy never reaches this branch, and a despawned one no longer exists.
+    lda drMode
+    bne !dropperProgram+
     jsr dropperFly                      // src/dropper.asm: three passes across
     jmp !moved+                         // the top of the aperture, then out
+!dropperProgram:
+    jsr wmTick                          // its own authored path, on the engine
+    jsr dropperPing                     // ...and the sonar cue regardless
+    jmp !moved+
 
 !authored:
     jsr wmTick

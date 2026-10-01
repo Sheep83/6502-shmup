@@ -18,6 +18,7 @@ has. Run it with one that does:
     /usr/local/bin/python3 tools/level_editor/test_trigger_speed.py
 """
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -460,9 +461,18 @@ check("...and the slot count from the column count",
       == C.LEVELPKG_TRIG_RESERVATION // C.LEVELPKG_TRIG_COLS,
       f"{C.LEVELPKG_TRIG_COLS} columns -> {C.LEVELPKG_TRIG_SLOTS} slots")
 pkg = (REPO / "src" / "levelpkg.asm").read_text()
-check("the ENGINE derives it the same way, with no literal to go stale",
+# THE PROPERTY, NOT THE NUMBER. This used to assert `LEVELPKG_TRIG_COLS = 9`
+# literally, which made adding the tenth column a test failure rather than a
+# capacity change -- the very thing deriving the slot count exists to avoid. What
+# matters is that the engine DERIVES the slots from the columns, and that the
+# engine and the editor agree about how many columns there are.
+check("the ENGINE derives the slot count rather than restating it",
       ".const LEVELPKG_TRIG_SLOTS  = floor(LEVELPKG_TRIG_MAX / LEVELPKG_TRIG_COLS)"
-      in pkg and "LEVELPKG_TRIG_COLS   = 9" in pkg)
+      in pkg)
+_cols = re.search(r"\.const LEVELPKG_TRIG_COLS\s*=\s*(\d+)", pkg)
+check("...and the engine and the editor agree about the column count",
+      _cols is not None and int(_cols.group(1)) == C.LEVELPKG_TRIG_COLS,
+      f"engine {_cols and _cols.group(1)}, editor {C.LEVELPKG_TRIG_COLS}")
 for lv in ("level1", "level2"):
     p = EditorController.load(HERE / "levels" / lv / "level.v6.json",
                               library_path=LIB).project

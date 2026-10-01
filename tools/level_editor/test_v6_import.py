@@ -273,7 +273,13 @@ v = validate(project)
 # advisory kinds an import can legitimately raise about authored shape. A
 # structural warning -- a dangling reference, a budget, a range -- would still
 # fail here, which is what this check is for.
-_ADVISORY = {"movement.discontinuity", "wavedef.unused"}
+# The Dropper advisories are this category too: a project imported from an
+# engine authored under the Dropper+escort model legitimately carries a fire
+# mask and a multi-member definition on its Dropper triggers, both of which
+# are now inert rather than wrong. See validation_v6._validate_triggers.
+_ADVISORY = {"movement.discontinuity", "wavedef.unused",
+             "trigger.dropper_fire_mask_ignored",
+             "trigger.dropper_definition_count"}
 _unexpected = [(i.code, i.path) for i in v.warnings if i.code not in _ADVISORY]
 if not v.ok or _unexpected:
     raise AssertionError(f"the populated project does not validate cleanly:\n{v}")

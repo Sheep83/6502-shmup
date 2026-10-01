@@ -36,14 +36,14 @@
 //                that program's BYTE OFFSET via progAt
 .const WAVEDEF_SIZE = 10
 
-.var defSweep = List().add(
-    4, 22,                    // count, interval
+.var defSweepL = List().add(
+    3, 22,                    // count, interval
     0, 0,                     // startX = 0, nine bits split low/high
     64,                       // startY
     0, 20,                    // xStep, yStep -- signed, per member
     0,                        // reserved -- must be zero
     0,                        // launch heading
-    PROG_SWEEP)               // movement program INDEX
+    PROG_SWEEP_L)             // movement program INDEX
 
 .var defS = List().add(
     3, 26,                    // count, interval
@@ -99,15 +99,25 @@
     0,                        // launch heading
     PROG_UP_N_OVER)           // movement program INDEX
 
-.var waveDefs = List().add(defSweep).add(defS).add(defLinger).add(defLoop).add(defLoop5).add(defDive4).add(defUpNOver)
-.const WAVE_DEFS              = 7
-.const WAVE_DEF_SWEEP         = 0
+.var defSweepR = List().add(
+    3, 22,                    // count, interval
+    94, 1,                    // startX = 350, nine bits split low/high
+    48,                       // startY
+    0, 20,                    // xStep, yStep -- signed, per member
+    0,                        // reserved -- must be zero
+    32,                       // launch heading
+    PROG_SWEEP_R)             // movement program INDEX
+
+.var waveDefs = List().add(defSweepL).add(defS).add(defLinger).add(defLoop).add(defLoop5).add(defDive4).add(defUpNOver).add(defSweepR)
+.const WAVE_DEFS              = 8
+.const WAVE_DEF_SWEEP_L       = 0
 .const WAVE_DEF_S             = 1
 .const WAVE_DEF_LINGER        = 2
 .const WAVE_DEF_LOOP          = 3
 .const WAVE_DEF_LOOP_5        = 4
 .const WAVE_DEF_DIVE_4        = 5
 .const WAVE_DEF_UP_N_OVER     = 6
+.const WAVE_DEF_SWEEP_R       = 7
 .if (waveDefs.size() != WAVE_DEFS) { .error "wave definition count disagrees with the table" }
 
 // --- the absolute trigger list --------------------------------------
@@ -115,45 +125,59 @@
 // A trigger names one row; once consumed it never becomes due again. The
 // rows must be NON-DECREASING because the director's cursor only ever
 // walks forward, and every row must be below STAGE_NO_SPAWN_ROW.
-.var trigRow      = List().add(40, 90, 140, 200, 240)
+.var trigRow      = List().add(40, 41, 50)
 
 // Which definition each appearance plays.
-.var trigDef      = List().add(WAVE_DEF_UP_N_OVER, WAVE_DEF_LOOP, WAVE_DEF_LOOP, WAVE_DEF_DIVE_4, WAVE_DEF_S)
+.var trigDef      = List().add(WAVE_DEF_DIVE_4, WAVE_DEF_SWEEP_L, WAVE_DEF_SWEEP_R)
 
 // WHICH ENEMY THE WAVE IS MADE OF -- an authored column rather than
 // arithmetic on the cursor, so inserting a trigger cannot silently invert
 // every wave after it.
-.var trigSpecies  = List().add(SPECIES_DROPPER, SPECIES_RING, SPECIES_SQUARE, SPECIES_RING, SPECIES_DROPPER)
+.var trigSpecies  = List().add(SPECIES_DROPPER, SPECIES_SQUARE, SPECIES_SQUARE)
 
 // WHICH SIDE A DROPPER FLIES IN FROM. Read only when the species above is
 // SPECIES_DROPPER; a Ring wave carries whatever is written here and
 // ignores it.
-.var trigSide     = List().add(DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT)
+.var trigSide     = List().add(DROP_SIDE_LEFT, DROP_SIDE_LEFT, DROP_SIDE_LEFT)
 
 // WHICH MEMBERS OF THIS APPEARANCE MAY SHOOT -- a bitmask over MEMBER
 // INDEX, bit 0 the first member sent, and zero for a formation that does
 // not shoot at all.
-.var trigFire     = List().add(%00111111, %00000111, %00000111, %00001111, %00000111)
+.var trigFire     = List().add(%00000000, %00000001, %00000100)
 
 // HOW THIS APPEARANCE IS COLOURED -- bits 0-3 the C64 colour every
 // member wears, bit 4 (TRIG_COL_RANDOM) set if each enemy instead picks
 // its own eligible colour once, at spawn. On the TRIGGER and not on the
 // definition, so the same reusable formation can arrive in a different
 // colour at every row it is used.
-.var trigColour   = List().add(1, TRIG_COL_RANDOM + 1, 1, 1, 1)
+.var trigColour   = List().add(1, 1, 1)
 
 // HOW THIS APPEARANCE ATTACKS -- TRIG_FIRE_DOWN or TRIG_FIRE_AIMED.
 // On the TRIGGER and not on the definition, so the same reusable
 // formation can arrive silent at one row and aimed at another. Read
 // only for the members trigFire admits, and only for a species that
 // can shoot at all.
-.var trigFireMode = List().add(TRIG_FIRE_AIMED, TRIG_FIRE_AIMED, TRIG_FIRE_AIMED, TRIG_FIRE_AIMED, TRIG_FIRE_AIMED)
+.var trigFireMode = List().add(TRIG_FIRE_DOWN, TRIG_FIRE_AIMED, TRIG_FIRE_DOWN)
 
 // HOW FAST THIS APPEARANCE CROSSES THE PLAYFIELD -- a numerator over
 // four, TRIG_SPEED_1X being a bit-exact no-op. On the TRIGGER and not
 // on the definition, so one reusable path can be walked at several
 // paces. src/waves.asm flies every definition at every speed a trigger
 // here actually asks for.
-.var trigSpeed    = List().add(TRIG_SPEED_1X, TRIG_SPEED_150X, TRIG_SPEED_2X, TRIG_SPEED_125X, TRIG_SPEED_125X)
+.var trigSpeed    = List().add(TRIG_SPEED_1X, TRIG_SPEED_150X, TRIG_SPEED_150X)
 
-.const WAVE_TRIGGERS          = 5
+// WHAT THIS APPEARANCE'S DROPPER FLIES -- TRIG_DROP_LEGACY for the
+// hard-coded three-pass trajectory in src/dropper.asm, or a movement
+// program INDEX for a path the level authored for MEMBER 0. Read only
+// when the species above is SPECIES_DROPPER.
+//
+// AN INDEX HERE, A BYTE OFFSET IN THE PACKAGE: src/level_package.asm
+// emits it through progAt, exactly as it does a wave definition's tenth
+// byte. src/waves.asm flies every authored Dropper path at the speed the
+// trigger naming it asks for.
+//
+// THE ESCORTS ARE NOT AFFECTED. Members 1..N-1 of a Dropper wave fly the
+// wave definition above; this column reaches member 0 alone.
+.var trigDropProg = List().add(PROG_DIVE_BOMB, TRIG_DROP_LEGACY, TRIG_DROP_LEGACY)
+
+.const WAVE_TRIGGERS          = 3

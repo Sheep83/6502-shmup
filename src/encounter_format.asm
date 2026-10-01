@@ -53,6 +53,38 @@
 .const DROP_SIDE_LEFT  = 0
 .const DROP_SIDE_RIGHT = 1
 
+// --- ...or whether it flies a MOVEMENT PROGRAM instead ----------------------
+// THE TRIGGER'S TENTH COLUMN, and the sentinel is what keeps the old flight
+// the default. A Dropper trigger either says "the hard-coded three-pass
+// flight", which is what every level authored before this column existed
+// means, or it names a movement program for MEMBER 0 -- the Dropper itself --
+// and that program is flown by the ordinary movement engine.
+//
+// EMITTED AS A BYTE OFFSET, exactly like a wave definition's tenth byte: the
+// package carries `progAt.get(index)` and the runtime stores it straight into
+// wmStage. So the value here shares its number space with the movement pool,
+// and the sentinel has to be a number no program can ever start at.
+//
+// $FF IS PROVABLY SAFE, AND THE PROOF IS ASSERTED IN src/waves.asm. Every
+// program ends in a four-byte WM_EXIT record inside a pool of LEVELPKG_MOVE_MAX
+// bytes, so the highest offset a program can START at is MOVE_MAX -
+// WM_STAGE_SIZE. That is 252 for a 256-byte pool, which leaves 253, 254 and 255
+// unreachable by construction rather than by convention. The assertion fails
+// the build if the pool or the record size ever changes enough to make that
+// untrue, which is the only way this could quietly become an aliasing bug.
+//
+// THE PROOF IS NOT HERE BECAUSE IT COULD NOT BE. This file declares vocabulary
+// and imports nothing, and KickAssembler resolves constants in IMPORT order --
+// so a `.if` here naming LEVELPKG_MOVE_MAX and WM_STAGE_SIZE fails with
+// "reference to not yet defined symbol" rather than with anything useful. It
+// lives beside the other movement-pool proofs instead.
+//
+// WHY NOT A SEPARATE FLAG COLUMN. A flag plus an offset is two columns and two
+// ways to say the same thing, and it admits the state "legacy, but here is a
+// program anyway" that nothing could interpret. One column with one
+// unreachable value has no such state.
+.const TRIG_DROP_LEGACY = $ff
+
 // --- how THIS APPEARANCE of a wave is coloured ------------------------------
 // A TRIGGER FIELD, NOT A DEFINITION FIELD, and that distinction is the whole
 // point of it. A wave definition is reusable formation vocabulary -- how many

@@ -658,6 +658,20 @@ def _validate_triggers(p, r):
                     f"movement speed {t.resolved_speed!r} is not one of "
                     f"{', '.join(C.SPEED_LABELS[v] for v in C.SPEED_CHOICES)} "
                     f"(encoded {list(C.SPEED_CHOICES)})", f"{path}.speed")
+        # ---- A DROPPER TRIGGER IS ONE OBJECT, AND THE WAVE FIELDS GO QUIET ---
+        # THE FIRE MASK AND THE FIRING MODE ARE NOT READ FOR IT, so neither is
+        # validated against it. A mask is a mask over MEMBER INDEX and a Dropper
+        # trigger has no members to index; src/dropper.asm withdraws the firing
+        # permission outright. Checking "member 3 does not exist" against an
+        # encounter that has no members at all would be reporting a fault in a
+        # field nothing reads.
+        is_dropper = C.identity_behaviour(t.species) == C.BEHAVIOUR_DROPPER
+        d = by_id.get(t.wave_definition)
+        if d is None:
+            r.error("trigger.dangling_definition",
+                    f"names wave definition {t.wave_definition!r}, which does not "
+                    f"exist", f"{path}.waveDefinition")
+
         if t.resolved_fire_mode not in C.FIRE_MODES:
             r.error("trigger.fire_mode",
                     f"firing mode {t.resolved_fire_mode!r} is not one of "
@@ -666,31 +680,59 @@ def _validate_triggers(p, r):
         # read: the mask decides whether anyone fires, and it says no. Harmless
         # in the package, but it means the author believes something untrue --
         # and src/waves.asm refuses to assemble it.
-        elif t.resolved_fire_mode != "DOWN" and not t.fire_bits:
+        elif (not is_dropper and t.resolved_fire_mode != "DOWN"
+                and not t.fire_bits):
             r.error("trigger.fire_mode_unused",
                     f"firing mode {t.resolved_fire_mode} is set, but the fire "
                     f"mask is empty so no member of this appearance shoots",
                     f"{path}.fireMode")
 
-        d = by_id.get(t.wave_definition)
-        if d is None:
-            r.error("trigger.dangling_definition",
-                    f"names wave definition {t.wave_definition!r}, which does not "
-                    f"exist", f"{path}.waveDefinition")
-        for m in t.fire_mask:
-            if not _is_int(m) or m < 0:
-                r.error("trigger.fire_member",
-                        f"a fire mask holds member indices; got {m!r}",
-                        f"{path}.fireMask")
-            elif m > 7:
-                r.error("trigger.fire_width",
-                        f"the fire mask is one byte: member {m} cannot be addressed",
-                        f"{path}.fireMask")
-            elif d is not None and m >= d.count:
-                r.error("trigger.fire_member_absent",
-                        f"fire mask names member {m}, but wave definition "
-                        f"{d.id!r} sends only {d.count}",
-                        f"{path}.fireMask")
+        if is_dropper:
+            # A MASK ON A DROPPER IS INERT, and saying so is kinder than
+            # silence: it is almost always left over from a species change.
+            if t.fire_bits:
+                r.warn("trigger.dropper_fire_mask_ignored",
+                       "a Dropper is one object and does not fire; the fire "
+                       "mask is not read for this trigger",
+                       f"{path}.fireMask")
+            # ...AND SO IS THE DEFINITION'S MEMBER COUNT. src/waves.asm arms the
+            # instance with one member whatever the definition says, because the
+            # definition is this Dropper's PLACEMENT -- its start position and
+            # launch heading.
+            #
+            # WARNED ONLY WHEN TIDYING IT IS SAFE, which means only when no
+            # ORDINARY trigger shares the definition. A shared definition's count
+            # is not cruft: the ordinary trigger really does send that many, and
+            # telling the author to change it would be telling them to break the
+            # other encounter. A warning nobody can act on without causing damage
+            # is worse than silence -- the editor says what is inert inline,
+            # beside the field, where it cannot be mistaken for a fault.
+            if d is not None and d.count != 1 and not any(
+                    o.wave_definition == t.wave_definition
+                    and C.identity_behaviour(o.species) != C.BEHAVIOUR_DROPPER
+                    for o in ts):
+                r.warn("trigger.dropper_definition_count",
+                       f"wave definition {d.id!r} sends {d.count} and is used "
+                       f"only by Dropper trigger(s), which spawn exactly one "
+                       f"object: the count, interval and per-member steps are "
+                       f"never read. Setting the count to 1 would say what this "
+                       f"definition now means",
+                       f"{path}.waveDefinition")
+        else:
+            for m in t.fire_mask:
+                if not _is_int(m) or m < 0:
+                    r.error("trigger.fire_member",
+                            f"a fire mask holds member indices; got {m!r}",
+                            f"{path}.fireMask")
+                elif m > 7:
+                    r.error("trigger.fire_width",
+                            f"the fire mask is one byte: member {m} cannot be "
+                            f"addressed", f"{path}.fireMask")
+                elif d is not None and m >= d.count:
+                    r.error("trigger.fire_member_absent",
+                            f"fire mask names member {m}, but wave definition "
+                            f"{d.id!r} sends only {d.count}",
+                            f"{path}.fireMask")
 
     rows = [t.world_progress for t in ts]
     for i in range(1, len(rows)):
@@ -716,12 +758,36 @@ def _validate_triggers(p, r):
                    f"the director runs {C.WAVE_SLOTS} instances and drops the rest",
                    f"triggers[{i}].worldProgress")
             break
+    prog_ids = {prog.id for prog in p.movement_programs}
     for i, t in enumerate(ts):
-        if C.identity_behaviour(t.species) != C.BEHAVIOUR_DROPPER \
-                and t.dropper_side != "LEFT":
+        is_dropper = C.identity_behaviour(t.species) == C.BEHAVIOUR_DROPPER
+        if not is_dropper and t.dropper_side != "LEFT":
             r.warn("trigger.side_ignored",
                    "dropperSide is read only for a DROPPER wave; a RING wave "
                    "carries it and ignores it", f"triggers[{i}].dropperSide")
+        # ---- what this appearance's Dropper flies ------------------------
+        # A DANGLING REFERENCE IS AN ERROR, not a warning, and it is the same
+        # error a wave definition naming a missing program gets -- the engine
+        # refuses to assemble either. Renaming or deleting a movement program
+        # that a Dropper trigger points at is exactly how this happens.
+        if t.dropper_program is not None:
+            if t.dropper_program not in prog_ids:
+                r.error("trigger.dropper_program_missing",
+                        f"dropperProgram {t.dropper_program!r} is not a "
+                        f"movement program in this project",
+                        f"triggers[{i}].dropperProgram")
+            # AND ON A NON-DROPPER IT IS AN ERROR TOO, because src/waves.asm
+            # refuses the combination at assembly time rather than ignoring it:
+            # the runtime reads the column only for a Dropper wave, so a path
+            # left behind by a species change would silently never be flown.
+            # Reported here so the author hears it in the editor rather than
+            # from KickAssembler.
+            if not is_dropper:
+                r.error("trigger.dropper_program_ignored",
+                        "dropperProgram is read only for a DROPPER wave; this "
+                        "trigger's enemy does not drop a token, so the path "
+                        "would never be flown",
+                        f"triggers[{i}].dropperProgram")
 
 
 def _capacity(p, r):

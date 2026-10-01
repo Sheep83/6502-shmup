@@ -167,39 +167,49 @@
 .const LEVELPKG_WAVEDEF_MAX = LEVELPKG_WAVEDEF_SLOTS * 10           // 260
 
 // --- the absolute trigger list, above the definitions -----------------------
-// NINE PARALLEL COLUMNS, not interleaved records: rowLo, rowHi, def, species,
-// fire, side, colour, fireMode, speed. The director indexes every one of them with the
-// SAME cursor (`lda waveTrigDef,y` and so on), so parallel columns cost one
-// `absolute,y` per field and nothing else. An interleaved record would need the
-// cursor multiplied by nine on every read -- strictly more work for the same
-// data.
+// TEN PARALLEL COLUMNS, not interleaved records: rowLo, rowHi, def, species,
+// fire, side, colour, fireMode, speed, dropProg. The director indexes every one
+// of them with the SAME cursor (`lda waveTrigDef,y` and so on), so parallel
+// columns cost one `absolute,y` per field and nothing else. An interleaved
+// record would need the cursor multiplied by ten on every read -- strictly more
+// work for the same data.
 //
-// THE LAST THREE COLUMNS ARE THE OCCURRENCE'S PRESENTATION, ATTACK AND SPEED,
-// and all three cost capacity rather than cleverness. Colour and firing mode
-// used to be packed into the wave DEFINITION's one spare byte, and the speed
-// was not expressible at all -- every occurrence of a reusable formation was
-// identically coloured, identically armed and identically paced. All three
-// belong to the encounter.
+// THE LAST FOUR COLUMNS ARE THE OCCURRENCE'S PRESENTATION, ATTACK, SPEED AND
+// DROPPER MOVEMENT, and all four cost capacity rather than cleverness. Colour
+// and firing mode used to be packed into the wave DEFINITION's one spare byte,
+// the speed was not expressible at all, and a Dropper's path was not authorable
+// at all -- every occurrence of a reusable formation was identically coloured,
+// identically armed and identically paced, and every Dropper anywhere flew one
+// hard-coded trajectory. All four belong to the encounter.
 //
-// NEITHER COULD BORROW A BIT FROM AN EXISTING COLUMN, and that was checked
-// rather than assumed. trigFire is a full eight-bit mask over member index --
-// the validator says so in as many words -- so it has no spare bits. trigSide
-// and trigSpecies do have some, but a Dropper's entry side and a species' own
+// NONE COULD BORROW A BIT FROM AN EXISTING COLUMN, and that was checked rather
+// than assumed. trigFire is a full eight-bit mask over member index -- the
+// validator says so in as many words -- so it has no spare bits. trigSide and
+// trigSpecies do have some, but a Dropper's entry side and a species' own
 // animation row offset are not where a colour or a firing mode belongs, and a
 // species value is a row offset that grows as species are added. Hiding a field
 // in either is the kind of overload that is only ever found later and painfully.
 //
+// AND trigDropProg COULD NOT HAVE BORROWED THEM EVEN IF THAT WERE ACCEPTABLE.
+// It carries a BYTE OFFSET into the movement pool, which is a full eight bits
+// by construction -- the pool is LEVELPKG_MOVE_MAX bytes precisely because
+// wmStage is one byte -- so there is no sub-byte encoding of it to hide
+// anywhere. trigSide was the one plausible host, being read only for a Dropper
+// and using one of its eight bits; it is also the field that STAYS LIVE beside
+// the new one, because LEFT/RIGHT is what the legacy flight still reads. The
+// two cannot share a byte because a trigger may need both answers at once.
+//
 // WHAT IT COST: the slot count below is DERIVED from the column count and the
 // space available -- it is never written down as a literal, here or in the
 // editor or in a test, precisely because it has moved every time a column was
-// added. Nine columns give 120 authored triggers. Level 1 uses twelve and
-// level 2 uses seven; the ceiling has never been within an order of magnitude
-// of the content.
+// added. Ten columns give 108 authored triggers, where nine gave 120. Level 1
+// uses five and level 2 uses seven; the ceiling has never been within an order
+// of magnitude of the content, which is why the clearer encoding wins.
 //
-// Each column is one byte per trigger, so the whole list is nine bytes a
+// Each column is one byte per trigger, so the whole list is ten bytes a
 // trigger and the cursor is a byte: 255 triggers is the addressing ceiling.
 .const LEVELPKG_TRIG        = LEVELPKG_WAVEDEF + LEVELPKG_WAVEDEF_MAX   // $f736
-.const LEVELPKG_TRIG_COLS   = 9
+.const LEVELPKG_TRIG_COLS   = 10
 .const LEVELPKG_TRIG_MAX    = LEVELPKG_ENC_MAX - LEVELPKG_STAGE_MAX - LEVELPKG_MOVE_MAX - LEVELPKG_WAVEDEF_MAX
 .const LEVELPKG_TRIG_SLOTS  = floor(LEVELPKG_TRIG_MAX / LEVELPKG_TRIG_COLS)
 

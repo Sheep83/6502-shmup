@@ -133,21 +133,28 @@ try:
           len(p.canvas.find_withtag("field")) >= 4)
 
     # =====================================================================
-    # the Dropper limitation is stated, not faked
+    # A DROPPER TRIGGER IS DRAWN, and this block used to assert the opposite.
+    # The refusal was honest while a Dropper had no path of its own; now member
+    # 0 flies either the legacy trajectory or an authored program, and both are
+    # real paths. What is checked is that something truthful appears -- and, in
+    # the section further down, that member 0 is not on the escorts' path.
     # =====================================================================
     select_trigger(DROP[0])
-    check("a DROPPER trigger produces NO ordinary-wave preview", p.sim is None)
-    check("...and says so plainly",
-          p.error and "not previewed in this phase" in p.error)
-    check("...and explains why, naming the engine behaviour",
-          p.error and "dropper.asm" in p.error)
-    check("...with the headline marking it unavailable rather than blank",
-          p.headline.get() == "preview unavailable", p.headline.get())
-    check("...and nothing is drawn as if it were a path",
-          not p.canvas.find_withtag("path")
-          and not p.canvas.find_withtag("marker"))
-    check("...but the reason is shown on the canvas",
-          len(p.canvas.find_withtag("why")) == 1)
+    check("a DROPPER trigger IS previewed", p.sim is not None)
+    check("...with no error", not p.error, p.error or "")
+    check("...one path per authored member",
+          p.sim is not None and len(p.sim.paths) == p.sim.count,
+          "" if p.sim is None else f"{len(p.sim.paths)} of {p.sim.count}")
+    check("...and the canvas drew them",
+          len(p.canvas.find_withtag("path")) > 0,
+          f"{len(p.canvas.find_withtag('path'))} path items")
+    check("...with member 0 on the legacy flight, not the escorts' program",
+          p.sim is not None
+          and all(f.stage_kind == "DROPPER" for f in p.sim.paths[0]))
+    check("...and every other member on the wave definition's program",
+          p.sim is not None and p.sim.count > 1 and all(
+              f.stage_kind != "DROPPER"
+              for m in range(1, p.sim.count) for f in p.sim.paths[m]))
 
     # =====================================================================
     # transport

@@ -323,10 +323,18 @@ else:
               all(s == base for s in sizes), f"{base} vs {set(sizes)}")
         pick(drop)
         detail = w.preview.detail.get()
-        check("the DROPPER explanation is a single summary line in the strip",
+        # THE STRIP STAYS ONE LINE, which is the whole geometry regression this
+        # section guards: a multi-line message in the detail strip is what used
+        # to widen the workspace on every Dropper selection.
+        check("the DROPPER strip is a single summary line",
               "\n" not in detail and len(detail) < 120, repr(detail[:70]))
-        check("...and the full reason is still shown on the canvas",
-              bool(w.preview.error) and "\n" in w.preview.error)
+        # AND IT IS NOW A REAL PREVIEW, not an explanation of why there is none.
+        # This used to require a long multi-line reason on the canvas; a Dropper
+        # trigger's member 0 is simulable since it owns a path, so the honest
+        # check is that the panel drew one and reported no error.
+        check("...and a DROPPER trigger previews rather than explaining itself",
+              w.preview.sim is not None and not w.preview.error,
+              w.preview.error or "no error")
     app.destroy()
 
 print()

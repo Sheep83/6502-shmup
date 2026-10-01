@@ -31,6 +31,7 @@ ed.messagebox.showinfo = lambda *a, **k: None
 _ANSWER = {"str": None}
 ed.simpledialog.askstring = lambda *a, **k: _ANSWER["str"]
 ed.messagebox.askyesno = lambda *a, **k: True
+import contract_v2 as C                                          # noqa: E402
 import encounters_ui                                            # noqa: E402
 encounters_ui.messagebox.showerror = lambda *a, **k: None
 encounters_ui.messagebox.askyesno = lambda *a, **k: True
@@ -164,9 +165,16 @@ try:
     # =====================================================================
     # the fire-mask checkboxes drive the real mask
     # =====================================================================
-    w.sel_trigger = 0
+    # AN ORDINARY TRIGGER, CHOSEN BY BEHAVIOUR. This was `sel_trigger = 0`, and
+    # trigger 0 of the canonical level happens to be a Dropper -- so a test of the
+    # fire-mask CHECKBOXES was riding on which species the author had put first.
+    # A Dropper Trigger is one object with no member mask and therefore no boxes
+    # at all, by design; the widget contract under test belongs to ordinary waves.
+    _ti = next(i for i, t in enumerate(app.controller.project.triggers)
+               if C.identity_behaviour(t.species) != C.BEHAVIOUR_DROPPER)
+    w.sel_trigger = _ti
     w._refresh_trigger_detail()
-    _t0 = app.controller.project.triggers[0]
+    _t0 = app.controller.project.triggers[_ti]
     _wave0 = next(d for d in app.controller.project.wave_definitions
                   if d.id == _t0.wave_definition)
     # A SPARE MEMBER IS MADE, NOT FOUND. `next(m for m in range(count)
@@ -177,10 +185,10 @@ try:
     # then has a box it knows is empty whatever the level says.
     _restore_mask = list(_t0.fire_mask)
     _canonical = app.controller.to_json()
-    app.controller.update_trigger(0, fire_mask=[m for m in _restore_mask
+    app.controller.update_trigger(_ti, fire_mask=[m for m in _restore_mask
                                                 if m != 0])
     w._refresh_trigger_detail()
-    _mask0 = list(app.controller.project.triggers[0].fire_mask)
+    _mask0 = list(app.controller.project.triggers[_ti].fire_mask)
     check("the fire boxes match the referenced wave's member count",
           len(w._fire_vars) == _wave0.count,
           f"{len(w._fire_vars)} boxes for a wave of {_wave0.count}")
@@ -193,15 +201,15 @@ try:
     dict(w._fire_vars)[_spare].set(1)
     w._fire_changed()
     check("ticking a member writes it into the trigger",
-          app.controller.project.triggers[0].fire_mask == sorted(_mask0 + [_spare]),
-          str(app.controller.project.triggers[0].fire_mask))
+          app.controller.project.triggers[_ti].fire_mask == sorted(_mask0 + [_spare]),
+          str(app.controller.project.triggers[_ti].fire_mask))
     app._undo()
     check("...and it is undoable", app.controller.to_json() == before)
     # PUT THE SETUP BACK. The mask was cleared directly on the controller rather
     # than through a GUI action, so no undo step covers it; the later
     # "clean again" and "Save As writes the canonical bytes" checks are about the
     # whole session and would otherwise be failed by this file's own scaffolding.
-    app.controller.update_trigger(0, fire_mask=_restore_mask)
+    app.controller.update_trigger(_ti, fire_mask=_restore_mask)
     w._refresh_trigger_detail()
     check("the fire-mask scaffolding is fully reverted",
           app.controller.to_json() == _canonical,

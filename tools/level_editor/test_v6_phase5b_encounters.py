@@ -234,18 +234,28 @@ check("...and survives save/reload exactly",
       back.project.triggers[0].fire_mask == [1, 3])
 
 # an impossible member is REPORTED, not silently dropped
+#
+# ON AN ORDINARY TRIGGER, CHOSEN BY BEHAVIOUR. This used to use trigger 0, which
+# happens to be a Dropper in the canonical level -- so an assertion about the
+# ordinary fire-mask machinery was riding on whichever species the author had put
+# first. A Dropper Trigger is one object and carries no member mask at all now,
+# so the mask rules are deliberately not applied to it; the trigger this needs is
+# an ordinary one, and it is found rather than assumed.
 c = fresh()
-c.update_trigger(0, fire_mask=[0, 2, 3])         # 'sweep' sends 4: all legal
-c.update_trigger(0, wave_definition="s")         # 's' sends only 3
+_ord = next(i for i, t in enumerate(c.project.triggers)
+            if C.identity_behaviour(t.species) != C.BEHAVIOUR_DROPPER)
+c.update_trigger(_ord, fire_mask=[0, 2, 3])      # 'sweep' sends 4: all legal
+c.update_trigger(_ord, wave_definition="s")      # 's' sends only 3
 check("pointing a trigger at a smaller wave does not silently trim the mask",
-      c.project.triggers[0].fire_mask == [0, 2, 3])
+      c.project.triggers[_ord].fire_mask == [0, 2, 3])
 check("...the impossible member is reported",
-      c.impossible_fire_members(0) == [3], str(c.impossible_fire_members(0)))
+      c.impossible_fire_members(_ord) == [3],
+      str(c.impossible_fire_members(_ord)))
 check("...and the validator errors rather than the editor guessing",
       "trigger.fire_member_absent" in codes(c))
-dropped = c.trim_fire_mask(0)
+dropped = c.trim_fire_mask(_ord)
 check("...and the explicit trim removes only those members",
-      dropped == [3] and c.project.triggers[0].fire_mask == [0, 2])
+      dropped == [3] and c.project.triggers[_ord].fire_mask == [0, 2])
 
 # ===========================================================================
 # 4. noSpawnRow

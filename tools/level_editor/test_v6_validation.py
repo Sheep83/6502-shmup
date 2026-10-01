@@ -274,12 +274,20 @@ ok("src/waves.asm does not assert the species alternation")
 p = build()
 p.triggers = [Trigger(10, "w", "RING_3", [0]), Trigger(20, "w", "RING_3", [0])]
 expect_clean(p, "two consecutive RING waves are accepted")
+# A DROPPER TRIGGER CARRIES NO FIRE MASK AND A COUNT-1 PLACEMENT, which is what
+# the single-object model means: a Dropper does not fire, and the definition it
+# names is its start position and launch heading rather than a formation. The
+# masks used to be [0] here because member 0 WAS the Dropper inside a composite
+# wave; that encounter no longer exists.
 p = build()
-p.triggers = [Trigger(10, "w", "DROPPER", [0]), Trigger(20, "w", "DROPPER", [0])]
+p.wave_definitions[0].count = 1         # used only by Droppers: its placement
+p.triggers = [Trigger(10, "w", "DROPPER", []), Trigger(20, "w", "DROPPER", [])]
 expect_clean(p, "two consecutive DROPPER waves are accepted")
 p = build()
-p.triggers = [Trigger(10, "w", "RING_3", [0]), Trigger(20, "w", "DROPPER", [0]),
-              Trigger(30, "w", "DROPPER", [0]), Trigger(40, "w", "RING_3", [0])]
+# HERE THE DEFINITION IS SHARED with ordinary triggers that really do send four,
+# so its count is not cruft and the validator must not ask for it to change.
+p.triggers = [Trigger(10, "w", "RING_3", [0]), Trigger(20, "w", "DROPPER", []),
+              Trigger(30, "w", "DROPPER", []), Trigger(40, "w", "RING_3", [0])]
 expect_clean(p, "RING -> DROPPER -> DROPPER -> RING is accepted")
 
 p = build()
@@ -305,7 +313,7 @@ expect_clean(p, "worldProgress 255 is accepted")
 p = build(); p.triggers[0].world_progress = 256
 expect_clean(p, "worldProgress 256 is accepted -- the row is not one byte")
 p = build()
-p.triggers = [Trigger(255, "w", "RING_3", [0]), Trigger(256, "w", "DROPPER", [0])]
+p.triggers = [Trigger(255, "w", "RING_3", [0]), Trigger(256, "w", "DROPPER", [])]
 expect_clean(p, "255 then 256 is a legal non-decreasing pair across the page break")
 
 p = build(); p.triggers[0].world_progress = 396

@@ -77,7 +77,7 @@ def pkg(name):
 TRIG_BASE = pkg("LEVELPKG_TRIG")
 TRIG_SLOTS = C.LEVELPKG_TRIG_SLOTS
 TRIG_COLS = ("rowLo", "rowHi", "def", "species", "fire", "side",
-             "colour", "fireMode", "speed")
+             "colour", "fireMode", "speed", "dropProg")
 assert len(TRIG_COLS) == C.LEVELPKG_TRIG_COLS, (
     f"tests/campaign_data.py names {len(TRIG_COLS)} trigger columns and "
     f"src/levelpkg.asm declares {C.LEVELPKG_TRIG_COLS}")
@@ -149,6 +149,9 @@ class Level:
         self.trig_colour = list(self._d.list_("trigColour"))
         self.trig_fire_mode = list(self._d.list_("trigFireMode"))
         self.trig_speed = list(self._d.list_("trigSpeed"))
+        # WHAT EACH APPEARANCE'S DROPPER FLIES: TRIG_DROP_LEGACY for the
+        # hard-coded trajectory, or a movement program INDEX for member 0.
+        self.trig_drop_prog = list(self._d.list_("trigDropProg"))
 
         # Ten bytes each, program field still an INDEX at this stage.
         self.wave_defs = [list(x) for x in self._d.list_("waveDefs")]
@@ -255,6 +258,7 @@ if __name__ == "__main__":                       # a readable dump, for humans
         print(f"  colour    {[hex(c) for c in lv.trig_colour]}")
         print(f"  fireMode  {lv.trig_fire_mode}")
         print(f"  speed     {lv.trig_speed}")
+        print(f"  dropProg  {lv.trig_drop_prog}")
         print(f"  shared    {lv.shared_definitions()}")
         print(f"  straights {lv.straight_legs()}")
     print(f"\ncapacity: {len(TRIG_COLS)} columns x {TRIG_SLOTS} slots "

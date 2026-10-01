@@ -301,7 +301,28 @@ class PreviewPanel(ttk.LabelFrame):
                 # trigger fields too, but they do not change the trajectory,
                 # and putting them here would re-fly a 300-frame wave every
                 # time somebody picked a different shade.
-                key = (t.species, t.wave_definition, t.resolved_speed)
+                #
+                # AND SO ARE THE TWO DROPPER FIELDS, for the same reason the
+                # speed is here and by the same rule: name every trigger field
+                # the simulation reads. simulate_trigger reads BOTH.
+                #
+                #   * dropper_program decides whether member 0 flies the legacy
+                #     trajectory or a movement program, and which one. Without
+                #     it, switching Legacy <-> authored would leave the previous
+                #     picture on the canvas -- the signature would compare equal
+                #     and _rebuild() would never run.
+                #   * dropper_side decides which edge the LEGACY flight enters
+                #     from, so it changes member 0's whole path. It is absent
+                #     from an ordinary wave's geometry, which is why it was not
+                #     needed here until a Dropper could be previewed at all.
+                #
+                # THE DROPPER'S PROGRAM STAGES ARE NAMED TOO, below: the
+                # definition's program is already in this tuple, and the
+                # Dropper's is a second program the simulation reads, so editing
+                # a stage of it has to invalidate the cache exactly as editing a
+                # stage of the escorts' does.
+                key = (t.species, t.wave_definition, t.resolved_speed,
+                       t.dropper_program, t.dropper_side)
             elif kind == "wave":
                 wave = next((w for w in proj.wave_definitions if w.id == ref),
                             None)
@@ -312,6 +333,19 @@ class PreviewPanel(ttk.LabelFrame):
             prog_id = wave.movement_program if wave is not None else ref
             prog = next((p for p in proj.movement_programs if p.id == prog_id),
                         None)
+            # THE DROPPER'S OWN PROGRAM, when a Dropper trigger names one. A
+            # second program the simulation reads, so its stages and segments
+            # belong in the signature for the same reason the escorts' do.
+            dprog = None
+            if kind == "trigger" and 0 <= ref < len(proj.triggers):
+                want = proj.triggers[ref].dropper_program
+                if want is not None:
+                    dprog = next((p for p in proj.movement_programs
+                                  if p.id == want), None)
+            dkey = None if dprog is None else (
+                tuple(tuple(sorted(s.to_dict().items())) for s in dprog.stages),
+                tuple(tuple(sorted(g.to_dict().items()))
+                      for g in dprog.segments))
             # THE PREVIEW HEADING IS PART OF THE SIGNATURE. Without it,
             # changing the heading would leave the previous simulation on
             # screen -- the project has not changed, so nothing else here
@@ -322,7 +356,8 @@ class PreviewPanel(ttk.LabelFrame):
                     tuple(tuple(sorted(s.to_dict().items())) for s in prog.stages),
                     None if prog is None else
                     tuple(tuple(sorted(g.to_dict().items()))
-                          for g in prog.segments))
+                          for g in prog.segments),
+                    dkey)
         except Exception:                                   # noqa: BLE001
             return ("broken",)
 

@@ -434,6 +434,34 @@ def trigger_speed_expr(t):
     return named.get(t.resolved_speed, str(t.resolved_speed))
 
 
+def trigger_dropper_program_expr(project, t):
+    """What member 0 of this Dropper trigger flies, as the generated source says it.
+
+    THE SENTINEL OR A PROGRAM CONSTANT, and never a bare number: the generated
+    file already names every movement program (`PROG_LOOP` and friends), so the
+    trigger column reads as the author's selection rather than as a position in
+    a list that shifts when a program is inserted.
+
+    AN INDEX, NOT AN OFFSET. src/level_package.asm resolves it through progAt at
+    package-emit time, exactly as it resolves a wave definition's tenth byte.
+    Doing it here would bake a byte offset into the trigger list and make
+    inserting a stage in an unrelated program silently repoint this one.
+
+    A NON-DROPPER TRIGGER EMITS THE SENTINEL whatever its field says. The
+    validator has already refused the combination (see
+    validation_v6, trigger.dropper_program_ignored) so this is belt and braces
+    rather than a policy -- but the engine also refuses it at assembly time, and
+    emitting a stale field would turn an editor-level mistake into a build
+    failure in a generated file nobody hand-edits.
+    """
+    if t.dropper_program is None:
+        return "TRIG_DROP_LEGACY"
+    if C.identity_behaviour(t.species) != C.BEHAVIOUR_DROPPER:
+        return "TRIG_DROP_LEGACY"
+    _check_symbol("movement program", t.dropper_program)
+    return prog_const(t.dropper_program)
+
+
 def trigger_colour_expr(t):
     """...as the generated source spells it, symbolically where it matters."""
     colour = t.resolved_colour & C.MAX_COLOUR
@@ -678,6 +706,21 @@ def render_wave_encounters(project, level_name):
         "// paces. src/waves.asm flies every definition at every speed a trigger",
         "// here actually asks for.",
         _list_decl("trigSpeed", [trigger_speed_expr(t) for t in trigs]),
+        "",
+        "// WHAT THIS APPEARANCE'S DROPPER FLIES -- TRIG_DROP_LEGACY for the",
+        "// hard-coded three-pass trajectory in src/dropper.asm, or a movement",
+        "// program INDEX for a path the level authored for MEMBER 0. Read only",
+        "// when the species above is SPECIES_DROPPER.",
+        "//",
+        "// AN INDEX HERE, A BYTE OFFSET IN THE PACKAGE: src/level_package.asm",
+        "// emits it through progAt, exactly as it does a wave definition's tenth",
+        "// byte. src/waves.asm flies every authored Dropper path at the speed the",
+        "// trigger naming it asks for.",
+        "//",
+        "// THE ESCORTS ARE NOT AFFECTED. Members 1..N-1 of a Dropper wave fly the",
+        "// wave definition above; this column reaches member 0 alone.",
+        _list_decl("trigDropProg",
+                   [trigger_dropper_program_expr(project, t) for t in trigs]),
         "",
         f".const {'WAVE_TRIGGERS':<22} = {len(trigs)}",
     ]

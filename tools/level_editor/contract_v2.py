@@ -39,10 +39,12 @@ LEVELPKG_WAVEDEF_MAX = LEVELPKG_WAVEDEF_SLOTS * LEVELPKG_WAVEDEF_SIZE
 # THE SLOT COUNT FOLLOWS THE COLUMN COUNT, exactly as src/levelpkg.asm derives
 # it, and is NEVER written down as a literal -- here, in the engine, or in a
 # test. It has moved every time a trigger column was added (180 -> 154 -> 135
-# -> 120) and every hard-coded copy of it has gone stale within a task or two.
+# -> 120 -> 108) and every hard-coded copy of it has gone stale within a task
+# or two.
 LEVELPKG_TRIG_RESERVATION = (LEVELPKG_ENC_MAX - LEVELPKG_STAGE_MAX
                              - LEVELPKG_MOVE_MAX - LEVELPKG_WAVEDEF_MAX)
-LEVELPKG_TRIG_COLS = 9
+# rowLo, rowHi, def, species, fire, side, colour, fireMode, speed, dropProg.
+LEVELPKG_TRIG_COLS = 10
 LEVELPKG_TRIG_SLOTS = LEVELPKG_TRIG_RESERVATION // LEVELPKG_TRIG_COLS
 
 # Stage height. The binding limit is the map budget, not the turret tables
@@ -186,6 +188,23 @@ SPECIES = {
 # Human-facing labels. The editor shows these; the package carries SPECIES.
 SPECIES_LABELS = {"RING": "Ring", "DROPPER": "Dropper", "SQUARE": "Square"}
 DROPPER_SIDES = {"LEFT": 0, "RIGHT": 1}
+
+# ---------------------------------------------------------------------------
+# What a Dropper flies — src/encounter_format.asm TRIG_DROP_LEGACY
+# ---------------------------------------------------------------------------
+# THE ABSENCE OF A MOVEMENT PROGRAM, NAMED. A Dropper trigger either flies the
+# hard-coded three-pass trajectory in src/dropper.asm or names a movement
+# program for member 0. The document records the second case as the program's
+# id and the first as None -- so "no dropperProgram key" and "dropperProgram:
+# null" and a project written before this field existed all mean the same thing,
+# which is the trajectory the engine has always flown.
+#
+# THE ENGINE'S SENTINEL IS $FF and is what the package carries in the trigger's
+# tenth column; the editor never stores the number, because an id is what an
+# author selects and a byte offset is what the exporter computes. See
+# export_v6.trigger_dropper_program_expr.
+TRIG_DROP_LEGACY = 0xFF
+DROPPER_MOVEMENT_LEGACY = "Legacy Dropper Flight"
 
 # --- how an APPEARANCE attacks, src/encounter_format.asm --------------------
 # A TRIGGER FIELD, NOT A DEFINITION FIELD, for the same reason the colour is

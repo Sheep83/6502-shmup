@@ -3989,82 +3989,41 @@
   "triggers": [
     {
       "worldProgress": 40,
-      "waveDefinition": "up_n_over",
+      "waveDefinition": "dive_4",
       "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4,
+      "dropperProgram": "dive_bomb"
+    },
+    {
+      "worldProgress": 41,
+      "waveDefinition": "sweep_l",
+      "species": "SPACE_WHISK",
       "fireMask": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5
+        0
       ],
       "dropperSide": "LEFT",
       "colour": 1,
       "colourMode": "FIXED",
-      "fireMode": "AIMED",
-      "speed": 4
-    },
-    {
-      "worldProgress": 90,
-      "waveDefinition": "loop",
-      "species": "RING_3",
-      "fireMask": [
-        0,
-        1,
-        2
-      ],
-      "dropperSide": "LEFT",
-      "colour": 1,
-      "colourMode": "RANDOM",
       "fireMode": "AIMED",
       "speed": 6
     },
     {
-      "worldProgress": 140,
-      "waveDefinition": "loop",
+      "worldProgress": 50,
+      "waveDefinition": "sweep_r",
       "species": "SPACE_WHISK",
       "fireMask": [
-        0,
-        1,
         2
       ],
       "dropperSide": "LEFT",
       "colour": 1,
       "colourMode": "FIXED",
-      "fireMode": "AIMED",
-      "speed": 8
-    },
-    {
-      "worldProgress": 200,
-      "waveDefinition": "dive_4",
-      "species": "RING_3",
-      "fireMask": [
-        0,
-        1,
-        2,
-        3
-      ],
-      "dropperSide": "LEFT",
-      "colour": 1,
-      "colourMode": "FIXED",
-      "fireMode": "AIMED",
-      "speed": 5
-    },
-    {
-      "worldProgress": 240,
-      "waveDefinition": "s",
-      "species": "DROPPER",
-      "fireMask": [
-        0,
-        1,
-        2
-      ],
-      "dropperSide": "LEFT",
-      "colour": 1,
-      "colourMode": "FIXED",
-      "fireMode": "AIMED",
-      "speed": 5
+      "fireMode": "DOWN",
+      "speed": 6
     }
   ],
   "levelMetatileSet": [

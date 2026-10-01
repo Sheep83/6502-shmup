@@ -20,10 +20,10 @@ WHAT IS MODELLED (src/movement.asm, src/waves.asm, src/enemy.asm):
 
 WHAT IS NOT MODELLED, deliberately:
 
-    * DROPPER / token / protector choreography. src/dropper.asm takes a
-      Dropper off its wave's path immediately after wmEnterStage, so an
-      ordinary-wave simulation of one would be a fiction. simulate_wave()
-      refuses rather than draws it.
+    * TOKEN / protector choreography. What a Dropper's death sets off is a
+      lifecycle state machine, not movement, and nothing here models it.
+      (The Dropper's own flight IS modelled -- both the legacy trajectory and
+      an authored movement program; see simulate_dropper.)
     * Pool pressure. src/waves.asm DEFERS a member when objectAlloc refuses,
       which stretches a wave by however many frames the pool was busy. The
       pool is shared with hostile projectiles, so that is a property of the
@@ -38,6 +38,7 @@ is an integer and every operation is the 6502's.
 """
 import math
 from dataclasses import dataclass, replace
+from pathlib import Path as _Path
 from typing import Optional
 
 import contract_v2 as C
@@ -86,6 +87,54 @@ DISPLAY_X_FIRST = C.DISPLAY_X_FIRST
 DISPLAY_X_LAST = C.DISPLAY_X_LAST
 
 SIM_FRAME_BUDGET = 900      # src/waves.asm: frames before a path is stuck
+
+# ---------------------------------------------------------------------------
+# THE LEGACY DROPPER FLIGHT, READ FROM src/dropper.asm RATHER THAN RETYPED.
+#
+# The hard-coded trajectory is now one of two things a Dropper trigger can
+# select, so the preview has to be able to draw it -- and drawing it means
+# knowing the entry edges, the turning points, the crossing speed and the weave.
+# Every one of those is a `.const` in src/dropper.asm, and every one of them has
+# been tuned at least once.
+#
+# SO THEY ARE PARSED, NOT COPIED. contract_v2's convention for engine constants
+# is a literal beside a source comment, which is fine for numbers nobody moves
+# (a sprite is 21 rasters tall). These are gameplay tuning values, and a preview
+# quietly drawing last month's amplitude is exactly the kind of wrong a preview
+# must not be. asm_decl is the same reader the importer uses.
+# ---------------------------------------------------------------------------
+import asm_decl as _asm_decl                                        # noqa: E402
+
+_REPO = _Path(__file__).resolve().parent.parent.parent
+_DROP = _asm_decl.parse_files([_REPO / "src" / "dropper.asm"])
+
+DROP_ENTRY_LEFT = _DROP.const("DROP_ENTRY_LEFT")
+DROP_ENTRY_RIGHT = _DROP.const("DROP_ENTRY_RIGHT")
+DROP_X_LEFT = _DROP.const("DROP_X_LEFT")
+DROP_X_RIGHT = _DROP.const("DROP_X_RIGHT")
+DROP_PASSES = _DROP.const("DROP_PASSES")
+DROP_VX = _DROP.const("DROP_VX")
+DROP_CENTRE_Y = _DROP.const("DROP_CENTRE_Y")
+DROP_AMPLITUDE = _DROP.const("DROP_AMPLITUDE")
+DROP_PHASES = _DROP.const("DROP_PHASES")
+DROP_PHASE_HOLD = _DROP.const("DROP_PHASE_HOLD")
+
+
+def _drop_weave():
+    """src/dropper.asm's dropperWeave, built with the same expression.
+
+    `<round(DROP_AMPLITUDE * sin(2 * PI * k / DROP_PHASES))`, as signed bytes.
+    Python's round() is banker's rounding and KickAssembler's is not, so the
+    half-up form is written out.
+    """
+    out = []
+    for k in range(DROP_PHASES):
+        v = DROP_AMPLITUDE * math.sin(2 * math.pi * k / DROP_PHASES)
+        out.append(math.floor(v + 0.5) if v >= 0 else -math.floor(-v + 0.5))
+    return tuple(out)
+
+
+DROP_WEAVE = _drop_weave()
 
 MODE_NAMES = {C.WM_STRAIGHT: "STRAIGHT", C.WM_ARC: "ARC",
               C.WM_ARC_MIRROR: "ARC_MIRROR", C.WM_EXIT: "EXIT",
@@ -489,6 +538,87 @@ def simulate_member(wave, stages, member, max_frames,
     return out, False
 
 
+def simulate_legacy_dropper(side, max_frames):
+    """src/dropper.asm's hard-coded flight, frame by frame. Returns (path, exited).
+
+    THE SMALLEST REPRESENTATION THAT IS ACTUALLY TRUE. The alternative offered
+    itself: draw member 0 on the escorts' wave definition and be done. That
+    would be a lie the author could act on -- the legacy Dropper enters from a
+    screen edge, holds one height, crosses three times and leaves the way it
+    came, and none of that resembles a formation path. This is thirty lines and
+    it is correct.
+
+    THE WEAVE IS NOT A MOVEMENT PROGRAM AND CANNOT BE ONE. dropperFly writes
+    logY OUTRIGHT from a table every frame; wmVY is held at zero deliberately,
+    because src/enemy.asm's top despawn edge reads it. So member 0's Y here does
+    not come from the integrator at all, which is exactly why this is a separate
+    function rather than a synthetic stage list.
+
+    IT IGNORES TRIGGER SPEED, and that is the engine's behaviour rather than an
+    omission: dropperFly calls wmApplyVelocity and never wmApplySpeed, so wmVX
+    stays at DROP_VX whatever the trigger asked for. The preview showing a legacy
+    Dropper unchanged as the author drags the speed control is the truth.
+
+    THE DESPAWN RULES ARE src/enemy.asm's ORDINARY ONES. dropperFly does not
+    free anything; it flies on past the turning point once the passes are spent
+    and the side edge collects it, which is why wmVX is left pointing outward.
+    """
+    obj = _Obj()
+    obj.log_y = DROP_CENTRE_Y                   # = centre + weave[0]
+    obj.vy = 0
+    if side == "RIGHT":
+        obj.log_x = DROP_ENTRY_RIGHT & 0xFF
+        obj.log_x_hi = (DROP_ENTRY_RIGHT >> 8) & 0xFF
+        obj.vx = -DROP_VX
+    else:
+        obj.log_x = DROP_ENTRY_LEFT & 0xFF
+        obj.log_x_hi = (DROP_ENTRY_LEFT >> 8) & 0xFF
+        obj.vx = DROP_VX
+
+    passes_left = DROP_PASSES
+    phase = 0
+    hold = DROP_PHASE_HOLD
+
+    def snap(frame):
+        return MemberFrame(
+            frame=frame, member=0, spawned=True, active=True, exited=False,
+            x=obj.log_x + 256 * obj.log_x_hi, y=obj.log_y,
+            # NOT A STAGE, AND SAID SO. A legacy Dropper is running no movement
+            # program at all, so a stage index would be an invention; the kind
+            # names the flight instead, which is what the panel shows.
+            stage_index=-1, stage_kind="DROPPER", heading=0,
+            vx=obj.vx, vy=0, acc_x=obj.acc_x, acc_y=0)
+
+    out = [snap(0)]
+    for f in range(1, max_frames):
+        # dropperFly: the ordinary integrator for X, then the weave for Y.
+        _apply_velocity(obj)
+
+        hold -= 1
+        if hold == 0:
+            hold = DROP_PHASE_HOLD
+            phase = (phase + 1) % DROP_PHASES
+        obj.log_y = (DROP_CENTRE_Y + DROP_WEAVE[phase]) & 0xFF
+
+        # HAS IT REACHED THE FAR SIDE? Skipped entirely once the last pass is
+        # spent -- the Dropper is then past the turning point and getting
+        # further past it, so a test that still ran would turn it round on every
+        # frame. src/dropper.asm says the same in its own words.
+        if passes_left:
+            x9 = obj.log_x + 256 * obj.log_x_hi
+            turning = (x9 >= DROP_X_RIGHT) if obj.vx > 0 else (x9 <= DROP_X_LEFT)
+            if turning:
+                passes_left -= 1
+                if passes_left:
+                    obj.vx = -obj.vx
+                    obj.acc_x = 0           # start the turn on a whole pixel
+
+        if _despawned(obj):
+            return out, True
+        out.append(snap(f))
+    return out, False
+
+
 def trace_program(stages, *, x, y, heading, frames):
     """Fly a program with NO lifecycle rules at all: wmEnterStage, then wmTick.
 
@@ -535,7 +665,7 @@ def resolve_program(project, wave):
 
 
 def simulate_wave(project, wave, *, max_frames=None, stages=None,
-                  speed=C.TRIG_SPEED_1X):
+                  speed=C.TRIG_SPEED_1X, member0=None):
     """A complete ordinary wave over its whole useful life.
 
     Frame 0 is the frame the trigger became due, and MEMBER 0 IS SENT ON IT.
@@ -599,10 +729,21 @@ def simulate_wave(project, wave, *, max_frames=None, stages=None,
     spawn_frames = tuple(m * wave.interval for m in range(wave.count))
     budget = max_frames or (spawn_frames[-1] + SIM_FRAME_BUDGET + 1)
 
+    # MEMBER 0 MAY BE SOMEBODY ELSE'S BUSINESS, and only member 0. A Dropper
+    # trigger's member 0 flies either the legacy trajectory or its own movement
+    # program, while members 1..N-1 are ordinary escorts on this definition --
+    # so the override is one callable for one member and the rest of this
+    # routine does not know it happened. THE ESCORTS ARE NOT TOUCHED: their
+    # indices, their spawn frames and their per-member offsets are the ones the
+    # definition gives them, and the member-0 "hole" is not closed or
+    # renumbered. See src/waves.asm's spawn seam.
     paths, exited = [], []
     for m in range(wave.count):
-        life, went = simulate_member(wave, stages, m,
-                                     budget - spawn_frames[m], speed)
+        if m == 0 and member0 is not None:
+            life, went = member0(budget - spawn_frames[0])
+        else:
+            life, went = simulate_member(wave, stages, m,
+                                         budget - spawn_frames[m], speed)
         paths.append(tuple(life))
         exited.append(went)
 
@@ -636,30 +777,98 @@ def wave_by_id(project, wave_id):
     raise SimulationError(f"wave definition {wave_id!r} does not exist")
 
 
-def simulate_trigger(project, index, *, stages=None, max_frames=None):
-    """trigger -> wave definition -> movement program, on the LIVE project.
+def program_by_id(project, program_id):
+    for prog in project.movement_programs:
+        if prog.id == program_id:
+            return prog
+    raise SimulationError(
+        f"movement program {program_id!r} does not exist")
 
-    Refuses a Dropper rather than drawing one: src/waves.asm calls
-    dropperLaunch immediately after wmEnterStage, which overwrites the mode,
-    velocity and timer the wave just armed, so the member never flies the
-    authored path at all. See src/dropper.asm.
+
+def trigger_is_dropper(trig):
+    """Does this trigger's enemy carry the token-dropping behaviour?
+
+    BY BEHAVIOUR, NOT BY NAME. This used to compare against the literal
+    "DROPPER", which meant a roster identity carrying BEHAVIOUR_DROPPER under
+    any other name was previewed as an ordinary wave -- a picture the engine
+    does not fly. validation_v6 has always asked the behaviour; asking the same
+    authority is what makes the preview and the validator agree.
+    """
+    return C.identity_behaviour(trig.species) == C.BEHAVIOUR_DROPPER
+
+
+def simulate_trigger(project, index, *, stages=None, max_frames=None):
+    """trigger -> what it actually sends, on the LIVE project.
+
+    TWO KINDS OF TRIGGER, AND THEY ARE NOW GENUINELY SEPARATE THINGS:
+
+      * an ORDINARY trigger sends its wave definition's formation -- count
+        members at interval frames apart, each on the definition's program;
+      * a DROPPER trigger sends EXACTLY ONE OBJECT, the Dropper, flying either
+        src/dropper.asm's hard-coded trajectory or the movement program the
+        trigger named for it.
+
+    A DROPPER TRIGGER'S DEFINITION IS ITS PLACEMENT, NOT ITS FORMATION. The
+    count, interval and per-member steps are inert: src/waves.asm arms the
+    instance with wvLeft = 1 whatever the definition says, so what remains of
+    the definition is a start position and a launch heading. That is exactly
+    what one object needs, which is why no parallel structure was invented for
+    it -- see reports/simplify-dropper-single-object-trigger.md.
+
+    NO PHANTOM ESCORTS. This used to draw member 0 as the Dropper and members
+    1..N-1 as escorts from the same trigger. There is no such encounter any
+    more: an author who wants company for a Dropper writes a second, ordinary
+    trigger a row away, and that trigger previews independently as its own wave.
+
+    `stages` OVERRIDES THE DEFINITION'S PROGRAM, for previewing a semantic
+    program compiled from a heading no wave uses. It has no effect on a Dropper,
+    whose path is its own.
     """
     if not 0 <= index < len(project.triggers):
         raise SimulationError("no trigger selected")
     trig = project.triggers[index]
-    if trig.species == "DROPPER":
+    wave = wave_by_id(project, trig.wave_definition)
+
+    if not trigger_is_dropper(trig):
+        # THE TRIGGER'S OWN SPEED, which is the whole point of previewing a
+        # trigger rather than its wave: the same definition shown from two
+        # triggers must travel at each one's authored pace.
+        return simulate_wave(project, wave, stages=stages,
+                             max_frames=max_frames, speed=trig.resolved_speed)
+
+    return simulate_dropper(project, trig, wave, max_frames=max_frames)
+
+
+def simulate_dropper(project, trig, wave, *, max_frames=None):
+    """One Dropper, from a Dropper trigger. Always exactly one path.
+
+    THE DEFINITION IS READ FOR PLACEMENT AND HEADING ONLY, and `count` is
+    forced to one here for the same reason src/waves.asm forces wvLeft to one:
+    a definition may be shared with an ordinary trigger that really does send
+    six, and neither the runtime nor this simulator may let that leak into the
+    Dropper.
+    """
+    placed = replace(wave, count=1, interval=1)
+
+    if trig.dropper_is_legacy:
+        # THE LEGACY TRAJECTORY IGNORES THE PLACEMENT ENTIRELY: dropperLaunch
+        # overrides logX/logY from the entry side, so the definition's start
+        # position does not reach it. Drawing it from the definition would show
+        # a path the engine never flies.
+        side = trig.dropper_side
+        return simulate_wave(project, placed, max_frames=max_frames,
+                             speed=trig.resolved_speed,
+                             member0=lambda budget:
+                                 simulate_legacy_dropper(side, budget))
+
+    dprog = program_by_id(project, trig.dropper_program)
+    if not dprog.stages:
         raise SimulationError(
-            "DROPPER triggers are not previewed in this phase.\n\n"
-            "A Dropper is taken off its wave's authored path the instant it "
-            "spawns -- src/dropper.asm installs its own three-pass flight over "
-            "the top of the aperture -- so an ordinary-wave preview would show "
-            "a trajectory the engine never flies.")
-    # THE TRIGGER'S OWN SPEED, which is the whole point of previewing a
-    # trigger rather than its wave: the same definition shown from two
-    # triggers must travel at each one's authored pace.
-    return simulate_wave(project, wave_by_id(project, trig.wave_definition),
-                         stages=stages, max_frames=max_frames,
-                         speed=trig.resolved_speed)
+            f"Dropper movement program {dprog.id!r} has no stages")
+    speed = trig.resolved_speed
+    return simulate_wave(project, placed, max_frames=max_frames, speed=speed,
+                         member0=lambda budget: simulate_member(
+                             placed, dprog.stages, 0, budget, speed))
 
 
 def preview_program(project, program, *, heading=0, start=(160, 40),

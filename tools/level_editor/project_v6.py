@@ -302,9 +302,33 @@ class Trigger:
     # from, so it resolves to 1.00x.
     speed: int = None
 
+    # ---- ...and what its DROPPER flies -----------------------------------
+    # MEMBER 0 ONLY, and only when this trigger's identity carries the
+    # token-dropping behaviour. None means the legacy hard-coded three-pass
+    # flight -- which is what every project written before this field existed
+    # means, and what the engine does with a package that says nothing -- and
+    # anything else is the id of a movement program the Dropper flies on the
+    # ordinary movement engine.
+    #
+    # NOT RESOLVED TO A DEFAULT, UNLIKE THE FIELDS ABOVE. There is no resolved_*
+    # property here because None is not a missing answer standing in for a real
+    # one: it IS the answer, and the legacy flight is a first-class choice the
+    # author can select and return to. Writing a sentinel string into the
+    # document instead would make "Legacy" indistinguishable from a movement
+    # program somebody happened to name that.
+    #
+    # THE ESCORTS ARE UNAFFECTED. Members 1..N-1 fly the wave definition this
+    # trigger references, exactly as they always have; this field never reaches
+    # them. See src/waves.asm's spawn seam.
+    dropper_program: str = None
+
     @property
     def resolved_speed(self):
         return C.TRIG_SPEED_1X if self.speed is None else self.speed
+
+    @property
+    def dropper_is_legacy(self):
+        return self.dropper_program is None
 
     @property
     def resolved_colour(self):
@@ -330,15 +354,29 @@ class Trigger:
         # THE RESOLVED VALUES, always concrete. Saving a document is the point
         # at which the migration becomes permanent: whatever the trigger
         # inherited from its definition is written here as the trigger's own.
-        return {"worldProgress": self.world_progress,
-                "waveDefinition": self.wave_definition,
-                "species": self.species,
-                "fireMask": list(self.fire_mask),
-                "dropperSide": self.dropper_side,
-                "colour": self.resolved_colour,
-                "colourMode": self.resolved_colour_mode,
-                "fireMode": self.resolved_fire_mode,
-                "speed": self.resolved_speed}
+        #
+        # THE DROPPER'S PROGRAM IS THE ONE EXCEPTION, and the asymmetry is
+        # deliberate rather than an oversight. The fields below are written
+        # resolved because their None means "ask my definition" -- an ambiguous
+        # state that MUST be made permanent on save, or a later edit to the
+        # shared definition would retroactively change what this occurrence
+        # meant. dropper_program's None means "the legacy flight": a concrete,
+        # stable answer that no other part of the document can change. There is
+        # nothing to make permanent, so the key is omitted rather than written as
+        # null -- which keeps every project authored before this field existed a
+        # byte-for-byte fixed point through save and reload.
+        out = {"worldProgress": self.world_progress,
+               "waveDefinition": self.wave_definition,
+               "species": self.species,
+               "fireMask": list(self.fire_mask),
+               "dropperSide": self.dropper_side,
+               "colour": self.resolved_colour,
+               "colourMode": self.resolved_colour_mode,
+               "fireMode": self.resolved_fire_mode,
+               "speed": self.resolved_speed}
+        if self.dropper_program is not None:
+            out["dropperProgram"] = self.dropper_program
+        return out
 
     @staticmethod
     def from_dict(raw, path, slots=None):
@@ -363,6 +401,13 @@ class Trigger:
             # change that.
             speed=(_int_or_zero(raw["speed"], C.TRIG_SPEED_1X)
                    if "speed" in raw else None),
+            # ABSENT MEANS THE LEGACY FLIGHT, and so does an explicit null. A
+            # project written before a Dropper could be given a path had exactly
+            # one Dropper trajectory, and opening it must not invent another.
+            # An empty string is treated as absent too: that is what a cleared
+            # combobox would otherwise leave behind.
+            dropper_program=(str(raw["dropperProgram"])
+                             if raw.get("dropperProgram") else None),
         )
 
 

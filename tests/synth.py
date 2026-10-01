@@ -56,6 +56,9 @@ WM_ARC_MIRROR = CD.fmt("WM_ARC_MIRROR")
 WM_EXIT = CD.fmt("WM_EXIT")
 WM_HOLD = CD.fmt("WM_HOLD")
 WM_HEAD_CONT = CD.WM_HEAD_CONT
+# WHAT A DROPPER TRIGGER'S TENTH COLUMN SAYS WHEN IT MEANS "the hard-coded
+# flight". From src/encounter_format.asm for the same reason as everything above.
+TRIG_DROP_LEGACY = CD.fmt("TRIG_DROP_LEGACY")
 
 # The engine's species row offsets. ENEMY_ANIM_STEPS * slot; slot 0 is the
 # level's first authored identity. Named by SLOT, not by any level's choice of
@@ -154,11 +157,16 @@ class Package:
     # -- the trigger columns -----------------------------------------------
     def write_trigger(self, i, *, row=None, definition=None, species=None,
                       fire=None, side=None, colour=None, fire_mode=None,
-                      speed=None):
+                      speed=None, drop_prog=None):
         """Overwrite named fields of trigger `i` in the loaded package.
 
         Only what is passed is written, so a caller can change one column of an
         authored trigger and leave the rest exactly as the level authored it.
+
+        `drop_prog` is a movement-pool BYTE OFFSET -- what install_program
+        returns -- or TRIG_DROP_LEGACY for the hard-coded flight. It is the one
+        column whose harmless value is NOT zero: zero is the first program's
+        offset, so a caller that means "legacy" has to say so.
         """
         if i >= CD.TRIG_SLOTS:
             raise AssertionError(f"trigger {i} is past the package's "
@@ -171,7 +179,8 @@ class Package:
                          (fire, "waveTrigFire"), (side, "waveTrigSide"),
                          (colour, "waveTrigColour"),
                          (fire_mode, "waveTrigFireMode"),
-                         (speed, "waveTrigSpeed")):
+                         (speed, "waveTrigSpeed"),
+                         (drop_prog, "waveTrigDropProg")):
             if val is not None:
                 self._poke_checked(sym[col] + i, val)
 
@@ -202,19 +211,24 @@ class Package:
 
     # -- the whole thing at once -------------------------------------------
     def only_trigger(self, *, row, definition, species=None, fire=0, side=0,
-                     colour=1, fire_mode=0, speed=None):
+                     colour=1, fire_mode=0, speed=None, drop_prog=None):
         """Replace the schedule with ONE synthetic trigger and rewind.
 
         The single most useful fixture: a wave whose row, definition, species,
-        mask, colour, mode and speed are all chosen by the test.
+        mask, colour, mode, speed and Dropper movement are all chosen by the
+        test. `drop_prog` defaults to the legacy flight, which is what a level
+        that says nothing about it means.
         """
         if species is None:
             species = SLOT_ROW[0]
         if speed is None:
             speed = CD.C.TRIG_SPEED_1X
+        if drop_prog is None:
+            drop_prog = TRIG_DROP_LEGACY
         self.write_trigger(0, row=row, definition=definition, species=species,
                            fire=fire, side=side, colour=colour,
-                           fire_mode=fire_mode, speed=speed)
+                           fire_mode=fire_mode, speed=speed,
+                           drop_prog=drop_prog)
         self.set_trigger_count(1)
         self.open_the_approach()
         self.rewind_cursor()

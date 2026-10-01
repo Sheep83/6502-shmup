@@ -250,7 +250,7 @@ def import_wave_definitions(src, programs):
     return out
 
 
-def import_triggers(src, definitions, identities=None):
+def import_triggers(src, definitions, identities=None, programs=None):
     """Every authored column -> v6 Triggers, live entries only.
 
     THE COLUMN LIST IS CHECKED against src/levelpkg.asm at the end, because it
@@ -258,11 +258,17 @@ def import_triggers(src, definitions, identities=None):
     engine, and this reader went on ignoring it -- so a re-import of a level
     authored at 1.50x came back at 1.00x with nothing said. Two rowLo/rowHi
     halves make one column, hence the +1.
+
+    `programs` is the level's movement programs in declaration order, needed to
+    turn a trigger's Dropper-movement INDEX back into a program id. Without it a
+    trigger that authored one comes back as the legacy flight -- which is exactly
+    the silent defaulting the column check above exists to prevent -- so the
+    reader refuses rather than guesses.
     """
     live = src.const("WAVE_TRIGGERS")
     columns = {name: src.list_(name) for name in
                ("trigRow", "trigDef", "trigSpecies", "trigFire", "trigSide",
-                "trigColour", "trigFireMode", "trigSpeed")}
+                "trigColour", "trigFireMode", "trigSpeed", "trigDropProg")}
     if len(columns) + 1 != C.LEVELPKG_TRIG_COLS:
         raise EncounterImportError(
             f"this reader consumes {len(columns) + 1} trigger columns and "
@@ -294,6 +300,7 @@ def import_triggers(src, definitions, identities=None):
                   for i in range(C.ENEMY_SLOTS)}
     side_of = {v: k for k, v in C.DROPPER_SIDES.items()}
     fire_of = {v: k for k, v in C.FIRE_MODES.items()}
+    prog_ids = [p.id for p in (programs or ())]
     out = []
     for i in range(live):                # LIVE ENTRIES ONLY -- see note below
         what = f"trigger {i}"
@@ -329,6 +336,20 @@ def import_triggers(src, definitions, identities=None):
             raise EncounterImportError(
                 f"{what} names movement speed {speed!r}, which is not one of "
                 f"{sorted(C.SPEED_CHOICES)}")
+        # WHAT THIS APPEARANCE'S DROPPER FLIES. TRIG_DROP_LEGACY is the
+        # hard-coded trajectory and comes back as None, which is what the
+        # document records it as; anything else is an index into the level's
+        # movement programs and comes back as that program's id.
+        dp = columns["trigDropProg"][i]
+        if dp == C.TRIG_DROP_LEGACY:
+            drop_prog = None
+        else:
+            if not isinstance(dp, int) or not 0 <= dp < len(prog_ids):
+                raise EncounterImportError(
+                    f"{what} names Dropper movement program index {dp!r}, but "
+                    f"the source declares {len(prog_ids)}")
+            drop_prog = prog_ids[dp]
+
         out.append(Trigger(
             world_progress=row,
             wave_definition=definitions[d_index].id,
@@ -338,7 +359,8 @@ def import_triggers(src, definitions, identities=None):
             colour=colour & C.TRIG_COL_MASK,
             colour_mode=("RANDOM" if colour & C.TRIG_COL_RANDOM else "FIXED"),
             fire_mode=fire_of[fmode],
-            speed=speed))
+            speed=speed,
+            dropper_program=drop_prog))
     return out, authored
 
 
@@ -356,7 +378,8 @@ def read_encounters(src_dir, level_dir=None, identities=None):
     result.movement_programs = import_movement_programs(src)
     result.wave_definitions = import_wave_definitions(src, result.movement_programs)
     result.triggers, authored = import_triggers(src, result.wave_definitions,
-                                                identities=identities)
+                                                identities=identities,
+                                                programs=result.movement_programs)
 
     records = sum(len(p.stages) for p in result.movement_programs)
     result.note(f"{len(result.movement_programs)} movement program(s): "
@@ -468,8 +491,29 @@ def _species_row(name, identities):
     return row
 
 
+def _drop_prog_byte(t, prog_at, identities):
+    """The tenth column's byte for one trigger.
+
+    THE SENTINEL FOR A NON-DROPPER WHATEVER THE FIELD SAYS, matching
+    export_v6.trigger_dropper_program_expr: the runtime reads this column only
+    for a Dropper wave, and the exporter refuses to emit a path a species change
+    left behind. The two encoders have to agree byte for byte or the reference
+    comparison fails for a reason that has nothing to do with the package.
+    """
+    if t.dropper_program is None:
+        return C.TRIG_DROP_LEGACY
+    if C.identity_behaviour(t.species) != C.BEHAVIOUR_DROPPER:
+        return C.TRIG_DROP_LEGACY
+    if t.dropper_program not in prog_at:
+        raise EncounterImportError(
+            f"trigger names Dropper movement program "
+            f"{t.dropper_program!r}, which is not one of "
+            f"{sorted(prog_at)}")
+    return prog_at[t.dropper_program]
+
+
 def reference_encode_trigger_columns(triggers, definitions, slots=None,
-                                    identities=None):
+                                    identities=None, programs=None):
     """Every parallel column, padded to `slots` as src/level_package.asm emits it.
 
     ONE COLUMN PER FIELD, AND THE COUNT IS CHECKED against src/levelpkg.asm at
@@ -482,11 +526,23 @@ def reference_encode_trigger_columns(triggers, definitions, slots=None,
     C.DEFAULT_ENEMY_IDENTITIES, which resolves any identity the level has
     actually chosen -- Space Whisk, say -- to None and then to row 0, silently
     encoding the wrong species. Callers that have the project should pass them.
+
+    `programs` is the level's movement programs in declaration order. The tenth
+    column carries a Dropper's movement program as a BYTE OFFSET into the pool,
+    exactly as src/level_package.asm resolves it through progAt, so the offsets
+    have to be laid out here the same way -- end to end, WM_STAGE_SIZE a record.
+    Without them a trigger that authored a Dropper path cannot be encoded and
+    this refuses rather than emitting the legacy sentinel, which would compare
+    unequal against the real package for a reason nothing would explain.
     """
     slots = C.MAX_TRIGGERS if slots is None else slots
     index_of = {d.id: i for i, d in enumerate(definitions)}
     n = len(triggers)
     _ids = list(identities or C.DEFAULT_ENEMY_IDENTITIES)
+    prog_at, _acc = {}, 0
+    for prog in (programs or ()):
+        prog_at[prog.id] = _acc
+        _acc += len(prog.stages) * C.WM_STAGE_SIZE
     cols = [
         [t.world_progress & 0xFF for t in triggers],
         [(t.world_progress >> 8) & 0xFF for t in triggers],
@@ -508,14 +564,22 @@ def reference_encode_trigger_columns(triggers, definitions, slots=None,
         [C.FIRE_MODES[t.resolved_fire_mode] for t in triggers],
         # ...AND THE NINTH: how fast it crosses the playfield.
         [t.resolved_speed for t in triggers],
+        # ...AND THE TENTH: what this appearance's Dropper flies, as the pool
+        # BYTE OFFSET the package carries rather than the index the generated
+        # source declares.
+        [_drop_prog_byte(t, prog_at, _ids) for t in triggers],
     ]
     if len(cols) != C.LEVELPKG_TRIG_COLS:
         raise AssertionError(
             f"the reference encoder emits {len(cols)} trigger columns and "
             f"src/levelpkg.asm reserves room for {C.LEVELPKG_TRIG_COLS}")
-    # THE PADDING IS PER COLUMN. Every column pads with zero except the speed,
-    # which pads with TRIG_SPEED_1X -- a zero there would be a multiplier of
-    # nothing. src/level_package.asm says the same thing beside the same column.
-    pad = [0] * (len(cols) - 1) + [C.TRIG_SPEED_1X]
+    # THE PADDING IS PER COLUMN. Every column pads with zero except the last
+    # two: the speed pads with TRIG_SPEED_1X, because a zero multiplier is not a
+    # harmless default, and the Dropper movement pads with TRIG_DROP_LEGACY,
+    # because zero there is the FIRST program's offset and would tell the engine
+    # that every unused slot flies it. src/level_package.asm says the same thing
+    # beside the same columns.
+    pad = ([0] * (len(cols) - 2)
+           + [C.TRIG_SPEED_1X, C.TRIG_DROP_LEGACY])
     return bytes(b for col, fill in zip(cols, pad)
                  for b in (col + [fill] * (slots - n)))

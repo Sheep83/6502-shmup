@@ -156,4 +156,18 @@
 // here actually asks for.
 .var trigSpeed    = List().add(TRIG_SPEED_1X, TRIG_SPEED_1X, TRIG_SPEED_1X, TRIG_SPEED_1X, TRIG_SPEED_1X, TRIG_SPEED_1X, TRIG_SPEED_1X)
 
+// WHAT THIS APPEARANCE'S DROPPER FLIES -- TRIG_DROP_LEGACY for the
+// hard-coded three-pass trajectory in src/dropper.asm, or a movement
+// program INDEX for a path the level authored for MEMBER 0. Read only
+// when the species above is SPECIES_DROPPER.
+//
+// AN INDEX HERE, A BYTE OFFSET IN THE PACKAGE: src/level_package.asm
+// emits it through progAt, exactly as it does a wave definition's tenth
+// byte. src/waves.asm flies every authored Dropper path at the speed the
+// trigger naming it asks for.
+//
+// THE ESCORTS ARE NOT AFFECTED. Members 1..N-1 of a Dropper wave fly the
+// wave definition above; this column reaches member 0 alone.
+.var trigDropProg = List().add(TRIG_DROP_LEGACY, TRIG_DROP_LEGACY, TRIG_DROP_LEGACY, TRIG_DROP_LEGACY, TRIG_DROP_LEGACY, TRIG_DROP_LEGACY, TRIG_DROP_LEGACY)
+
 .const WAVE_TRIGGERS          = 7
