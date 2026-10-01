@@ -175,6 +175,9 @@ rrStageLo:    .byte 0                   // scratch: stage row of the row in hand
 rrStageHi:    .byte 0
 rbLo:         .byte 0                   // rowBack's argument and result
 rbHi:         .byte 0
+rgRows:       .byte 0                   // rows regenTick is copying THIS frame:
+                                        // ROWS_PER_TICK, or fewer on the frame
+                                        // that finishes the page
 hudPageHi:    .byte 0                   // high byte of the page the HUD writes to
 
 // The stage row each PAGE's matrix row 0 was regenerated with, indexed by page.
@@ -651,35 +654,64 @@ publishFrame:
 // finishing in seven of the eight frames between coarse steps, still leaving
 // the eighth idle for TURRET_PREPARE_FINE. Only the cost of a row changed.
 // ---------------------------------------------------------------------------
+// ONE BLOCK, NOT FOUR ROWS. A frame's group of rows is CONTIGUOUS in both
+// pages -- row r starts at 40r, so rows r..r+3 are bytes 40r..40r+159 without a
+// gap -- and the source is the same run shifted by one row. So the whole group
+// is a single copy at a constant offset, and the per-row call, loop bookkeeping
+// and address patching are all paid ONCE a frame instead of four times.
+//
+// Verified from the addresses the engine itself patches, not from this listing:
+// every frame's rows form one ascending run with a single constant src-dst
+// delta ($23d8 rebuilding A from B, -$2428 the other way). See
+// reports/regen-contiguous-row-copy.md.
 regenTick:
     lda regenRow
     cmp #SCREEN_ROWS
     bcs !done+
-    ldy #ROWS_PER_TICK
-!loop:
-    tya
-    pha
+
+    // HOW MANY ROWS THIS FRAME: a full group, unless the page ends sooner --
+    // which it does on the last working frame, where a single row is left.
+    lda #SCREEN_ROWS
+    sec
+    sbc regenRow                        // rows still owed, 1..SCREEN_ROWS
+    cmp #ROWS_PER_TICK
+    bcc !have+                          // fewer than a group left: take them all
+    lda #ROWS_PER_TICK
+!have:
+    sta rgRows
+
+    // ROW 0 IS THE ONLY ROW THAT IS NEW, and it is the only one decoded. The
+    // rest of this frame's rows are then one block copy.
     lda regenRow
     bne !copy+
-    jsr renderRow                       // row 0: the one row that is new
-    jmp !stepped+
-!copy:
-    jsr copyRowFromFront                // rows 1..24: already decoded, next door
-!stepped:
-    pla
-    tay
+    jsr renderRow
     inc regenRow
+    dec rgRows
+    beq !done+                          // a one-row group: nothing left to copy
+!copy:
+    jsr copyRowsFromFront
     lda regenRow
-    cmp #SCREEN_ROWS
-    bcs !done+
-    dey
-    bne !loop-
-!done:
+    clc
+    adc rgRows
+    sta regenRow                        // rgRows was clamped, so this cannot
+!done:                                  // overshoot SCREEN_ROWS
     rts
 
 // ---------------------------------------------------------------------------
-// copyRowFromFront — back page row `regenRow` = displayed page row regenRow-1.
-// Entry: regenRow in 1..SCREEN_ROWS-1. Exit: X, Y and A clobbered.
+// copyRowsFromFront — `rgRows` rows of the back page, starting at `regenRow`,
+// taken from the displayed page starting one row higher. ONE contiguous copy.
+//
+// Entry: regenRow in 1..SCREEN_ROWS-1, rgRows in 1..ROWS_PER_TICK, and
+//        regenRow + rgRows <= SCREEN_ROWS. Exit: A, X, Y clobbered.
+//
+// WHY ONE COPY IS THE WHOLE GROUP. Row r of a page begins at 40r, so rows
+// r..r+n-1 occupy bytes 40r..40r+40n-1 with no gap, in BOTH pages; and the
+// source run begins exactly 40 bytes earlier in the other page. One base
+// address each, therefore, for however many rows the frame is doing.
+//
+// THE REGIONS CANNOT OVERLAP, so the copy direction is free. They lie in the
+// two different screen matrices, and the assertion below is that those two do
+// not intersect at all -- not merely that today's addresses happen not to.
 //
 // THE OTHER PAGE'S HIGH BYTE IS ONE EOR. The two matrices are the only two the
 // engine has and their high bytes differ in exactly the bits below, so flipping
@@ -688,45 +720,20 @@ regenTick:
 // ---------------------------------------------------------------------------
 .const PAGE_HI_FLIP = (SCREEN_A >> 8) ^ (SCREEN_B >> 8)
 .if (((SCREEN_A >> 8) ^ PAGE_HI_FLIP) != (SCREEN_B >> 8)) {
-    .error "the two screen pages no longer differ by a single EOR: copyRowFromFront cannot derive the front page"
+    .error "the two screen pages no longer differ by a single EOR: copyRowsFromFront cannot derive the front page"
 }
-
-copyRowFromFront:
-    ldx regenRow
-    lda rowLo,x
-    sta cpDst + 1
-    lda rowHi,x
-    clc
-    adc regenPageHi
-    sta cpDst + 2
-
-    dex                                 // the row ABOVE, in the other page
-    lda rowLo,x
-    sta cpSrc + 1
-    lda regenPageHi                     // flip the PAGE BASE, then add the row:
-    eor #PAGE_HI_FLIP                   // EORing the sum would also work today
-    clc                                 // only because rowHi never leaves the
-    adc rowHi,x                         // two bits that PAGE_HI_FLIP leaves alone
-    sta cpSrc + 2
-
-    // ROLLED, AND THAT IS THE MEASURED CHOICE. Unrolling four bytes an
-    // iteration saves the dey/bpl three times out of four -- about 90 cycles a
-    // row -- but each unrolled copy carries its OWN absolute operand, so the
-    // setup above would have to patch eight addresses instead of two: about 84
-    // cycles. The two cancel, and the rolled form has a quarter of the
-    // self-modified code to get wrong.
-    //
-    // Counting Y DOWN so the loop test is the sign bit rather than a compare,
-    // which is what keeps a 40-byte row at fourteen cycles a byte.
-    ldy #SCREEN_COLS - 1
-!c:
-cpSrc:
-    lda $ffff,y
-cpDst:
-    sta $ffff,y
-    dey
-    bpl !c-
-    rts
+.const SCREEN_BYTES = SCREEN_ROWS * SCREEN_COLS
+.if ((SCREEN_A + SCREEN_BYTES > SCREEN_B) && (SCREEN_B + SCREEN_BYTES > SCREEN_A)) {
+    .error "the two screen matrices overlap: copyRowsFromFront's copy direction is no longer free"
+}
+// The group index lives in one 8-bit register, and the unrolled body consumes
+// four bytes a pass, so both of these are load-bearing rather than decorative.
+.if (SCREEN_COLS * ROWS_PER_TICK > 256) {
+    .error "a row group no longer fits an 8-bit index: copyRowsFromFront needs a 16-bit loop"
+}
+.if ((SCREEN_COLS & 3) != 0) {
+    .error "SCREEN_COLS is not a multiple of four: copyRowsFromFront's unrolled body would overrun the group"
+}
 
 // ===========================================================================
 // renderRow — rebuild screen row `regenRow` of the back page.
@@ -842,3 +849,105 @@ renderBackgroundRow:
 * = $cf00 "screen row table"
 rowLo: .fill SCREEN_ROWS, <(i * 40)
 rowHi: .fill SCREEN_ROWS, >(i * 40)
+
+// ---------------------------------------------------------------------------
+// OUT OF THE SCROLLER SEGMENT, for the same reason rowLo/rowHi are: $4340-$4600
+// has no room left, and this routine does not care where it lives. It is a leaf
+// reached by jsr, it reads two tables by absolute,X and writes the screen by
+// absolute,Y, so its address is immaterial -- the code that needs the room is
+// not.
+//
+// WHERE. src/turrets.asm documents $5800-$63ff as the run the stage map vacated
+// when it left for the level package, CPU-only and outside VIC bank 0, with the
+// turret tables as its first tenant. This is the second, placed at the TOP of
+// that run so the tables keep their growth room beneath it -- and the turret
+// tables' own ceiling has been tightened to $6300 so that growing into this is a
+// build error rather than a silently overwritten routine.
+// ---------------------------------------------------------------------------
+* = $6300 "scroller row copy"
+
+copyRowsFromFront:
+    // DESTINATION: the back page, row regenRow. Four sites share one address --
+    // only the index differs between the unrolled copies -- so this is the same
+    // two bytes written four times, not four addresses computed.
+    ldx regenRow
+    lda rowLo,x
+    sta cpDst0 + 1
+    sta cpDst1 + 1
+    sta cpDst2 + 1
+    sta cpDst3 + 1
+    lda rowHi,x
+    clc
+    adc regenPageHi
+    sta cpDst0 + 2
+    sta cpDst1 + 2
+    sta cpDst2 + 2
+    sta cpDst3 + 2
+
+    // SOURCE: the displayed page, one row higher.
+    dex
+    lda rowLo,x
+    sta cpSrc0 + 1
+    sta cpSrc1 + 1
+    sta cpSrc2 + 1
+    sta cpSrc3 + 1
+    lda regenPageHi                     // flip the PAGE BASE, then add the row:
+    eor #PAGE_HI_FLIP                   // EORing the sum would also work today
+    clc                                 // only because rowHi never leaves the
+    adc rowHi,x                         // two bits that PAGE_HI_FLIP leaves alone
+    sta cpSrc0 + 2
+    sta cpSrc1 + 2
+    sta cpSrc2 + 2
+    sta cpSrc3 + 2
+
+    // FOUR BYTES A PASS. Unrolling is worth doing HERE and was not worth doing
+    // per row: the eight patched addresses above are paid once for the whole
+    // group, where per row they were paid for only forty bytes and cancelled
+    // the saving exactly.
+    //
+    // CPY #$FF, NOT BPL. The obvious `bpl` test is wrong for a group this big:
+    // `ldy #159` already sets the sign bit, so the loop would exit after a
+    // single pass having copied four bytes of a hundred and sixty. The index
+    // runs down to 0 and wraps, and $ff is the only value that means finished.
+    ldx rgRows
+    ldy rgLastByte,x                    // SCREEN_COLS * rgRows - 1
+!c:
+cpSrc0:
+    lda $ffff,y
+cpDst0:
+    sta $ffff,y
+    dey
+cpSrc1:
+    lda $ffff,y
+cpDst1:
+    sta $ffff,y
+    dey
+cpSrc2:
+    lda $ffff,y
+cpDst2:
+    sta $ffff,y
+    dey
+cpSrc3:
+    lda $ffff,y
+cpDst3:
+    sta $ffff,y
+    dey
+    cpy #$ff
+    bne !c-
+    rts
+
+// Indexed by rgRows, so entry 0 exists only to keep the indexing direct.
+// rgRows IS NEVER ZERO HERE: regenTick clamps it to at least one, and the one
+// path that can reduce it -- decoding row 0 first -- branches away rather than
+// calling with nothing to do. There is deliberately no "safe" value in entry 0,
+// because there is none: this loop runs until the index wraps to $ff, so a zero
+// group would copy a whole 256 bytes. The contract is the guard.
+rgLastByte:
+    .byte 0
+    .fill ROWS_PER_TICK, (i + 1) * SCREEN_COLS - 1
+
+rowCopyEnd:
+.if (rowCopyEnd > $6400) {
+    .error "the row copy has grown past the run the terrain map vacated"
+}
+

@@ -359,8 +359,10 @@ turretPulseTable: .byte 1, 2, 7, 2
 }
 turretTablesEnd:
 
-.if (turretTablesEnd > $6400) {
-    .error "the turret tables have grown past the run the terrain map vacated"
+// $6300, NOT $63ff: src/scroll.asm's row copy is the second tenant of this run
+// and sits at the top of it. Growing into it would overwrite executable code.
+.if (turretTablesEnd > $6300) {
+    .error "the turret tables have grown into the scroller's row copy at $6300"
 }
 
 // ===========================================================================

@@ -206,7 +206,69 @@ def fold_laps(mon, near=3):
     return want, laps
 
 
+# ---------------------------------------------------------------------------
+# THE SELF-MODIFIED ADDRESSES, CHECKED STATICALLY
+# ---------------------------------------------------------------------------
+# DELIBERATELY AN IMPLEMENTATION CHECK -- the only one in this file, and it is
+# here because this particular mistake has already been made. The copy is
+# unrolled, so it carries four `lda abs,y` / `sta abs,y` pairs whose operands the
+# setup patches at run time: sixteen bytes. An intermediate version of the
+# routine patched two of eight operands and left the other six reading and
+# writing $ffff.
+#
+# The runtime sections below would catch that too, because the pages would be
+# garbage -- but this catches it in milliseconds and names the operand that was
+# missed, and it is exactly what a future fifth unrolled pair would reintroduce
+# without anyone noticing.
+#
+# Decoded out of the BUILT BINARY rather than parsed from the source, so it sees
+# what the assembler actually emitted.
+def patch_sites():
+    raw = (ROOT / "build" / "shmup.prg").read_bytes()
+    load = raw[0] | (raw[1] << 8)
+    start, stop = sym["copyRowsFromFront"], sym["rgLastByte"]
+    code = raw[start - load + 2: stop - load + 2]
+    # Only the opcodes this routine uses. Anything else means it has been
+    # restructured, and then this check wants revisiting rather than trusting.
+    OPS = {0xAE: 3, 0xAD: 3, 0xBD: 3, 0x8D: 3, 0x18: 1, 0x6D: 3, 0x7D: 3,
+           0xCA: 1, 0x49: 2, 0xBC: 3, 0xB9: 3, 0x99: 3, 0x88: 1, 0xC0: 2,
+           0xD0: 2, 0x60: 1}
+    operands, stores, pairs, unknown = [], [], 0, None
+    i, pc = 0, start
+    while i < len(code):
+        op = code[i]
+        if op not in OPS:
+            unknown = (pc, op)
+            break
+        if op in (0xB9, 0x99):              # lda abs,y / sta abs,y: a copy
+            operands += [pc + 1, pc + 2]
+            pairs += op == 0xB9
+        if op == 0x8D:                      # sta abs: a patch
+            stores.append(code[i + 2] << 8 | code[i + 1])
+        i += OPS[op]
+        pc += OPS[op]
+    return sorted(operands), sorted(stores), pairs, unknown
+
+
+
 def main():
+    operands, stores, pairs, unknown = patch_sites()
+    print("=== the copy's self-modified addresses, decoded from the binary ===")
+    check("the routine decodes cleanly, so this check is reading real code",
+          unknown is None,
+          "every opcode recognised" if unknown is None else
+          f"unknown opcode ${unknown[1]:02x} at ${unknown[0]:04x} -- the routine "
+          f"has been restructured and this check needs revisiting")
+    check("the copy is unrolled, so there is more than one operand to patch",
+          pairs > 1, f"{pairs} lda/sta pairs, {len(operands)} operand bytes")
+    check("EVERY operand byte of EVERY unrolled copy is written by the setup -- "
+          "the mistake that leaves an unrolled copy addressing $ffff",
+          operands == stores and bool(operands),
+          f"{len(stores)} stores cover all {len(operands)} operand bytes"
+          if operands == stores else
+          f"unpatched {[hex(a) for a in sorted(set(operands) - set(stores))]}, "
+          f"stray {[hex(a) for a in sorted(set(stores) - set(operands))]}")
+
     v = None
     try:
         v = Vice(PORT, PRG, boot="exact")
