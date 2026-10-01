@@ -1121,39 +1121,19 @@ bs_batchDone:
     ldx schedNext
     sta schedBatches,x
 
-// ---- widest MID-SCREEN batch ----------------------------------------------
-// Batch 0 is skipped on purpose: see statMaxBatch.
-    lda #0
-    sta statMaxBatch
-    lda #1
-    sta bs_b
-bs_mbLoop:
-    lda bs_b
-    cmp bs_nb
-    bcs bs_mbDone
-    clc
-    adc bs_bbase
-    tay
-    lda batchCount,y
-    cmp statMaxBatch
-    bcc !notBigger+
-    sta statMaxBatch
-!notBigger:
-    inc bs_b
-    jmp bs_mbLoop
-bs_mbDone:
-
-// ---- the COMPLETE $D010 after each batch ----------------------------------
-// One store per batch in the executor, no read-modify-write, no shared-register
-// race. The VALUE is no longer accumulated here: bs_d010cum already holds the
-// complete register contents after every accepted entry, so a batch's value is
-// simply the one belonging to its LAST entry -- one lookup per batch rather
-// than a walk over every entry of every batch.
+// ---- ONE WALK OVER THE BATCHES, doing both jobs -------------------------
+// These were two separate loops over the same range: one for the widest
+// mid-screen batch, one for each batch's complete $D010. Each carried its own
+// compare-against-bs_nb, its own `clc / adc bs_bbase / tay`, its own INC and
+// its own JMP -- about twenty cycles of loop overhead per batch, paid twice for
+// a few cycles of actual work. Measured on the synthetic corpus: 40 + 70 = 110
+// cycles at one batch and 454 + 583 = 1,037 at ten.
 //
-// IT BOTH SETS AND CLEARS. A slot's bit is rewritten from the NEW owner every
-// time, so reusing a physical slot across an MSB change is safe: a stale bit
-// from the previous logical owner cannot survive into the next one.
+// They are one loop now. Nothing about either answer changed: statMaxBatch
+// still ignores batch 0 (see its own note) and batchD010 is still the
+// cumulative value belonging to the batch's LAST entry.
     lda #0
+    sta statMaxBatch
     sta bs_b
 bs_dLoop:
     lda bs_b
@@ -1161,7 +1141,9 @@ bs_dLoop:
     bcs bs_dDone
     clc
     adc bs_bbase
-    tay
+    tay                                 // Y = this batch's record
+
+    // the batch's complete $D010: the cumulative value after its last entry
     lda batchFirst,y
     clc
     adc batchCount,y
@@ -1170,6 +1152,16 @@ bs_dLoop:
     tax                                 // X = last accepted entry of this batch
     lda bs_d010cum,x
     sta batchD010,y
+
+    // the widest MID-SCREEN batch. Batch 0 is skipped on purpose: it is the
+    // handoff block, which is not what statMaxBatch is asking about.
+    lda bs_b
+    beq !skipFirst+
+    lda batchCount,y
+    cmp statMaxBatch
+    bcc !skipFirst+
+    sta statMaxBatch
+!skipFirst:
     inc bs_b
     jmp bs_dLoop
 bs_dDone:

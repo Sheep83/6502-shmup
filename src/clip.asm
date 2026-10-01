@@ -211,10 +211,18 @@ clipMakeScratch:
 
     lda clipBlkLo,x
     sta clipCopyDst + 1
+    sta clipCopyDst2 + 1
+    sta clipCopyDst3 + 1
     sta clipBlankDst + 1
+    sta clipBlankDst2 + 1
+    sta clipBlankDst3 + 1
     lda clipBlkHi,x
     sta clipCopyDst + 2
+    sta clipCopyDst2 + 2
+    sta clipCopyDst3 + 2
     sta clipBlankDst + 2
+    sta clipBlankDst2 + 2
+    sta clipBlankDst3 + 2
     lda clipBlkPtr,x
     pha                                 // the answer, while X is still needed
 
@@ -230,63 +238,115 @@ clipMakeScratch:
     clc
     adc clipBlank
     sta clipSrcRead + 1
+    sta clipSrcRead2 + 1
+    sta clipSrcRead3 + 1
     lda clipSrcHi
     adc #0
     sta clipSrcRead + 2
-    lda clipVis
-    sta clipBlankAt                     // blank the TAIL
+    sta clipSrcRead2 + 2
+    sta clipSrcRead3 + 2
+    // The blanked rows are the TAIL, so the blank run's base is the block plus
+    // the visible bytes. Folding the offset into the ADDRESS rather than into
+    // the starting index is what lets the blank loop count down to zero like
+    // the copy loop does -- see the note at !runs.
+    lda clipBlankDst + 1
+    clc
+    adc clipVis
+    sta clipBlankDst + 1
+    sta clipBlankDst2 + 1
+    sta clipBlankDst3 + 1
+    lda clipBlankDst + 2
+    adc #0
+    sta clipBlankDst + 2
+    sta clipBlankDst2 + 2
+    sta clipBlankDst3 + 2
     jmp !runs+
 
 !bottom:
     // BOTTOM: source stays, destination += blank bytes, blanking is the HEAD
     lda clipSrcLo
     sta clipSrcRead + 1
+    sta clipSrcRead2 + 1
+    sta clipSrcRead3 + 1
     lda clipSrcHi
     sta clipSrcRead + 2
+    sta clipSrcRead2 + 2
+    sta clipSrcRead3 + 2
     lda clipCopyDst + 1
     clc
     adc clipBlank
     sta clipCopyDst + 1
+    sta clipCopyDst2 + 1
+    sta clipCopyDst3 + 1
     lda clipCopyDst + 2
     adc #0
     sta clipCopyDst + 2
-    lda #0
-    sta clipBlankAt
+    sta clipCopyDst2 + 2
+    sta clipCopyDst3 + 2
+    // the blanked rows are the HEAD, so the blank base is the block itself and
+    // nothing needs adding
 
 !runs:
-    // ---- the visible rows -------------------------------------------------
-    ldy #0
-    ldx clipVis
+    // ---- the two runs, ONE SPRITE ROW AT A TIME ---------------------------
+    // THREE BYTES PER ITERATION BECAUSE EVERY COUNT HERE IS A MULTIPLE OF
+    // THREE. Clipping is row-granular and a sprite row is three bytes, so
+    // clipVis and clipBlank can only ever be 3n. Unrolling to the row pays the
+    // loop's branch once per three bytes instead of once per byte.
+    //
+    // AND THE INDEX COUNTS DOWN. The old loops walked up with Y and counted
+    // down a separate X -- `iny / dex / bne`, four cycles of bookkeeping a
+    // byte. Counting Y down from count-1 to -1 and branching on BPL does both
+    // jobs with one `dey`, which is why the second index register disappeared.
+    //
+    // Measured: the copy went 16 cycles a byte to 12, the blank 12 to 8.
+    //
+    // Both runs now start at index zero, which is why the TOP case folds its
+    // tail offset into clipBlankDst above rather than into a starting index.
+    ldy clipVis
     beq !blank+
+    dey
 !copy:
 clipSrcRead:
     lda $ffff,y
 clipCopyDst:
     sta $ffff,y
-    iny
-    dex
-    bne !copy-
+    dey
+clipSrcRead2:
+    lda $ffff,y
+clipCopyDst2:
+    sta $ffff,y
+    dey
+clipSrcRead3:
+    lda $ffff,y
+clipCopyDst3:
+    sta $ffff,y
+    dey
+    bpl !copy-
 
-    // ---- and the rows that are outside the aperture -----------------------
 !blank:
-    ldx clipBlank
+    ldy clipBlank
     beq !done+
-    ldy clipBlankAt
+    dey
     lda #0
 !zero:
 clipBlankDst:
     sta $ffff,y
-    iny
-    dex
-    bne !zero-
+    dey
+clipBlankDst2:
+    sta $ffff,y
+    dey
+clipBlankDst3:
+    sta $ffff,y
+    dey
+    bpl !zero-
 
 !done:
     pla                                 // the scratch block's sprite pointer
     ldx clipSaveX
     ldy clipSaveY
+clipReturn:                             // named so a cycle probe has a symbol
     rts
 
-clipBlankAt: .byte 0
 
 clipCodeEnd:
 .if (clipCodeEnd > $8200) { .error "the clip code has outgrown its $8000 segment" }
