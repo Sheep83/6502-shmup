@@ -4,7 +4,7 @@
   "stage": {
     "metatileRows": 200,
     "metatileCols": 10,
-    "noSpawnRow": 352
+    "noSpawnRow": 700
   },
   "palette": {
     "background": 14,
@@ -13,9 +13,9 @@
     "character": 7
   },
   "enemySlots": [
-    "RING_3",
+    "SPINNY",
     "DROPPER",
-    "SQUARE"
+    "RING_2"
   ],
   "glyphs": {
     "count": 128,
@@ -2368,7 +2368,7 @@
   ],
   "map": [
     [
-      46,
+      3,
       0,
       0,
       0,
@@ -2377,7 +2377,7 @@
       0,
       0,
       0,
-      0
+      3
     ],
     [
       0,
@@ -2668,7 +2668,7 @@
       0
     ],
     [
-      48,
+      3,
       4,
       4,
       0,
@@ -2677,7 +2677,7 @@
       0,
       4,
       4,
-      0
+      3
     ],
     [
       0,
@@ -2953,7 +2953,7 @@
       0,
       0,
       0,
-      0
+      3
     ],
     [
       0,
@@ -2965,31 +2965,31 @@
       27,
       27,
       27,
-      27
+      56
     ],
     [
       0,
       26,
-      0,
+      50,
       0,
       3,
       0,
       0,
       1,
-      0,
-      50
+      45,
+      55
     ],
     [
       0,
       26,
+      52,
       0,
       0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0
+      35,
+      23,
+      23,
+      23,
+      55
     ],
     [
       51,
@@ -3001,7 +3001,7 @@
       52,
       0,
       0,
-      0
+      55
     ],
     [
       0,
@@ -3013,31 +3013,31 @@
       0,
       0,
       2,
-      0
+      55
     ],
     [
       0,
       26,
       0,
       0,
-      47,
+      18,
       0,
       46,
       0,
       0,
-      0
+      55
     ],
     [
       49,
       26,
       52,
       43,
-      0,
-      0,
-      0,
-      3,
-      0,
-      0
+      6,
+      24,
+      37,
+      23,
+      23,
+      55
     ],
     [
       0,
@@ -3049,7 +3049,7 @@
       27,
       27,
       27,
-      27
+      56
     ],
     [
       0,
@@ -3061,7 +3061,7 @@
       47,
       0,
       50,
-      0
+      3
     ],
     [
       0,
@@ -3211,7 +3211,7 @@
       0,
       4,
       0,
-      4,
+      17,
       0,
       0,
       4,
@@ -3222,11 +3222,11 @@
     [
       0,
       10,
+      13,
       5,
-      14,
       5,
       5,
-      14,
+      5,
       5,
       11,
       0
@@ -3234,48 +3234,48 @@
     [
       0,
       4,
-      0,
-      4,
-      0,
-      0,
-      4,
-      0,
-      4,
+      6,
+      24,
+      31,
+      34,
+      25,
+      5,
+      11,
       0
     ],
     [
       47,
       17,
-      0,
-      4,
-      0,
-      0,
-      4,
-      0,
-      17,
+      8,
+      24,
+      32,
+      35,
+      25,
+      5,
+      7,
       0
     ],
     [
       0,
       0,
-      0,
-      4,
-      0,
-      0,
-      4,
-      48,
+      6,
+      24,
+      33,
+      36,
+      25,
+      9,
       0,
       49
     ],
     [
       46,
+      35,
+      25,
+      9,
       0,
-      2,
-      4,
       0,
-      0,
-      4,
-      0,
+      8,
+      7,
       1,
       0
     ],
@@ -3894,7 +3894,7 @@
     [
       0,
       15,
-      0,
+      51,
       0,
       4,
       0,
@@ -3904,7 +3904,7 @@
       0
     ],
     [
-      0,
+      52,
       4,
       0,
       0,
@@ -3955,7 +3955,7 @@
       0,
       0,
       0,
-      0,
+      18,
       0,
       0,
       0,
@@ -3967,9 +3967,9 @@
       0,
       0,
       0,
+      40,
       0,
-      0,
-      0,
+      54,
       0,
       4,
       0,
@@ -3979,11 +3979,11 @@
       47,
       0,
       50,
-      0,
-      0,
-      0,
-      0,
-      4,
+      6,
+      5,
+      5,
+      5,
+      11,
       0,
       0
     ],
@@ -4024,14 +4024,14 @@
       44
     ],
     [
-      19,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      4,
+      57,
+      24,
+      37,
+      25,
+      5,
+      5,
+      5,
+      11,
       0,
       56
     ],
@@ -4770,6 +4770,22 @@
   ],
   "turrets": [
     {
+      "metatileRow": 48,
+      "metatileCol": 8
+    },
+    {
+      "metatileRow": 57,
+      "metatileCol": 8
+    },
+    {
+      "metatileRow": 66,
+      "metatileCol": 5
+    },
+    {
+      "metatileRow": 93,
+      "metatileCol": 4
+    },
+    {
       "metatileRow": 122,
       "metatileCol": 4
     },
@@ -4780,106 +4796,236 @@
     {
       "metatileRow": 145,
       "metatileCol": 8
+    },
+    {
+      "metatileRow": 178,
+      "metatileCol": 4
     }
   ],
   "triggers": [
     {
-      "worldProgress": 20,
-      "waveDefinition": "loop",
-      "species": "RING_3",
-      "fireMask": [
-        0,
-        2
-      ],
-      "dropperSide": "LEFT",
-      "colour": 10,
-      "colourMode": "RANDOM",
-      "fireMode": "AIMED",
-      "speed": 4
-    },
-    {
-      "worldProgress": 52,
-      "waveDefinition": "s",
-      "species": "DROPPER",
-      "fireMask": [
-        1
-      ],
-      "dropperSide": "LEFT",
-      "colour": 3,
-      "colourMode": "FIXED",
-      "fireMode": "DOWN",
-      "speed": 4
-    },
-    {
-      "worldProgress": 90,
-      "waveDefinition": "linger",
-      "species": "RING_3",
-      "fireMask": [
-        0,
-        2
-      ],
-      "dropperSide": "LEFT",
-      "colour": 7,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN",
-      "speed": 4
-    },
-    {
-      "worldProgress": 126,
-      "waveDefinition": "loop",
-      "species": "DROPPER",
-      "fireMask": [],
-      "dropperSide": "RIGHT",
-      "colour": 13,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN",
-      "speed": 4
-    },
-    {
-      "worldProgress": 160,
-      "waveDefinition": "loop_5",
-      "species": "RING_3",
-      "fireMask": [
-        0,
-        2
-      ],
-      "dropperSide": "LEFT",
-      "colour": 13,
-      "colourMode": "RANDOM",
-      "fireMode": "DOWN",
-      "speed": 4
-    },
-    {
-      "worldProgress": 205,
+      "worldProgress": 35,
       "waveDefinition": "dive_4",
-      "species": "RING_3",
+      "species": "SPINNY",
       "fireMask": [
         0,
         1,
-        2,
         3
       ],
       "dropperSide": "LEFT",
       "colour": 1,
       "colourMode": "RANDOM",
-      "fireMode": "DOWN",
-      "speed": 4
+      "fireMode": "AIMED",
+      "speed": 5
     },
     {
-      "worldProgress": 260,
-      "waveDefinition": "up_n_over",
-      "species": "RING_3",
+      "worldProgress": 70,
+      "waveDefinition": "sweep_l",
+      "species": "RING_2",
       "fireMask": [
         0,
-        1,
-        2,
-        4,
-        5
+        2
       ],
       "dropperSide": "LEFT",
       "colour": 1,
       "colourMode": "RANDOM",
       "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 71,
+      "waveDefinition": "sweep_r",
+      "species": "SPINNY",
+      "fireMask": [
+        1
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 110,
+      "waveDefinition": "sweep_l",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 111,
+      "waveDefinition": "loop_5",
+      "species": "SPINNY",
+      "fireMask": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 150,
+      "waveDefinition": "up_n_over_fast",
+      "species": "RING_2",
+      "fireMask": [
+        0,
+        1,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 190,
+      "waveDefinition": "zig_zag_l",
+      "species": "SPINNY",
+      "fireMask": [
+        0,
+        1,
+        3
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "AIMED",
+      "speed": 5
+    },
+    {
+      "worldProgress": 191,
+      "waveDefinition": "sweep_l",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 220,
+      "waveDefinition": "zig_zag_r",
+      "species": "SPINNY",
+      "fireMask": [
+        0,
+        2,
+        4
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "AIMED",
+      "speed": 5
+    },
+    {
+      "worldProgress": 270,
+      "waveDefinition": "sweep_l",
+      "species": "RING_2",
+      "fireMask": [
+        0,
+        1,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 271,
+      "waveDefinition": "sweep_r",
+      "species": "SPINNY",
+      "fireMask": [
+        0,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 320,
+      "waveDefinition": "loop",
+      "species": "SPINNY",
+      "fireMask": [
+        0,
+        1,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 321,
+      "waveDefinition": "loop",
+      "species": "SPINNY",
+      "fireMask": [
+        0,
+        1,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 5
+    },
+    {
+      "worldProgress": 350,
+      "waveDefinition": "sweep_l",
+      "species": "DROPPER",
+      "fireMask": [],
+      "dropperSide": "RIGHT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "DOWN",
+      "speed": 4
+    },
+    {
+      "worldProgress": 365,
+      "waveDefinition": "up_n_over_fast",
+      "species": "RING_2",
+      "fireMask": [
+        0,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "FIXED",
+      "fireMode": "DOWN",
+      "speed": 6
+    },
+    {
+      "worldProgress": 410,
+      "waveDefinition": "s",
+      "species": "SPINNY",
+      "fireMask": [
+        0,
+        1,
+        2
+      ],
+      "dropperSide": "LEFT",
+      "colour": 1,
+      "colourMode": "RANDOM",
+      "fireMode": "AIMED",
       "speed": 4
     }
   ],

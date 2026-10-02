@@ -20,16 +20,16 @@
 // eight different blocks; nothing counts frames at run time.
 // ==========================================================================
 
-.const LVL_SLOT_RING     = 0  // Ring 3, 8 frame(s), $60-$67
-.const LVL_SLOT_DROPPER  = 8  // Dropper, 4 frame(s), $1E-$21
-.const LVL_SLOT_SQUARE   = 12 // Square, 4 frame(s), $27-$2A
+.const LVL_SLOT_RING     = 0  // Spinny Thing, 6 frame(s), $54-$59
+.const LVL_SLOT_DROPPER  = 6  // Dropper, 4 frame(s), $1E-$21
+.const LVL_SLOT_SQUARE   = 10 // Ring 2, 3 frame(s), $41-$43
 
-.const LVL_SPR_BLOCKS = 16   // of 20
+.const LVL_SPR_BLOCKS = 13   // of 20
 
 .const LVL_DROP_ROW  = $08   // DROPPER slot carries the token
 .const LVL_PLAIN_ROW = $00   // RING slot, ordinary behaviour
 
 .var LVL_ANIM = List()
-    .eval LVL_ANIM.add(0).add(1).add(2).add(3).add(4).add(5).add(6).add(7)   // RING: Ring 3
-    .eval LVL_ANIM.add(8).add(9).add(10).add(11).add(11).add(10).add(9).add(8)   // DROPPER: Dropper
-    .eval LVL_ANIM.add(12).add(13).add(14).add(15).add(15).add(14).add(13).add(12)   // SQUARE: Square
+    .eval LVL_ANIM.add(0).add(1).add(2).add(3).add(4).add(5).add(0).add(1)   // RING: Spinny Thing
+    .eval LVL_ANIM.add(6).add(7).add(8).add(9).add(9).add(8).add(7).add(6)   // DROPPER: Dropper
+    .eval LVL_ANIM.add(10).add(11).add(12).add(10).add(11).add(12).add(10).add(11)   // SQUARE: Ring 2

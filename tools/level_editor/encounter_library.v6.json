@@ -179,6 +179,194 @@
           "kind": "EXIT"
         }
       ]
+    },
+    {
+      "id": "up_n_over_fast",
+      "stages": [
+        {
+          "kind": "STRAIGHT",
+          "frames": 75,
+          "vx": 4,
+          "vy": -4
+        },
+        {
+          "kind": "ARC",
+          "steps": 17,
+          "framesPerStep": 4,
+          "entryHeading": 56
+        },
+        {
+          "kind": "EXIT"
+        }
+      ]
+    },
+    {
+      "id": "zig_zag_l",
+      "stages": [
+        {
+          "kind": "STRAIGHT",
+          "frames": 10,
+          "vx": 0,
+          "vy": 6
+        },
+        {
+          "kind": "ARC_MIRROR",
+          "steps": 8,
+          "framesPerStep": 4,
+          "entryHeading": 16
+        },
+        {
+          "kind": "ARC",
+          "steps": 16,
+          "framesPerStep": 4,
+          "entryHeading": "CONT"
+        },
+        {
+          "kind": "ARC_MIRROR",
+          "steps": 16,
+          "framesPerStep": 4,
+          "entryHeading": "CONT"
+        },
+        {
+          "kind": "ARC",
+          "steps": 16,
+          "framesPerStep": 4,
+          "entryHeading": "CONT"
+        },
+        {
+          "kind": "ARC_MIRROR",
+          "steps": 8,
+          "framesPerStep": 4,
+          "entryHeading": "CONT"
+        },
+        {
+          "kind": "EXIT"
+        }
+      ],
+      "segments": [
+        {
+          "kind": "STRAIGHT",
+          "frames": 10,
+          "heading": 16
+        },
+        {
+          "kind": "TURN",
+          "direction": "LEFT",
+          "steps": 8,
+          "rate": 4
+        },
+        {
+          "kind": "TURN",
+          "direction": "RIGHT",
+          "steps": 16,
+          "rate": 4
+        },
+        {
+          "kind": "TURN",
+          "direction": "LEFT",
+          "steps": 16,
+          "rate": 4
+        },
+        {
+          "kind": "TURN",
+          "direction": "RIGHT",
+          "steps": 16,
+          "rate": 4
+        },
+        {
+          "kind": "TURN",
+          "direction": "LEFT",
+          "steps": 8,
+          "rate": 4
+        },
+        {
+          "kind": "EXIT"
+        }
+      ]
+    },
+    {
+      "id": "zig_zag_r",
+      "stages": [
+        {
+          "kind": "STRAIGHT",
+          "frames": 10,
+          "vx": 0,
+          "vy": 6
+        },
+        {
+          "kind": "ARC",
+          "steps": 8,
+          "framesPerStep": 4,
+          "entryHeading": 16
+        },
+        {
+          "kind": "ARC_MIRROR",
+          "steps": 16,
+          "framesPerStep": 4,
+          "entryHeading": "CONT"
+        },
+        {
+          "kind": "ARC",
+          "steps": 16,
+          "framesPerStep": 4,
+          "entryHeading": "CONT"
+        },
+        {
+          "kind": "ARC_MIRROR",
+          "steps": 16,
+          "framesPerStep": 4,
+          "entryHeading": "CONT"
+        },
+        {
+          "kind": "ARC",
+          "steps": 8,
+          "framesPerStep": 4,
+          "entryHeading": "CONT"
+        },
+        {
+          "kind": "EXIT"
+        }
+      ],
+      "segments": [
+        {
+          "kind": "STRAIGHT",
+          "frames": 10,
+          "heading": 16
+        },
+        {
+          "kind": "TURN",
+          "direction": "RIGHT",
+          "steps": 8,
+          "rate": 4
+        },
+        {
+          "kind": "TURN",
+          "direction": "LEFT",
+          "steps": 16,
+          "rate": 4
+        },
+        {
+          "kind": "TURN",
+          "direction": "RIGHT",
+          "steps": 16,
+          "rate": 4
+        },
+        {
+          "kind": "TURN",
+          "direction": "LEFT",
+          "steps": 16,
+          "rate": 4
+        },
+        {
+          "kind": "TURN",
+          "direction": "RIGHT",
+          "steps": 8,
+          "rate": 4
+        },
+        {
+          "kind": "EXIT"
+        }
+      ]
     }
   ],
   "waveDefinitions": [
@@ -269,6 +457,39 @@
       "yStep": 20,
       "heading": 32,
       "movementProgram": "sweep_r"
+    },
+    {
+      "id": "up_n_over_fast",
+      "count": 3,
+      "interval": 40,
+      "startX": 0,
+      "startY": 200,
+      "xStep": 0,
+      "yStep": 0,
+      "heading": 0,
+      "movementProgram": "up_n_over_fast"
+    },
+    {
+      "id": "zig_zag_l",
+      "count": 5,
+      "interval": 5,
+      "startX": 40,
+      "startY": 0,
+      "xStep": 50,
+      "yStep": 0,
+      "heading": 0,
+      "movementProgram": "zig_zag_l"
+    },
+    {
+      "id": "zig_zag_r",
+      "count": 5,
+      "interval": 5,
+      "startX": 70,
+      "startY": 0,
+      "xStep": 50,
+      "yStep": 0,
+      "heading": 0,
+      "movementProgram": "zig_zag_r"
     }
   ]
 }

@@ -15,6 +15,6 @@
 // byte, one bit per turret) and at most one per metatile row (turretAtMetaRow
 // holds a single index). Both are scheduled to be lifted.
 // ==========================================================================
-.const TURRET_TOTAL = 0
-.var turretCols = List()
-.var turretRows = List()
+.const TURRET_TOTAL = 8
+.var turretCols = List().add(17, 33, 33, 17, 17, 21, 33, 33)
+.var turretRows = List().add(713, 581, 553, 489, 373, 265, 229, 193)

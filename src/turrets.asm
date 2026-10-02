@@ -297,6 +297,17 @@ turretGlyphsEnd:
 .if (TURRET_MAX > 127) {
     .error "a turret index must stay positive: turretOverlayRow tests TURRET_NONE with bmi"
 }
+// THE WIDEST SPRITE X AN AUTHORED COLUMN CAN PRODUCE, against the nine bits
+// turretXLo/turretXHi carry and the nine bits a VIC sprite position has.
+//
+// It is written against the column bound the PACKAGE BUILD enforces, not
+// against a number typed here, because the two getting out of step is exactly
+// what let a column-33 turret be authored into a derivation that only worked to
+// column 31. src/level_package.asm refuses col + TRT_BODY_W > SCREEN_COLS, so
+// the largest legal column is SCREEN_COLS - TRT_BODY_W.
+.if (24 + 8 * (LEVELPKG_SCREEN_COLS - LEVELPKG_TRT_BODY_W) > 511) {
+    .error "an authored turret column can produce a sprite X wider than nine bits"
+}
 // The lookup, built by the assembler: start every metatile row at
 // TURRET_NONE, then stamp in each authored turret. Written as a stamping pass
 // rather than a per-row search because a search has to answer "which of the
@@ -585,15 +596,57 @@ turretBuildTables:
 !slot:
     lda LEVELPKG_TRTCOL,x
     sta turretCol,x
-    // the body's left edge in sprite X: 24 + 8c, nine bits
+
+    // ---- the body's left edge in sprite X: 24 + 8c, NINE BITS -------------
+    // THE NINTH BIT CAN COME FROM THE MULTIPLY AS WELL AS FROM THE ADD, and
+    // for nine years of level 1 it never did.
+    //
+    // This was three bare `asl`s, commented "c * 8; c <= 37 so this cannot
+    // carry". The bound is the error: 8 * 32 is 256, so a column of 32 or more
+    // shifts bit 5 of the column OUT of the accumulator and into the carry,
+    // where the following `clc` threw it away. The `lda #0 / adc #0` that
+    // collected "the ninth bit" only ever saw the carry out of `adc #24`.
+    //
+    // WHAT THAT PRODUCED, and why it looked like decoration rather than a bug:
+    // the column is authored once and derived into TWO representations. The
+    // DRAWING path (turretOverlayRow, turretPaintTick) uses turretCol, so the
+    // body appeared in exactly the right place. COMBAT (traceTurretRay) and the
+    // BOLT (the muzzle X below) use turretXLo/turretXHi, so for a column-33
+    // turret they addressed sprite X 32 instead of 288 -- the far left of the
+    // screen. The player's hitscan could not reach a hitbox 256 pixels away
+    // from the body it was aiming at, and the turret's bolt was launched from
+    // the wrong side of the display. Visible, unhittable, and apparently
+    // silent, from one dropped bit. Measured: level 2 authors columns
+    // 17,33,33,17,17,21,33,33 and exactly the four column-33 turrets were
+    // undamageable while the four below column 32 took damage normally.
+    //
+    // IT HID BEHIND THE AUTHORED CONTENT. The package build's own guard allows
+    // any column up to SCREEN_COLS - TRT_BODY_W, i.e. 38, while this derivation
+    // was correct only to 31 -- so the guard positively permitted the columns
+    // the arithmetic got wrong. Level 1 authors 17, 29, 9, 25, 13 and level 3
+    // authors 21, 9; none of them reaches 32, which is why every existing
+    // turret test passed. Level 2 is the first level to place a turret in the
+    // right-hand quarter of the screen.
+    //
+    // A REAL SIXTEEN-BIT SHIFT, then, rather than a bound nobody can check by
+    // eye: the carry out of each `asl` is rolled into the high byte, so the
+    // multiply contributes its own ninth bit and the add contributes any
+    // further carry on top of it. trtTmp is this routine's declared scratch and
+    // is re-initialised a few instructions below for the row derivation.
+    lda #0
+    sta trtTmp                          // the ninth bit of 8c, accumulated
+    lda turretCol,x
     asl
+    rol trtTmp
     asl
-    asl                                 // c * 8; c <= 37 so this cannot carry
+    rol trtTmp
+    asl
+    rol trtTmp
     clc
     adc #24
     sta turretXLo,x
-    lda #0
-    adc #0                              // the ninth bit, from the add above
+    lda trtTmp
+    adc #0                              // ...plus any carry out of the add
     sta turretXHi,x
 
     lda LEVELPKG_TRTROWLO,x

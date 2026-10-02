@@ -25,7 +25,7 @@
 
 .var progs = List()
 
-// --- 0: SWEEP -----------------------------------------------------
+// --- 0: SWEEP_L ---------------------------------------------------
 .eval progs.add(List()
     .add(List().add(WM_STRAIGHT, 34, 6, 0))
     .add(List().add(WM_ARC, 16, 4, 0))
@@ -62,12 +62,48 @@
     .add(List().add(WM_ARC, 16, 4, 56))
     .add(List().add(WM_EXIT, 0, 0, 0)))
 
-.const PROG_SWEEP             = 0
+// --- 6: SWEEP_R ---------------------------------------------------
+.eval progs.add(List()
+    .add(List().add(WM_STRAIGHT, 34, -6, 0))
+    .add(List().add(WM_ARC_MIRROR, 16, 4, 32))
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
+// --- 7: UP_N_OVER_FAST --------------------------------------------
+.eval progs.add(List()
+    .add(List().add(WM_STRAIGHT, 75, 4, -4))
+    .add(List().add(WM_ARC, 17, 4, 56))
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
+// --- 8: ZIG_ZAG_L -------------------------------------------------
+.eval progs.add(List()
+    .add(List().add(WM_STRAIGHT, 10, 0, 6))
+    .add(List().add(WM_ARC_MIRROR, 8, 4, 16))
+    .add(List().add(WM_ARC, 16, 4, WM_HEAD_CONT))
+    .add(List().add(WM_ARC_MIRROR, 16, 4, WM_HEAD_CONT))
+    .add(List().add(WM_ARC, 16, 4, WM_HEAD_CONT))
+    .add(List().add(WM_ARC_MIRROR, 8, 4, WM_HEAD_CONT))
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
+// --- 9: ZIG_ZAG_R -------------------------------------------------
+.eval progs.add(List()
+    .add(List().add(WM_STRAIGHT, 10, 0, 6))
+    .add(List().add(WM_ARC, 8, 4, 16))
+    .add(List().add(WM_ARC_MIRROR, 16, 4, WM_HEAD_CONT))
+    .add(List().add(WM_ARC, 16, 4, WM_HEAD_CONT))
+    .add(List().add(WM_ARC_MIRROR, 16, 4, WM_HEAD_CONT))
+    .add(List().add(WM_ARC, 8, 4, WM_HEAD_CONT))
+    .add(List().add(WM_EXIT, 0, 0, 0)))
+
+.const PROG_SWEEP_L           = 0
 .const PROG_S                 = 1
 .const PROG_LINGER            = 2
 .const PROG_LOOP              = 3
 .const PROG_DIVE_BOMB         = 4
 .const PROG_UP_N_OVER         = 5
+.const PROG_SWEEP_R           = 6
+.const PROG_UP_N_OVER_FAST    = 7
+.const PROG_ZIG_ZAG_L         = 8
+.const PROG_ZIG_ZAG_R         = 9
 
 // Byte offsets of each program's first record, computed rather than
 // authored: a hand-maintained offset is a number that is right until

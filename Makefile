@@ -349,6 +349,7 @@ test: build
 	python3 tests/test_boot.py
 	python3 tests/test_production.py
 	python3 tests/test_turret_regression.py
+	python3 tests/test_turret_column_x.py
 	python3 tests/test_encounter_director.py
 	python3 tests/test_player_ship.py
 	python3 tests/test_level_assets.py
@@ -391,11 +392,11 @@ smoke: build
 	@python3 tests/run_smoke.py
 
 test-fast: build
-	@tools/run_tier.sh test-fast aimed_velocity boot boss_hud_transition clip_scratch enemy_fire heat_cadence lifecycle movement_pool no_spawn_row pickup player_death player_ship
+	@tools/run_tier.sh test-fast aimed_velocity boot boss_hud_transition clip_scratch enemy_fire heat_cadence lifecycle movement_pool no_spawn_row pickup player_death player_ship turret_column_x
 
 # FULL: every suite in the repository.
 test-full: build
-	@tools/run_tier.sh test-full aimed_fire aimed_velocity attrition_inflives bank2_arena boot boss boss_hud_transition campaign clip_scratch dropper_flight ebullet_clipping encounter_director enemy_fire flight_paths heat_cadence ingress_egress level_assets level_identity lifecycle movement_pool no_spawn_row p_economy_colours pickup player_death player_ship production regen_page_shift sfx species_order square_species token_encounter turret_arming turret_regression wave_triggers
+	@tools/run_tier.sh test-full aimed_fire aimed_velocity attrition_inflives bank2_arena boot boss boss_hud_transition campaign clip_scratch dropper_flight ebullet_clipping encounter_director enemy_fire flight_paths heat_cadence ingress_egress level_assets level_identity lifecycle movement_pool no_spawn_row p_economy_colours pickup player_death player_ship production regen_page_shift sfx species_order square_species token_encounter turret_arming turret_column_x turret_regression wave_triggers
 
 # SOAK: the suites whose runtime is UNBOUNDED -- they wait on content-dependent
 # events, so they have been measured from 25s to 2,226s. See the phase-2 report:
@@ -414,6 +415,14 @@ test-no-spawn-row: build
 
 test-movement-pool: build
 	@python3 tests/test_movement_pool.py
+
+# THE INVARIANT, NOT THE CONTENT: every legal authored turret column must
+# derive a correct nine-bit sprite X. See reports/level2-tail-turret-column-x.md
+# -- level 2's column-33 turrets were drawn correctly and fought 256 pixels
+# away, and no existing suite could see it because level 1 authors no column
+# above 29.
+test-turret-column-x: build
+	python3 tests/test_turret_column_x.py
 
 test-turret-regression: build
 	python3 tests/test_turret_regression.py
